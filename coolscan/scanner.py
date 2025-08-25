@@ -10,7 +10,7 @@ from PIL import Image
 import numpy as np
 
 from .device import ScannerDevice
-from .protocol import CoolscanProtocol, ScanParameters, ScanType, StatusType
+from .protocol import CoolscanProtocol, ScanParameters, ScanType, StatusType, WindowDescriptorBlock
 
 
 class CoolscanScanner:
@@ -26,6 +26,11 @@ class CoolscanScanner:
         """Connect to the scanner."""
         try:
             self.protocol = CoolscanProtocol(self.device)
+            
+            # Wait for scanner to be ready
+            print("Waiting for scanner to be ready...")
+            if not self.protocol.scanner_ready():
+                raise RuntimeError("Scanner not ready after timeout")
             
             # Test connection
             if not self.protocol.test_unit_ready():
@@ -158,8 +163,29 @@ class CoolscanScanner:
         try:
             print(f"Starting {scan_type} scan...")
             
-            # Set scan parameters
-            if not self.protocol.set_window(params):
+            # Create WDB from scan parameters
+            wdb = WindowDescriptorBlock()
+            wdb.x_resolution = params.resolution
+            wdb.y_resolution = params.resolution
+            wdb.width = params.x_max if params.x_max > 0 else 2592
+            wdb.length = params.y_max if params.y_max > 0 else 3888
+            wdb.ulx = params.x_min
+            wdb.uly = params.y_min
+            
+            # Set negative/positive mode
+            if params.negative:
+                wdb.negative_dropout = 0x01  # Negative
+            else:
+                wdb.negative_dropout = 0x00  # Positive
+            
+            # Set scan mode
+            if params.preview:
+                wdb.scan_mode = 0x01  # Prescan
+            else:
+                wdb.scan_mode = 0x00  # Normal scan
+            
+            # Set scan parameters using WDB
+            if not self.protocol.set_window_wdb(wdb):
                 raise RuntimeError("Failed to set scan parameters")
             
             # Start scan

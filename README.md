@@ -27,10 +27,12 @@ This tool provides a Python interface to Nikon Coolscan film scanners, supportin
 - Device descriptor reading
 - Basic wake-up sequence (reset + execute)
 - Command parsing and sending
+- **Improved phase checking with retry logic**
+- **Window Descriptor Block (WDB) support**
+- **Enhanced status parsing and error handling**
 
 ### 🔄 In Progress
 - Full USB protocol implementation
-- Status handling and error recovery
 - Image acquisition
 - Scanner control features
 
@@ -39,6 +41,47 @@ This tool provides a Python interface to Nikon Coolscan film scanners, supportin
 - Image scanning and data transfer
 - Scanner settings management
 - Batch processing capabilities
+
+## Recent Improvements
+
+### Phase Checking Fix
+The scanner now includes improved phase checking with retry logic to handle communication timeouts more reliably:
+
+```python
+# New retry-based phase checking
+phase = protocol._check_phase_with_retry(max_retries=3)
+
+# Enhanced scanner ready checking
+ready = protocol.scanner_ready(timeout=30)
+```
+
+### Window Descriptor Block (WDB) Support
+Complete implementation of the 117-byte WDB structure for scan configuration:
+
+```python
+from coolscan.protocol import WindowDescriptorBlock
+
+# Create scan configuration
+wdb = WindowDescriptorBlock()
+wdb.x_resolution = 2700  # DPI
+wdb.y_resolution = 2700
+wdb.width = 2592        # pixels
+wdb.length = 3888       # pixels
+wdb.brightness = 128
+wdb.contrast = 128
+wdb.negative_dropout = 0x01  # Negative film
+
+# Set scan parameters
+protocol.set_window_wdb(wdb)
+```
+
+### Enhanced Status Parsing
+Improved status response parsing with detailed error information:
+
+```python
+status, details = protocol._parse_status(status_data)
+# Returns StatusType and detailed sense information
+```
 
 ## Installation
 
