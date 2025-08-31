@@ -45,6 +45,17 @@ class StatusType(Enum):
     REISSUE = 16
 
 
+# Data type codes from SANE backend
+class DataType(Enum):
+    """Data type codes for READ/SEND commands."""
+    IMAGE_DATA = 0x00
+    LUT = 0x01
+    IMAGE_POSITIONS = 0x88
+    SHADING_DATA = 0xa0
+    USER_REG_GAMMA = 0xc0
+    DEVICE_INTERNAL_INFO = 0xe0
+
+
 @dataclass
 class WindowDescriptorBlock:
     """Window Descriptor Block for scan configuration."""
@@ -217,6 +228,28 @@ class ScanParameters:
     exposure_b: float = 1000.0
 
 
+@dataclass
+class ScannerInfo:
+    """Scanner information from internal info read."""
+    ad_bits: int = 8
+    output_bits: int = 8
+    max_resolution: int = 2700
+    x_max: int = 1151
+    y_max: int = 1727
+    x_max_pixels: int = 2591
+    y_max_pixels: int = 3887
+    current_y: int = 0
+    current_focus: int = 0
+    current_scan_pitch: int = 1
+    auto_feeder: int = 0
+    analog_gamma: int = 0
+    device_errors: List[int] = None
+    
+    def __post_init__(self):
+        if self.device_errors is None:
+            self.device_errors = [0] * 8
+
+
 class CoolscanProtocol:
     """Implements the Coolscan communication protocol."""
     
@@ -225,6 +258,8 @@ class CoolscanProtocol:
         self.interface = device.interface
         self.usb_device = None
         self.scsi_fd = None
+        self.scanner_info = None
+        self.mud = 2700  # Measurement Unit Divisor
         
         if self.interface.value == "usb":
             self._init_usb()
@@ -315,7 +350,7 @@ class CoolscanProtocol:
         return PhaseType.NONE
 
     def _parse_status(self, status_data: bytes) -> Tuple[StatusType, dict]:
-        """Parse 8-byte status response."""
+        """Parse 8-byte status response with comprehensive sense key handling."""
         if len(status_data) != 8:
             return StatusType.ERROR, {}
         
@@ -323,16 +358,38 @@ class CoolscanProtocol:
         sense_asc = status_data[2]
         sense_ascq = status_data[3]
         
-        # Parse status based on sense key
+        # Comprehensive sense key parsing like SANE backend
         if sense_key == 0x00:
             status = StatusType.READY
-        elif sense_key == 0x02:
-            if sense_asc == 0x04:
-                status = StatusType.PROCESSING
-            elif sense_asc == 0x3a:
-                status = StatusType.NO_DOCS
+        elif sense_key == 0x01:
+            # Recovered error
+            if sense_asc == 0x37 and sense_ascq == 0x00:
+                status = StatusType.READY  # Rounded parameter
             else:
                 status = StatusType.ERROR
+        elif sense_key == 0x02:
+            # Not ready
+            if sense_asc == 0x04 and sense_ascq == 0x01:
+                status = StatusType.PROCESSING  # Becoming ready
+            elif sense_asc == 0x3a and sense_ascq == 0x00:
+                status = StatusType.NO_DOCS  # No document
+            else:
+                status = StatusType.ERROR
+        elif sense_key == 0x03:
+            # Medium error
+            status = StatusType.ERROR
+        elif sense_key == 0x04:
+            # Hardware error
+            status = StatusType.ERROR
+        elif sense_key == 0x05:
+            # Illegal request
+            status = StatusType.ERROR
+        elif sense_key == 0x06:
+            # Unit attention
+            status = StatusType.ERROR
+        elif sense_key == 0x0b:
+            # Aborted command
+            status = StatusType.ERROR
         else:
             status = StatusType.ERROR
         
@@ -451,7 +508,7 @@ class CoolscanProtocol:
                 cmd = self._parse_command("12 01") + self._pack_byte(page) + self._parse_command("00") + self._pack_byte(length) + self._parse_command("00")
                 data, status = self._issue_command(cmd, data_in_length=length)
         else:
-            # Standard inquiry
+            # Standard inquiry (hardcoded 36 bytes like SANE)
             cmd = self._parse_command("12 00 00 00") + self._pack_byte(36) + self._parse_command("00")
             data, status = self._issue_command(cmd, data_in_length=36)
         
@@ -461,16 +518,21 @@ class CoolscanProtocol:
             raise RuntimeError(f"INQUIRY failed with status {status}")
     
     def scanner_ready(self, timeout: int = 30) -> bool:
-        """Check if scanner is ready with retry logic."""
+        """Check if scanner is ready with retry logic (like SANE wait_scanner)."""
         start_time = time.time()
-        while time.time() - start_time < timeout:
+        retry_count = 0
+        max_retries = 40  # Like SANE backend
+        
+        while time.time() - start_time < timeout and retry_count < max_retries:
             try:
                 if self.test_unit_ready():
                     return True
-                time.sleep(1)
+                time.sleep(0.5)  # 0.5 second delays like SANE
+                retry_count += 1
             except Exception as e:
                 print(f"Scanner ready check failed: {e}")
-                time.sleep(1)
+                time.sleep(0.5)
+                retry_count += 1
         
         return False
 
@@ -500,16 +562,119 @@ class CoolscanProtocol:
         return False
     
     def reserve_unit(self) -> bool:
-        """Reserve the scanner unit."""
+        """Reserve the scanner unit (like SANE coolscan_grab_scanner)."""
+        print("Reserving unit...")
         cmd = self._parse_command("16 00 00 00 00 00")
         _, status = self._issue_command(cmd)
-        return status == StatusType.READY
+        success = status == StatusType.READY
+        print(f"Unit reservation: {'SUCCESS' if success else 'FAILED'}")
+        return success
     
     def release_unit(self) -> bool:
         """Release the scanner unit."""
+        print("Releasing unit...")
         cmd = self._parse_command("17 00 00 00 00 00")
         _, status = self._issue_command(cmd)
-        return status == StatusType.READY
+        success = status == StatusType.READY
+        print(f"Unit release: {'SUCCESS' if success else 'FAILED'}")
+        return success
+    
+    def mode_sense(self) -> Optional[int]:
+        """Get mode sense data to determine MUD (Measurement Unit Divisor)."""
+        print("Getting mode sense...")
+        cmd = self._parse_command("1a 18 03 00 00 00")
+        data, status = self._issue_command(cmd, data_in_length=64)
+        
+        if status == StatusType.READY and len(data) >= 8:
+            # Extract MUD like SANE backend
+            mud = struct.unpack('>H', data[6:8])[0]
+            print(f"MUD (Measurement Unit Divisor): {mud}")
+            self.mud = mud
+            return mud
+        else:
+            print("Mode sense failed")
+            return None
+    
+    def get_internal_info(self) -> Optional[ScannerInfo]:
+        """Get internal scanner information (like SANE get_internal_info)."""
+        print("Getting internal info...")
+        # READ with datatype 0xe0 for internal info (256 bytes)
+        cmd = bytearray([
+            0x28,  # READ
+            0x00,  # LUN
+            0xe0,  # Data type (internal info)
+            0x00,  # Reserved
+            0x00, 0x00,  # Data type qualifier
+            0x00, 0x00, 0x01,  # Transfer length (256 bytes, big-endian)
+            0x00   # Control byte
+        ])
+        
+        data, status = self._issue_command(bytes(cmd), data_in_length=256)
+        
+        if status == StatusType.READY and len(data) >= 32:
+            info = ScannerInfo()
+            
+            # Parse internal info like SANE backend
+            info.ad_bits = data[0x00]
+            info.output_bits = data[0x01]
+            info.max_resolution = struct.unpack('>H', data[0x02:0x04])[0]
+            info.x_max = struct.unpack('>H', data[0x04:0x06])[0]
+            info.y_max = struct.unpack('>H', data[0x06:0x08])[0]
+            info.x_max_pixels = struct.unpack('>H', data[0x08:0x0a])[0]
+            info.y_max_pixels = struct.unpack('>H', data[0x0a:0x0c])[0]
+            info.current_y = struct.unpack('>H', data[0x10:0x12])[0]
+            info.current_focus = struct.unpack('>H', data[0x12:0x14])[0]
+            info.current_scan_pitch = data[0x14]
+            info.auto_feeder = data[0x1e]
+            info.analog_gamma = data[0x1f]
+            
+            # Device errors
+            for i in range(8):
+                info.device_errors[i] = data[0x40 + i]
+            
+            print(f"Scanner info: {info}")
+            self.scanner_info = info
+            return info
+        else:
+            print("Internal info read failed")
+            return None
+    
+    def object_position(self, auto_feed: int = 0x00) -> bool:
+        """Send OBJECT_POSITION command (like SANE coolscan_object_feed)."""
+        print("Sending object position command...")
+        cmd = bytearray([
+            0x31,  # OBJECT_POSITION
+            0x00,  # Auto feeder function
+            0x00, 0x00, 0x00,  # Count
+            0x00, 0x00, 0x00, 0x00,  # Reserved
+            0x00   # Control byte
+        ])
+        
+        _, status = self._issue_command(bytes(cmd))
+        success = status == StatusType.READY
+        print(f"Object position: {'SUCCESS' if success else 'FAILED'}")
+        return success
+    
+    def send_lut(self, lut_data: bytes) -> bool:
+        """Send LUT data (like SANE send_LUT)."""
+        print("Sending LUT data...")
+        # SEND with datatype 0xc0 for LUT
+        cmd = bytearray([
+            0x2a,  # SEND
+            0x00,  # LUN
+            0xc0,  # Data type (user reg gamma/LUT)
+            0x00, 0x00,  # Data type qualifier
+            0x00, 0x00, 0x00,  # Transfer length (will be set)
+            0x00   # Control byte
+        ])
+        
+        # Set transfer length
+        cmd[6:9] = struct.pack('>L', len(lut_data))[1:4]  # 3 bytes
+        
+        _, status = self._issue_command(bytes(cmd), lut_data)
+        success = status == StatusType.READY
+        print(f"LUT send: {'SUCCESS' if success else 'FAILED'}")
+        return success
     
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
         """Set the scan window parameters using WDB."""
@@ -573,23 +738,35 @@ class CoolscanProtocol:
 
     def start_scan(self, scan_type: ScanType = ScanType.NORMAL) -> bool:
         """Start a scan operation."""
-        # Send scan command
-        if scan_type == ScanType.NORMAL:
-            cmd = self._parse_command("1b 00 00 00 03 00 01 02 03")
-        else:
-            # Handle other scan types
-            cmd = self._parse_command("1b 00 00 00 03 00 01 02 03")
-        
+        print("Starting scan...")
+        # Send scan command (like SANE coolscan_start_scan)
+        cmd = self._parse_command("1b 00 00 00 00 00")
         _, status = self._issue_command(cmd)
-        return status == StatusType.READY
+        success = status == StatusType.READY
+        print(f"Scan start: {'SUCCESS' if success else 'FAILED'}")
+        return success
     
-    def read_scan_data(self, length: int) -> bytes:
-        """Read scan data from the scanner."""
-        # Send READ command
-        cmd = self._parse_command("28 00 00 00 00 00") + self._pack_long(length) + self._parse_command("00")
-        data, status = self._issue_command(cmd, data_in_length=length)
+    def read_scan_data(self, length: int, datatype: DataType = DataType.IMAGE_DATA) -> bytes:
+        """Read scan data from the scanner with proper datatype."""
+        print(f"Reading scan data (datatype: {datatype.name})...")
+        # Send READ command with proper datatype
+        cmd = bytearray([
+            0x28,  # READ
+            0x00,  # LUN
+            datatype.value,  # Data type
+            0x00,  # Reserved
+            0x00, 0x00,  # Data type qualifier
+            0x00, 0x00, 0x00,  # Transfer length (will be set)
+            0x00   # Control byte
+        ])
+        
+        # Set transfer length (3 bytes, big-endian)
+        cmd[6:9] = struct.pack('>L', length)[1:4]
+        
+        data, status = self._issue_command(bytes(cmd), data_in_length=length)
         
         if status == StatusType.READY:
+            print(f"Read {len(data)} bytes successfully")
             return data
         else:
             raise RuntimeError(f"Read scan data failed with status {status}")
@@ -600,9 +777,139 @@ class CoolscanProtocol:
         _, status = self._issue_command(cmd)
         return status == StatusType.READY
     
+    def auto_focus(self) -> bool:
+        """Perform auto focus operation."""
+        print("Performing auto focus...")
+        cmd = bytearray([
+            0xc2,  # AUTO_FOCUS
+            0x00, 0x00, 0x00,  # Reserved
+            0x00,  # Transfer length
+            0x00   # Control byte
+        ])
+        
+        _, status = self._issue_command(bytes(cmd))
+        success = status == StatusType.READY
+        print(f"Auto focus: {'SUCCESS' if success else 'FAILED'}")
+        return success
+    
+    def prescan(self) -> bool:
+        """Perform prescan operation with proper timing."""
+        print("Starting prescan...")
+        
+        # Set window for prescan
+        wdb = WindowDescriptorBlock()
+        wdb.scan_mode = 0x01  # Prescan mode
+        if not self.set_window_wdb(wdb):
+            print("Failed to set prescan window")
+            return False
+        
+        # Start prescan
+        if not self.start_scan():
+            print("Failed to start prescan")
+            return False
+        
+        # Wait 8 seconds like SANE backend
+        print("Waiting 8 seconds for prescan...")
+        time.sleep(8)
+        
+        # Wait for scanner ready
+        if not self.scanner_ready(timeout=30):
+            print("Scanner not ready after prescan")
+            return False
+        
+        print("Prescan completed successfully")
+        return True
+    
+    def initialize_scanner(self) -> bool:
+        """Initialize scanner with full SANE sequence."""
+        print("Initializing scanner with SANE sequence...")
+        
+        try:
+            # 1. Wait for scanner ready
+            if not self.scanner_ready(timeout=30):
+                print("Scanner not ready during initialization")
+                return False
+            
+            # 2. Reserve unit
+            if not self.reserve_unit():
+                print("Failed to reserve unit")
+                return False
+            
+            # 3. Get mode sense for MUD
+            if not self.mode_sense():
+                print("Failed to get mode sense")
+                return False
+            
+            # 4. Get internal info
+            if not self.get_internal_info():
+                print("Failed to get internal info")
+                return False
+            
+            # 5. Release unit
+            if not self.release_unit():
+                print("Failed to release unit")
+                return False
+            
+            print("Scanner initialization completed successfully")
+            return True
+            
+        except Exception as e:
+            print(f"Scanner initialization failed: {e}")
+            return False
+    
+    def perform_scan_sequence(self, params: ScanParameters) -> bool:
+        """Perform complete scan sequence like SANE backend."""
+        print("Performing complete scan sequence...")
+        
+        try:
+            # 1. Wait for scanner ready
+            if not self.scanner_ready(timeout=30):
+                print("Scanner not ready")
+                return False
+            
+            # 2. Reserve unit
+            if not self.reserve_unit():
+                print("Failed to reserve unit")
+                return False
+            
+            # 3. Object feed
+            if not self.object_position():
+                print("Failed object position")
+                return False
+            
+            # 4. Set window parameters
+            if not self.set_window(params):
+                print("Failed to set window")
+                return False
+            
+            # 5. Send LUT (simple linear LUT)
+            lut_data = bytes([i for i in range(256)] * 3)  # R, G, B LUTs
+            if not self.send_lut(lut_data):
+                print("Failed to send LUT")
+                return False
+            
+            # 6. Start scan
+            if not self.start_scan():
+                print("Failed to start scan")
+                return False
+            
+            # 7. Wait for scanner
+            if not self.scanner_ready(timeout=30):
+                print("Scanner not ready after scan start")
+                return False
+            
+            print("Scan sequence completed successfully")
+            return True
+            
+        except Exception as e:
+            print(f"Scan sequence failed: {e}")
+            return False
+        finally:
+            # Always release unit
+            self.release_unit()
+    
     def close(self):
         """Close the connection to the scanner."""
         if self.usb_device:
             usb.util.dispose_resources(self.usb_device)
         # TODO: Close SCSI connection if needed
-

@@ -1,10 +1,10 @@
 # Coolscan Tool
 
-A Python tool for communicating with Nikon Coolscan film scanners via USB and SCSI/Firewire interfaces.
+A Python tool for communicating with Nikon Coolscan film scanners via USB and SCSI/Firewire interfaces, based on the SANE backend implementation.
 
 ## Overview
 
-This tool provides a Python interface to Nikon Coolscan film scanners, supporting both USB and SCSI/Firewire connections. It's designed to be a foundation for scanner control, image acquisition, and device management.
+This tool provides a Python interface to Nikon Coolscan film scanners, supporting both USB and SCSI/Firewire connections. It's designed to be a foundation for scanner control, image acquisition, and device management. The implementation is based on the working SANE backend code, ensuring compatibility and reliability.
 
 ## Supported Scanners
 
@@ -25,38 +25,111 @@ This tool provides a Python interface to Nikon Coolscan film scanners, supportin
 - Scanner detection (USB and SCSI)
 - USB connection establishment
 - Device descriptor reading
-- Basic wake-up sequence (reset + execute)
-- Command parsing and sending
+- **Enhanced SANE-based initialization sequence**
+- **Complete command protocol implementation**
 - **Improved phase checking with retry logic**
 - **Window Descriptor Block (WDB) support**
 - **Enhanced status parsing and error handling**
+- **Unit reservation cycle**
+- **Mode sense for MUD (Measurement Unit Divisor)**
+- **Internal info read with datatype 0xe0**
+- **Object position commands**
+- **LUT sending with datatype 0xc0**
+- **Proper timing (8-second prescan delay)**
+- **Comprehensive sense key parsing**
+- **Enhanced scan sequences**
 
 ### 🔄 In Progress
-- Full USB protocol implementation
-- Image acquisition
-- Scanner control features
+- Full image acquisition
+- Advanced scanner control features
 
 ### 📋 Planned Features
 - SCSI/Firewire protocol implementation
-- Image scanning and data transfer
-- Scanner settings management
 - Batch processing capabilities
+- Advanced image processing
 
-## Recent Improvements
+## Recent Major Improvements (SANE Backend Analysis)
 
-### Phase Checking Fix
-The scanner now includes improved phase checking with retry logic to handle communication timeouts more reliably:
+### Enhanced Initialization Sequence
+The scanner now uses the complete SANE backend initialization sequence:
 
 ```python
-# New retry-based phase checking
-phase = protocol._check_phase_with_retry(max_retries=3)
+# New SANE-based initialization
+scanner = CoolscanScanner(device)
+scanner.connect()  # Includes full SANE sequence
 
-# Enhanced scanner ready checking
-ready = protocol.scanner_ready(timeout=30)
+# Manual initialization steps
+protocol.initialize_scanner()  # Complete SANE sequence
 ```
 
-### Window Descriptor Block (WDB) Support
-Complete implementation of the 117-byte WDB structure for scan configuration:
+### Unit Reservation Cycle
+Proper unit reservation and release cycle as used by SANE:
+
+```python
+# Reserve unit before operations
+protocol.reserve_unit()
+
+# Perform operations
+protocol.set_window_wdb(wdb)
+protocol.start_scan()
+
+# Release unit after operations
+protocol.release_unit()
+```
+
+### Enhanced Command Protocol
+Complete implementation of all SANE backend commands:
+
+```python
+# Mode sense for MUD
+mud = protocol.mode_sense()
+
+# Internal info read
+info = protocol.get_internal_info()
+
+# Object position
+protocol.object_position()
+
+# LUT sending
+protocol.send_lut(lut_data)
+
+# Enhanced scan sequence
+protocol.perform_scan_sequence(params)
+```
+
+### Proper Timing Implementation
+SANE backend timing for reliable operation:
+
+```python
+# 8-second prescan delay
+protocol.prescan()  # Includes 8-second sleep
+
+# Enhanced retry logic
+protocol.scanner_ready(timeout=30)  # Up to 40 retries with 0.5s delays
+```
+
+### Comprehensive Error Handling
+SANE backend error handling with sense key parsing:
+
+```python
+# Enhanced status parsing
+status, details = protocol._parse_status(status_data)
+# Handles all sense keys: 0x00-0x0b with ASC/ASCQ codes
+```
+
+### Enhanced Data Types
+Complete data type implementation from SANE backend:
+
+```python
+from coolscan.protocol import DataType
+
+# Proper datatype codes
+protocol.read_scan_data(length, DataType.IMAGE_DATA)
+protocol.read_scan_data(length, DataType.DEVICE_INTERNAL_INFO)
+```
+
+### Enhanced WDB Support
+Complete WDB implementation with model-specific handling:
 
 ```python
 from coolscan.protocol import WindowDescriptorBlock
@@ -67,20 +140,13 @@ wdb.x_resolution = 2700  # DPI
 wdb.y_resolution = 2700
 wdb.width = 2592        # pixels
 wdb.length = 3888       # pixels
-wdb.brightness = 128
-wdb.contrast = 128
-wdb.negative_dropout = 0x01  # Negative film
+wdb.composition = 0x05  # RGB full
+wdb.bits_per_pixel = 0x08  # 8-bit
+wdb.transfer_mode = 0x02  # Line sequence
+wdb.gamma_selection = 0x03  # Monitor gamma
 
 # Set scan parameters
 protocol.set_window_wdb(wdb)
-```
-
-### Enhanced Status Parsing
-Improved status response parsing with detailed error information:
-
-```python
-status, details = protocol._parse_status(status_data)
-# Returns StatusType and detailed sense information
 ```
 
 ## Installation
@@ -96,167 +162,164 @@ status, details = protocol._parse_status(status_data)
 git clone <repository-url>
 cd coolscan_tool
 
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
 # Install dependencies
 pip install -r requirements.txt
-
-# Run tests
-python3.11 test_detection.py
 ```
 
-## Quick Start
+## Usage
 
-### Basic Scanner Detection
+### Basic Scanner Operations
+
 ```python
+from coolscan.scanner import CoolscanScanner
 from coolscan.device import find_scanners
 
-# Find all available scanners
-scanners = find_scanners()
-for scanner in scanners:
-    print(f"Found: {scanner}")
-```
-
-### Basic Communication
-```python
-from coolscan.device import find_scanners
-from coolscan.protocol import CoolscanProtocol
-
-# Find and connect to scanner
+# Find scanners
 scanners = find_scanners()
 if scanners:
     scanner = scanners[0]
-    protocol = CoolscanProtocol(scanner)
     
-    # Wake up scanner
-    protocol.wake_up()
-    
-    # Get scanner info
-    info = protocol.get_scanner_info()
-    print(f"Scanner: {info}")
+    # Connect with enhanced SANE sequence
+    with CoolscanScanner(scanner) as coolscan:
+        # Get device info
+        info = coolscan.get_device_info()
+        print(f"Scanner: {info}")
+        
+        # Perform prescan
+        coolscan.prescan()
+        
+        # Perform auto focus
+        coolscan.auto_focus()
+        
+        # Scan preview
+        coolscan.scan_preview("preview.png", resolution=270)
+        
+        # Scan full resolution
+        coolscan.scan_full("full_scan.png", resolution=2700)
 ```
 
-## Project Structure
+### Advanced Protocol Operations
 
-```
-coolscan_tool/
-├── README.md                 # This file
-├── requirements.txt          # Python dependencies
-├── coolscan/                 # Main package
-│   ├── __init__.py
-│   ├── device.py            # Scanner detection
-│   ├── protocol.py          # Communication protocol
-│   └── types.py             # Type definitions
-├── docs/                    # Documentation
-│   ├── protocol.md          # Protocol specification
-│   ├── commands.md          # Command reference
-│   └── troubleshooting.md   # Troubleshooting guide
-├── tests/                   # Test files
-│   ├── test_detection.py    # Scanner detection tests
-│   ├── test_protocol.py     # Protocol tests
-│   └── test_coolscan2.py    # Coolscan2-style tests
-└── examples/                # Example scripts
-    ├── basic_scan.py        # Basic scanning example
-    └── scanner_info.py      # Scanner information example
-```
-
-## Usage Examples
-
-### Example 1: Scanner Information
 ```python
-#!/usr/bin/env python3
-from coolscan.device import find_scanners
-from coolscan.protocol import CoolscanProtocol
+from coolscan.protocol import (
+    CoolscanProtocol, WindowDescriptorBlock, 
+    ScanParameters, DataType
+)
 
-def main():
-    scanners = find_scanners()
-    if not scanners:
-        print("No scanners found!")
-        return
-    
-    scanner = scanners[0]
-    print(f"Connecting to: {scanner}")
-    
-    protocol = CoolscanProtocol(scanner)
-    info = protocol.get_scanner_info()
-    print(f"Scanner info: {info}")
+# Direct protocol access
+protocol = CoolscanProtocol(device)
 
-if __name__ == "__main__":
-    main()
+# Initialize scanner
+protocol.initialize_scanner()
+
+# Get scanner capabilities
+info = protocol.get_internal_info()
+print(f"Max resolution: {info.max_resolution}")
+print(f"X max pixels: {info.x_max_pixels}")
+print(f"Y max pixels: {info.y_max_pixels}")
+
+# Perform complete scan sequence
+params = ScanParameters(
+    resolution=2700,
+    preview=False,
+    negative=False,
+    infrared=False
+)
+
+protocol.perform_scan_sequence(params)
 ```
 
-### Example 2: Basic Wake-up Test
+### Enhanced Error Handling
+
 ```python
-#!/usr/bin/env python3
-from coolscan.device import find_scanners
-from coolscan.protocol import CoolscanProtocol
-
-def main():
-    scanners = find_scanners()
-    if not scanners:
-        print("No scanners found!")
-        return
-    
-    scanner = scanners[0]
-    protocol = CoolscanProtocol(scanner)
-    
-    # Test wake-up sequence
-    if protocol.wake_up():
-        print("Scanner woke up successfully!")
-    else:
-        print("Failed to wake up scanner")
-
-if __name__ == "__main__":
-    main()
+# Comprehensive error handling
+try:
+    with CoolscanScanner(scanner) as coolscan:
+        # Operations with automatic error recovery
+        coolscan.prescan()
+        coolscan.scan_full("test.png")
+except Exception as e:
+    print(f"Scanner error: {e}")
+    # Enhanced error details available
 ```
 
-## Development
+## Testing
 
-### Running Tests
+### Run Enhanced Tests
 ```bash
-# Run all tests
-python3.11 -m pytest tests/
+# Test enhanced SANE-based implementation
+python test_sane_enhanced.py
 
-# Run specific test
-python3.11 test_detection.py
-python3.11 test_coolscan2.py
+# Test practical workflow
+python test_practical_enhanced.py
+
+# Compare old vs new implementation
+python test_sane_comparison.py
 ```
 
-### Adding New Scanner Support
-1. Add scanner ID to `device.py`
-2. Implement scanner-specific commands in `protocol.py`
-3. Add tests in `tests/`
-4. Update documentation
+### Test Specific Features
+```bash
+# Test USB communication
+python test_communication_verification.py
+
+# Test with film loaded
+python test_with_film.py
+
+# Test scanner activity
+python test_scanner_activity.py
+```
 
 ## Troubleshooting
 
-### Common Issues
+### USB Permission Issues
+On macOS, you may need elevated permissions for USB access:
 
-**Scanner not detected:**
-- Check USB permissions
-- Ensure scanner is powered on
-- Try different USB ports
-
-**Communication timeouts:**
-- Check scanner power state
-- Try the wake-up sequence
-- Verify USB cable connection
-
-**Permission errors:**
-- On macOS, grant USB access to Terminal/IDE
-- Check system preferences > Security & Privacy
-
-### Debug Mode
-Enable debug output by setting the environment variable:
 ```bash
-export COOLSCAN_DEBUG=1
-python3.11 your_script.py
+# Run with sudo for USB access
+sudo python test_sane_enhanced.py
 ```
+
+### Scanner Not Responding
+The enhanced implementation includes comprehensive error handling:
+
+1. Check scanner power and connections
+2. Verify USB permissions
+3. Try the enhanced initialization sequence
+4. Check for firmware issues
+
+### Communication Timeouts
+The enhanced implementation includes retry logic and proper timing:
+
+- Up to 40 retry attempts with 0.5-second delays
+- 8-second prescan timing
+- Comprehensive phase checking
+
+## Development
+
+### Architecture
+- `coolscan/device.py` - Scanner detection and device management
+- `coolscan/protocol.py` - Enhanced SANE-based communication protocol
+- `coolscan/scanner.py` - High-level scanner operations
+- `examples/` - Usage examples and demonstrations
+
+### Key Improvements
+1. **SANE Backend Analysis** - Based on working SANE implementation
+2. **Complete Command Protocol** - All missing commands implemented
+3. **Enhanced Error Handling** - Comprehensive sense key parsing
+4. **Proper Timing** - SANE backend timing for reliability
+5. **Unit Reservation** - Proper resource management
+6. **Data Type Support** - Complete datatype implementation
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests
+4. Add tests for new functionality
 5. Submit a pull request
 
 ## License
@@ -265,35 +328,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- Based on SANE backend code (`coolscan2.c`, `coolscan3.c`)
-- Inspired by the SANE project's scanner support
-- Thanks to the open source scanner community
-
-## Support
-
-For issues and questions:
-1. Check the troubleshooting guide in `docs/troubleshooting.md`
-2. Review the protocol documentation in `docs/protocol.md`
-3. Open an issue on the project repository
-
-## Roadmap
-
-### Short Term (Next 2-4 weeks)
-- [ ] Complete USB protocol implementation
-- [ ] Add SCSI/Firewire support
-- [ ] Implement basic scanning functionality
-- [ ] Add error recovery mechanisms
-
-### Medium Term (1-3 months)
-- [ ] Full scanner control interface
-- [ ] Image processing capabilities
-- [ ] Batch scanning support
-- [ ] GUI interface
-
-### Long Term (3-6 months)
-- [ ] Advanced image processing
-- [ ] Multi-scanner support
-- [ ] Integration with image editing software
-- [ ] Performance optimizations
-
-
+- Based on the SANE backend implementation for Coolscan scanners
+- Inspired by the working SANE driver code
+- Thanks to the SANE project for the reference implementation

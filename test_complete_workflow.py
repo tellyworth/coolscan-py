@@ -11,9 +11,9 @@ from pathlib import Path
 # Add the coolscan directory to the path
 sys.path.insert(0, str(Path(__file__).parent / "coolscan"))
 
-from device import find_scanners
-from scanner import CoolscanScanner
-from protocol import WindowDescriptorBlock
+from coolscan.device import find_scanners
+from coolscan.scanner import CoolscanScanner
+from coolscan.protocol import WindowDescriptorBlock
 
 
 def test_complete_workflow():
