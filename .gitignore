@@ -182,3 +182,4 @@ cython_debug/
 
 # Reference code
 backends-1.4.0/
+*.pcapng

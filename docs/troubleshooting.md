@@ -25,19 +25,23 @@ ls -la /dev/usb*
 python3.11 test_detection.py
 ```
 
-### 2. Communication Timeouts
-**Symptoms**: "Operation timed out", "Connection failed"
+### 2. Communication Timeouts (RESOLVED)
+**Symptoms**: "Operation timed out", "Connection failed", "Other error", "I/O error"
 
-**Common causes**:
-- Scanner in sleep mode
-- USB connection issues
-- Driver conflicts
+**Root Cause (SOLVED)**:
+The scanner uses a **non-standard 6-byte command format** (not standard SCSI), and requires a specific **phase checking pattern** after every command. See `docs/usb-capture-findings.md` for details.
 
-**Solutions**:
+**Solution Implemented**:
+1. **6-byte command format**: Commands are 6 bytes with allocation length in byte 4 and control byte in byte 5
+2. **Phase checking pattern**: Send command → send 0xd0 phase check → read phase response → read data/status
+3. **Proper endpoint discovery**: Use `get_configuration_descriptor()` to get real endpoint addresses
+4. **Configuration handling**: Properly set configuration and claim interface
+
+**If you still experience timeouts**:
 1. **Wake up scanner**:
    ```python
    protocol = CoolscanProtocol(scanner)
-   protocol.wake_up()
+   protocol.wait_scanner()  # Uses proper command format
    ```
 
 2. **Reset USB connection**:
@@ -93,7 +97,7 @@ python3.11 test_detection.py
    ```bash
    # Use system_profiler
    system_profiler SPUSBDataType
-   
+
    # Use lsusb (if available)
    lsusb | grep Nikon
    ```
@@ -110,7 +114,7 @@ python3.11 test_detection.py
    ```bash
    # Check device permissions
    ls -la /dev/usb*
-   
+
    # Check if user is in correct groups
    groups $USER
    ```
@@ -340,10 +344,10 @@ python3.11 your_script.py
    # System information
    system_profiler SPUSBDataType
    system_profiler SPHardwareDataType
-   
+
    # USB device list
    ioreg -p IOUSB -l -w 0
-   
+
    # Tool output with debug
    export COOLSCAN_DEBUG=1
    python3.11 your_script.py

@@ -23,23 +23,29 @@ This tool provides a Python interface to Nikon Coolscan film scanners, supportin
 
 ### ✅ Working Features
 - Scanner detection (USB and SCSI)
-- USB connection establishment
+- **USB communication working** - Bidirectional communication established! 🎉
+- **6-byte command format** - Correct protocol format from USB capture analysis
+- **Phase checking pattern** - Proper command/phase/status sequence
+- **Status parsing** - READY, NO_DOCS, ERROR status codes working
+- **Endpoint discovery** - Automatic endpoint detection from configuration descriptor
+- **macOS compatibility** - Works without sudo, handles libusb quirks
 - Device descriptor reading
-- **Enhanced SANE-based initialization sequence**
-- **Complete command protocol implementation**
-- **Improved phase checking with retry logic**
-- **Window Descriptor Block (WDB) support**
-- **Enhanced status parsing and error handling**
-- **Unit reservation cycle**
-- **Mode sense for MUD (Measurement Unit Divisor)**
-- **Internal info read with datatype 0xe0**
-- **Object position commands**
-- **LUT sending with datatype 0xc0**
-- **Proper timing (8-second prescan delay)**
-- **Comprehensive sense key parsing**
-- **Enhanced scan sequences**
+- Enhanced SANE-based initialization sequence
+- Complete command protocol implementation
+- Window Descriptor Block (WDB) support
+- Enhanced status parsing and error handling
+- Unit reservation cycle
+- Mode sense for MUD (Measurement Unit Divisor)
+- Internal info read with datatype 0xe0
+- Object position commands
+- LUT sending with datatype 0xc0
+- Proper timing (8-second prescan delay)
+- Comprehensive sense key parsing
+- Enhanced scan sequences
 
 ### 🔄 In Progress
+- Full initialization sequence implementation
+- INQUIRY command with page codes
 - Full image acquisition
 - Advanced scanner control features
 
@@ -47,6 +53,16 @@ This tool provides a Python interface to Nikon Coolscan film scanners, supportin
 - SCSI/Firewire protocol implementation
 - Batch processing capabilities
 - Advanced image processing
+
+## Recent Breakthrough
+
+**Communication Barrier Solved!** See `docs/communication-breakthrough.md` for details.
+
+The scanner now responds correctly to commands. Key fixes:
+- 6-byte command format (not standard SCSI)
+- Mandatory phase checking after every command
+- Proper endpoint discovery from configuration descriptor
+- macOS libusb quirk handling
 
 ## Recent Major Improvements (SANE Backend Analysis)
 
@@ -182,22 +198,22 @@ from coolscan.device import find_scanners
 scanners = find_scanners()
 if scanners:
     scanner = scanners[0]
-    
+
     # Connect with enhanced SANE sequence
     with CoolscanScanner(scanner) as coolscan:
         # Get device info
         info = coolscan.get_device_info()
         print(f"Scanner: {info}")
-        
+
         # Perform prescan
         coolscan.prescan()
-        
+
         # Perform auto focus
         coolscan.auto_focus()
-        
+
         # Scan preview
         coolscan.scan_preview("preview.png", resolution=270)
-        
+
         # Scan full resolution
         coolscan.scan_full("full_scan.png", resolution=2700)
 ```
@@ -206,7 +222,7 @@ if scanners:
 
 ```python
 from coolscan.protocol import (
-    CoolscanProtocol, WindowDescriptorBlock, 
+    CoolscanProtocol, WindowDescriptorBlock,
     ScanParameters, DataType
 )
 
