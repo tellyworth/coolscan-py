@@ -175,10 +175,14 @@ Bytes 4-7: Additional sense information
 ### Scan Sequence (from USB capture)
 
 1. **WRITE commands** (`2a 00 92 00 00 03 00 00 04 00`) - Send window/parameters
+   - Note: WRITE has multiple formats for different purposes
 2. **START_STOP_UNIT** (`1b 00 00 00 03 00`) - Start scan
-3. **READ commands** (`24 00 00 00 00 00 00 00 [len] 80`) - Read scan data
-4. **TEST_UNIT_READY** - Poll for completion
-5. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
+3. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data with datatype codes
+   - Format: 10 bytes, byte 1 contains datatype code (0x8e, 0x8f, 0x8c, 0x87, etc.)
+4. **READ commands** (`24 00 00 00 00 00 00 00 [len_high] [len_low|0x80]`) - Simple read (10 bytes)
+   - Format: 10 bytes, allocation length in bytes 8-9
+5. **TEST_UNIT_READY** - Poll for completion
+6. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
 
 ## Key Differences: SANE vs USB Capture
 

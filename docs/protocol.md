@@ -12,7 +12,7 @@ The Coolscan protocol is based on SCSI commands transmitted over USB or SCSI/Fir
 - **Vendor ID**: 0x04b0 (Nikon)
 - **Product IDs**:
   - 0x4000: LS-40 ED
-  - 0x4001: LS-50 ED  
+  - 0x4001: LS-50 ED
   - 0x4002: LS-5000 ED
 
 ### SCSI/Firewire Interface
@@ -57,10 +57,10 @@ All commands follow this structure:
 - `0x1b`: START STOP UNIT
 - `0x1c`: RECEIVE DIAGNOSTIC RESULTS
 - `0x1d`: SEND DIAGNOSTIC
-- `0x24`: READ
-- `0x25`: READ CAPACITY
-- `0x28`: READ (10)
-- `0x2a`: WRITE (10)
+- `0x24`: READ (10-byte format, simple read)
+- `0x25`: READ CAPACITY (10-byte format, has variants with parameters)
+- `0x28`: READ(10) (10-byte format, with datatype codes for scan data)
+- `0x2a`: WRITE(10) (10-byte format, multiple formats for different purposes)
 - `0xc0`: Vendor-specific command
 - `0xc1`: Vendor-specific command
 - `0xd0`: Phase check
@@ -110,7 +110,7 @@ Status responses are 8 bytes:
 // Load next slide
 e0 00 d1 00 00 00 00 00 0d 00 + 13 bytes data
 
-// Eject loaded medium  
+// Eject loaded medium
 e0 00 d0 00 00 00 00 00 0d 00 + 13 bytes data
 ```
 

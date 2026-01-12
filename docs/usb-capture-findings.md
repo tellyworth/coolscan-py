@@ -144,10 +144,10 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 From the capture (single scan session):
 - **TEST_UNIT_READY (0x00)**: 346 times
 - **Phase check (0xd0)**: 572 times
-- **READ (0x28)**: 172 times
+- **READ(10) (0x28)**: 172 times (with datatype codes)
 - **INQUIRY (0x12)**: 19 times
 - **READ_CAPACITY (0x25)**: 16 times
-- **SCAN (0x24)**: 18 times
+- **READ (0x24)**: 18 times (10-byte format, simple read)
 - **WRITE (0x2a)**: 12 times
 - **START_STOP_UNIT (0x1b)**: 7 times
 
