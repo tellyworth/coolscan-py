@@ -57,6 +57,18 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
   - Byte 4: Action (0x03 = start, 0x04 = stop)
   - Control byte is 0x00
 
+#### WRITE (0x2a) - Send Window Descriptor Block
+- **USB format**: `2a 00 03 [chunk] 01 01 00 [len_low] [len_high] 00` (10 bytes)
+  - Byte 0: 0x2a (WRITE)
+  - Byte 1: 0x00 (LUN)
+  - Byte 2: 0x03 (datatype = window descriptor)
+  - Byte 3: Chunk index (0, 1, 2... for chunks 1, 2, 3...)
+  - Byte 4-5: 0x01 0x01 (fixed)
+  - Byte 6: 0x00 (reserved)
+  - Byte 7-8: Transfer length (little-endian: 0x20 0x00 = 32 bytes)
+  - Byte 9: 0x00 (control)
+  - **Note**: WDB is sent in 32-byte chunks
+
 ## Communication Protocol Pattern
 
 ### Standard Command Sequence (from USB capture)
@@ -65,12 +77,13 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 2. **Send phase check** (0xd0) to endpoint 0x01 (OUT)
 3. **Read phase response** (1 byte) from endpoint 0x82 (IN)
    - `0x01` = Status phase
-   - `0x03` = Data in phase
+   - `0x02` = Data out phase (send data)
+   - `0x03` = Data in phase (read data)
    - `0x04` = Busy phase
-4. **Read data/status** from endpoint 0x82 (IN)
-   - If phase was `0x03`: Read data bytes (allocation length)
-   - Then read 8-byte status
-5. **Read final status** (8 bytes) from endpoint 0x82 (IN)
+4. **Handle phase**:
+   - If phase is `0x02` (Data OUT): Send data, then check phase again (send 0xd0, read phase)
+   - If phase is `0x03` (Data IN): Read data bytes (allocation length)
+5. **Read status** (8 bytes) from endpoint 0x82 (IN)
    - Status byte, sense key, ASC, ASCQ, etc.
 
 ### Phase Checking (from both sources)
@@ -79,6 +92,7 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 - **USB capture**: Shows 572 phase checks in a single scan session
 - **Frequency**: Phase check (0xd0) is sent **after every command**
 - **Critical**: This is mandatory for proper communication
+- **After data transfer**: When phase is 0x02 (Data OUT) and data is sent, check phase again before reading status
 
 ## Initialization Sequence
 
@@ -165,6 +179,35 @@ Bytes 4-7: Additional sense information
 
 ## Scan Operations
 
+### Setting Window Descriptor Block (WDB)
+
+The window is set using a two-step process:
+
+1. **MODE_SELECT (0x15)** - Prepare mode/page
+   - Command: `15 10 00 00 14 00` (6 bytes)
+   - Phase check returns 0x02 (Data OUT)
+   - Send 20 bytes of mode parameters: `000000080000000000000001030600000b540000`
+   - After sending data, check phase again, then read status
+
+2. **WRITE (0x2a)** - Send WDB data in chunks
+   - Command format: `2a 00 03 [chunk_idx] 01 01 00 [length_low] [length_high] 00` (10 bytes)
+     - Byte 2: 0x03 = datatype (window descriptor)
+     - Byte 3: chunk index (0, 1, 2... for chunks 1, 2, 3...)
+     - Byte 4-5: 0x01 0x01 (fixed)
+     - Byte 6: 0x00 (reserved)
+     - Byte 7-8: transfer length (little-endian: 0x20 0x00 = 32 bytes)
+   - WDB is sent in 32-byte chunks
+   - Phase check returns 0x02 (Data OUT)
+   - Send chunk data (32 bytes)
+   - After sending data, check phase again, then read status
+   - Repeat for each chunk
+
+**Example from USB capture:**
+- Chunk 1: `2a000300010100200000` → send 32 bytes
+- Chunk 2: `2a000300020100200000` → send 32 bytes
+- Chunk 3: `2a000300030100200000` → send 32 bytes
+- (continues for all chunks)
+
 ### Prescan Sequence (from SANE)
 
 1. Set window with WDB (scan_mode = 0x01 for prescan)
@@ -174,15 +217,15 @@ Bytes 4-7: Additional sense information
 
 ### Scan Sequence (from USB capture)
 
-1. **WRITE commands** (`2a 00 92 00 00 03 00 00 04 00`) - Send window/parameters
-   - Note: WRITE has multiple formats for different purposes
-2. **START_STOP_UNIT** (`1b 00 00 00 03 00`) - Start scan
-3. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data with datatype codes
+1. **MODE_SELECT + mode params** - Prepare for window setting
+2. **WRITE commands** (`2a 00 03 [chunk] 01 01 00 [len] 00`) - Send WDB in 32-byte chunks
+3. **START_STOP_UNIT** (`1b 00 00 00 03 00`) - Start scan
+4. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data with datatype codes
    - Format: 10 bytes, byte 1 contains datatype code (0x8e, 0x8f, 0x8c, 0x87, etc.)
-4. **READ commands** (`24 00 00 00 00 00 00 00 [len_high] [len_low|0x80]`) - Simple read (10 bytes)
+5. **READ commands** (`24 00 00 00 00 00 00 00 [len_high] [len_low|0x80]`) - Simple read (10 bytes)
    - Format: 10 bytes, allocation length in bytes 8-9
-5. **TEST_UNIT_READY** - Poll for completion
-6. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
+6. **TEST_UNIT_READY** - Poll for completion
+7. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
 
 ## Key Differences: SANE vs USB Capture
 

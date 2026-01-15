@@ -163,6 +163,29 @@ From the capture (single scan session):
 7. **Allocation length in byte 4** - Specifies how many bytes to read
 8. **Control byte in byte 5** - 0x80 for most commands, 0x00 for simple ones (KEY DIFFERENCE from standard SCSI)
 
+## Window Setting Sequence
+
+### MODE_SELECT + WRITE Pattern
+
+From USB capture analysis, setting the window uses a two-step process:
+
+1. **MODE_SELECT (0x15)**
+   - Command: `151000001400` (6 bytes)
+   - Phase check returns 0x02 (Data OUT)
+   - Send 20 bytes: `000000080000000000000001030600000b540000`
+   - Check phase again, then read status
+
+2. **WRITE (0x2a)** - Send WDB in 32-byte chunks
+   - Command format: `2a000300[chunk]010100[length]00` (10 bytes)
+   - Chunk index in byte 3 (0, 1, 2...)
+   - Length bytes 7-8 are little-endian (0x20 0x00 = 32 bytes)
+   - Phase check returns 0x02 (Data OUT)
+   - Send chunk data (32 bytes)
+   - Check phase again, then read status
+   - Repeat for each chunk
+
+**Key Discovery**: WRITE (0x2a) is used for WDB, not SET_WINDOW (0x24). The 0x24 command appears to be for reading, not writing.
+
 ## Implementation Status
 
 ✅ **ALL FIXED** - Communication barrier resolved!
@@ -174,6 +197,8 @@ From the capture (single scan session):
 5. ✅ **INQUIRY implementation** - Supports page codes in byte 1
 6. ✅ **Endpoint discovery** - Using `get_configuration_descriptor()` to get real endpoints
 7. ✅ **Configuration handling** - Properly setting configuration and claiming interface
+8. ✅ **Window setting** - MODE_SELECT + WRITE sequence with 32-byte chunks
+9. ✅ **Phase handling** - Check phase again after sending data in phase 0x02
 
 ## Solution Summary
 

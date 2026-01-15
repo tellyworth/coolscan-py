@@ -727,12 +727,30 @@ class CoolscanProtocol:
                 if hasattr(phase_response, 'tobytes'):
                     phase_response = phase_response.tobytes()
                 phase_byte = phase_response[0] if len(phase_response) > 0 else 0
-                print(f"    Phase response: 0x{phase_byte:02x} ({'Status' if phase_byte == 0x01 else 'Data IN' if phase_byte == 0x03 else 'Unknown'})")
+                phase_name = {
+                    0x01: 'Status',
+                    0x02: 'Data OUT',
+                    0x03: 'Data IN',
+                    0x04: 'Busy'
+                }.get(phase_byte, 'Unknown')
+                print(f"    Phase response: 0x{phase_byte:02x} ({phase_name})")
             except Exception as e:
                 print(f"    ⚠️  Phase response read failed: {e}, continuing anyway")
                 phase_byte = 0x03  # Assume data phase if we can't read phase
 
-            # Step 4: Read data if phase indicates data in
+            # Step 4a: Send data if phase indicates data out (0x02)
+            if phase_byte == 0x02 and len(data_out) > 0:
+                print(f"    Sending data out: {len(data_out)} bytes")
+                try:
+                    self._usb_write_bulk(data_out)
+                    print(f"    Sent {len(data_out)} bytes")
+                    # After sending data, phase transitions to status (0x01)
+                    # Go directly to status read (no phase check needed)
+                    phase_byte = 0x01
+                except Exception as e:
+                    print(f"    ⚠️  Data out failed: {e}")
+
+            # Step 4b: Read data if phase indicates data in (0x03)
             data_in = b''
             if phase_byte == 0x03 and data_in_length > 0:
                 print(f"    Reading data in: {data_in_length} bytes")
@@ -965,22 +983,96 @@ class CoolscanProtocol:
         return success
 
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
-        """Set the scan window parameters using WDB."""
+        """
+        Set the scan window parameters using WDB.
+
+        From USB capture: MODE_SELECT (0x15) is sent first with phase 0x02 (data out),
+        then 20 bytes of mode parameter data are sent. After that, SET_WINDOW (0x24)
+        or WRITE (0x2a) is used to send the WDB data.
+
+        The capture shows:
+        1. MODE_SELECT: 151000001400 (6 bytes)
+        2. Phase check returns 0x02 (data out)
+        3. 20 bytes sent: 000000080000000000000001030600000b540000
+        4. Then SET_WINDOW (0x24) commands with WDB data
+
+        Let's try MODE_SELECT first, then SET_WINDOW.
+        """
         # Convert WDB to bytes
         wdb_data = wdb.to_bytes()
 
-        # Create SET WINDOW command
-        cmd = bytearray([
-            0x24,  # SET WINDOW
-            0x00,  # LUN
-            0x00, 0x00, 0x00, 0x00,  # Reserved
-            len(wdb_data), 0x00, 0x00,  # Transfer length (big-endian)
-            0x00   # Control byte
-        ])
+        # Step 1: MODE_SELECT (0x15) - from capture: 151000001400
+        # Byte 0: 0x15 = MODE_SELECT
+        # Byte 1: 0x10 = page code
+        # Byte 4: 0x14 = 20 decimal (parameter length)
+        # Byte 5: 0x00 = control
+        mode_select_cmd = self._build_6byte_command(0x15, page=0x10, alloc_length=0x14, control=0x00)
 
-        print(f"Setting window with WDB: {wdb_data.hex()}")
-        _, status = self._issue_command(bytes(cmd), wdb_data)
-        return status == StatusType.READY
+        # Mode parameter block (20 bytes) - from capture
+        # The capture shows: 000000080000000000000001030600000b540000
+        # This might be mode-specific parameters
+        mode_params = bytes([0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x00, 0x00, 0x01, 0x03, 0x06, 0x00, 0x00,
+                            0x0b, 0x54, 0x00, 0x00])
+
+        print(f"Setting window with MODE_SELECT + mode params + WDB ({len(wdb_data)} bytes)...")
+
+        # Send MODE_SELECT with mode parameters
+        _, status = self._issue_command(mode_select_cmd, data_out=mode_params)
+        if status != StatusType.READY:
+            print(f"  ⚠️  MODE_SELECT failed: {status}")
+            # Try without MODE_SELECT, just SET_WINDOW
+            print("  Trying SET_WINDOW directly...")
+        else:
+            print("  ✅ MODE_SELECT succeeded")
+
+        # Step 2: WRITE (0x2a) with WDB data in 32-byte chunks
+        # From USB capture: 2a000300010100200000
+        # Format: 2a 00 03 [window_id_high] [window_id_low] 00 01 [length_high] [length_low] 00
+        # Byte 2: 0x03 = datatype (window descriptor)
+        # Byte 3-4: window ID (0x0100 = window 1, big-endian)
+        # Byte 5: 0x00 (reserved)
+        # Byte 6: 0x01 (reserved? from capture)
+        # Byte 7-8: transfer length (0x0020 = 32 bytes per chunk)
+
+        chunk_size = 32
+
+        # Send WDB in 32-byte chunks
+        # From capture: 2a000300010100200000
+        # Breaking down: 2a 00 03 00 01 01 00 20 00 00
+        # Byte 3: 0x00 (chunk 0 for first chunk)
+        # Byte 4: 0x01 (fixed)
+        # Byte 5: 0x01 (fixed)
+        # Byte 6: 0x00 (reserved)
+        # Byte 7: 0x20 (length low = 32)
+        # Byte 8: 0x00 (length high)
+        # So length is little-endian: 0x20 0x00 = 32
+        for chunk_idx, offset in enumerate(range(0, len(wdb_data), chunk_size)):
+            chunk = wdb_data[offset:offset + chunk_size]
+            chunk_length = len(chunk)
+
+            # WRITE command (10 bytes) - length bytes are little-endian!
+            cmd = struct.pack('BBBBBBBBBB',
+                0x2a,  # WRITE(10)
+                0x00,  # LUN
+                0x03,  # Datatype (0x03 = window descriptor)
+                chunk_idx,  # Chunk index (0, 1, 2...)
+                0x01,  # Fixed (from capture)
+                0x01,  # Fixed (from capture)
+                0x00,  # Reserved
+                chunk_length & 0xff,          # Transfer length low byte (little-endian!)
+                (chunk_length >> 8) & 0xff,  # Transfer length high byte (little-endian!)
+                0x00   # Control byte
+            )
+
+            print(f"  Sending WDB chunk {offset//chunk_size + 1} ({chunk_length} bytes)...")
+            _, status = self._issue_command(cmd, data_out=chunk)
+            if status != StatusType.READY:
+                print(f"  ⚠️  WRITE chunk failed: {status}")
+                return False
+
+        print("  ✅ All WDB chunks sent successfully")
+        return True
 
     def set_window(self, params: ScanParameters, scan_type: ScanType = ScanType.NORMAL) -> bool:
         """Set the scan window parameters (legacy method)."""
@@ -1025,33 +1117,48 @@ class CoolscanProtocol:
         return None
 
     def start_scan(self, scan_type: ScanType = ScanType.NORMAL) -> bool:
-        """Start a scan operation."""
+        """
+        Start a scan operation.
+
+        Format from USB capture: 1b 00 00 00 03 00 (6 bytes)
+        Byte 4: 0x03 = start, 0x04 = stop
+        """
         print("Starting scan...")
-        # Send scan command (like SANE coolscan_start_scan)
-        cmd = self._parse_command("1b 00 00 00 00 00")
+        # Format: 1b 00 00 00 03 00 (START_STOP_UNIT with start action)
+        cmd = self._build_6byte_command(0x1b, param3=0x03, control=0x00)
         _, status = self._issue_command(cmd)
         success = status == StatusType.READY
         print(f"Scan start: {'SUCCESS' if success else 'FAILED'}")
         return success
 
     def read_scan_data(self, length: int, datatype: DataType = DataType.IMAGE_DATA) -> bytes:
-        """Read scan data from the scanner with proper datatype."""
-        print(f"Reading scan data (datatype: {datatype.name})...")
-        # Send READ command with proper datatype
-        cmd = bytearray([
-            0x28,  # READ
-            0x00,  # LUN
-            datatype.value,  # Data type
+        """
+        Read scan data from the scanner with proper datatype.
+
+        Format from USB capture: 24 00 00 00 00 00 00 00 3a 80 (10 bytes)
+        This is READ command (0x24) with allocation length 0x3a (58 bytes)
+        Bytes 8-9: Allocation length (big-endian, 2 bytes), byte 9 has 0x80 control bit
+        """
+        print(f"Reading scan data (datatype: {datatype.name}, length: {length})...")
+        # Format: 24 00 00 00 00 00 00 00 [length_high] [length_low|0x80]
+        # From capture: 24000000000000003a80 = 24 00 00 00 00 00 00 00 3a 80
+        # Bytes 8-9: Allocation length (big-endian, 2 bytes)
+        length_high = (length >> 8) & 0xff
+        length_low = length & 0xff
+        cmd = struct.pack('BBBBBBBBBB',
+            0x24,  # READ command
             0x00,  # Reserved
-            0x00, 0x00,  # Data type qualifier
-            0x00, 0x00, 0x00,  # Transfer length (will be set)
-            0x00   # Control byte
-        ])
+            0x00,  # Reserved
+            0x00,  # Reserved
+            0x00,  # Reserved
+            0x00,  # Reserved
+            0x00,  # Reserved
+            0x00,  # Reserved
+            length_high,  # Allocation length high byte
+            length_low | 0x80  # Allocation length low byte | control bit
+        )
 
-        # Set transfer length (3 bytes, big-endian)
-        cmd[6:9] = struct.pack('>L', length)[1:4]
-
-        data, status = self._issue_command(bytes(cmd), data_in_length=length)
+        data, status = self._issue_command(cmd, data_in_length=length)
 
         if status == StatusType.READY:
             print(f"Read {len(data)} bytes successfully")
@@ -1108,41 +1215,117 @@ class CoolscanProtocol:
         print("Prescan completed successfully")
         return True
 
+    def read_capacity(self) -> Optional[dict]:
+        """
+        Read capacity information (READ_CAPACITY command).
+
+        Format from USB capture: 25 00 00 00 00 00 00 00 3a 80 (10 bytes)
+        """
+        print("Reading capacity...")
+        try:
+            # READ_CAPACITY is 10 bytes: 25 00 00 00 00 00 00 00 3a 80
+            # Byte 0: 0x25 = READ_CAPACITY
+            # Bytes 1-8: Parameters
+            # Byte 9: 0x80 = Control byte
+            cmd = struct.pack('BBBBBBBBBB', 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3a, 0x80)
+            data, status = self._issue_command(cmd, data_in_length=58)  # 58 bytes response
+
+            if status == StatusType.READY and len(data) >= 58:
+                # Parse capacity data
+                # Response format from capture: 01 00 00 00 00 00 00 32 00 00 0b 54 0b 54 00 00...
+                return {
+                    'status': data[0],
+                    'capacity': struct.unpack('>Q', data[1:9])[0] if len(data) >= 9 else 0,
+                    'block_size': struct.unpack('>I', data[9:13])[0] if len(data) >= 13 else 0,
+                    'raw_data': data.hex()
+                }
+            else:
+                print(f"  ⚠️  READ_CAPACITY failed: status={status}, data_len={len(data) if data else 0}")
+                return None
+        except Exception as e:
+            print(f"  ❌ READ_CAPACITY error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def initialize_scanner(self) -> bool:
-        """Initialize scanner with full SANE sequence."""
-        print("Initializing scanner with SANE sequence...")
+        """
+        Initialize scanner with full sequence from USB capture analysis.
+
+        Sequence:
+        1. INQUIRY (standard) - 36 bytes
+        2. TEST_UNIT_READY (multiple times)
+        3. INQUIRY pages (0x01, 0xd1, 0xc1, 0xe1, 0xf0, 0xf8)
+        4. RESERVE_UNIT
+        5. READ_CAPACITY
+        """
+        print("Initializing scanner with USB capture sequence...")
 
         try:
-            # 1. Wait for scanner ready
-            if not self.scanner_ready(timeout=30):
-                print("Scanner not ready during initialization")
-                return False
+            # 1. Standard INQUIRY (36 bytes)
+            print("\n1. Standard INQUIRY...")
+            try:
+                inquiry_data = self.inquiry(page=-1)
+                if inquiry_data and len(inquiry_data) >= 36:
+                    # Extract device identification
+                    vendor = inquiry_data[8:16].decode('ascii', errors='ignore').strip()
+                    product = inquiry_data[16:32].decode('ascii', errors='ignore').strip()
+                    revision = inquiry_data[32:36].decode('ascii', errors='ignore').strip()
+                    print(f"  ✅ Device: {vendor} {product} {revision}")
+            except Exception as e:
+                print(f"  ⚠️  Standard INQUIRY failed: {e}")
 
-            # 2. Reserve unit
+            # 2. Wait for scanner ready (multiple TEST_UNIT_READY)
+            print("\n2. Waiting for scanner ready...")
+            if not self.wait_scanner(max_attempts=10, delay=0.5):
+                print("  ⚠️  Scanner not ready, continuing anyway...")
+
+            # 3. INQUIRY pages (two-step: get length, then full data)
+            pages = [
+                (0x01, "Page 0x01 (capabilities)"),
+                (0xd1, "Page 0xd1 (MUD info)"),
+                (0xc1, "Page 0xc1 (configuration)"),
+                (0xe1, "Page 0xe1"),
+                (0xf0, "Page 0xf0"),
+                (0xf8, "Page 0xf8"),
+            ]
+
+            print("\n3. Reading INQUIRY pages...")
+            for page, description in pages:
+                try:
+                    print(f"  {description}...")
+                    data = self.inquiry(page=page)
+                    if data:
+                        print(f"    ✅ Got {len(data)} bytes")
+                        # Store MUD if this is page 0xd1
+                        if page == 0xd1 and len(data) >= 28:
+                            # Extract MUD from page 0xd1 data
+                            # Format from capture: 06 d1 00 18 07 42 02 46...
+                            # MUD might be in the data
+                            pass
+                except Exception as e:
+                    print(f"    ⚠️  Page 0x{page:02x} failed: {e}")
+
+            # 4. RESERVE_UNIT
+            print("\n4. Reserving unit...")
             if not self.reserve_unit():
-                print("Failed to reserve unit")
-                return False
+                print("  ⚠️  Failed to reserve unit, continuing anyway...")
 
-            # 3. Get mode sense for MUD
-            if not self.mode_sense():
-                print("Failed to get mode sense")
-                return False
+            # 5. READ_CAPACITY
+            print("\n5. Reading capacity...")
+            capacity = self.read_capacity()
+            if capacity:
+                print(f"  ✅ Capacity info retrieved")
+            else:
+                print(f"  ⚠️  READ_CAPACITY failed, continuing anyway...")
 
-            # 4. Get internal info
-            if not self.get_internal_info():
-                print("Failed to get internal info")
-                return False
-
-            # 5. Release unit
-            if not self.release_unit():
-                print("Failed to release unit")
-                return False
-
-            print("Scanner initialization completed successfully")
+            print("\n✅ Scanner initialization completed")
             return True
 
         except Exception as e:
-            print(f"Scanner initialization failed: {e}")
+            print(f"❌ Scanner initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def perform_scan_sequence(self, params: ScanParameters) -> bool:
