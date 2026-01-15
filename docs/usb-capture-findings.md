@@ -144,21 +144,24 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 From the capture (single scan session):
 - **TEST_UNIT_READY (0x00)**: 346 times
 - **Phase check (0xd0)**: 572 times
-- **READ (0x28)**: 172 times
+- **READ(10) (0x28)**: 172 times (with datatype codes)
 - **INQUIRY (0x12)**: 19 times
 - **READ_CAPACITY (0x25)**: 16 times
-- **SCAN (0x24)**: 18 times
+- **READ (0x24)**: 18 times (10-byte format, simple read)
 - **WRITE (0x2a)**: 12 times
 - **START_STOP_UNIT (0x1b)**: 7 times
 
 ## Key Insights
 
-1. **Command format is NOT standard SCSI** - It's a 6-byte format specific to this USB implementation
-2. **Phase checking is mandatory** - Must check phase after every command
-3. **TEST_UNIT_READY is sent frequently** - Used to poll scanner status
-4. **INQUIRY with page codes** - Used to read different configuration pages
-5. **Allocation length in byte 4** - Specifies how many bytes to read
-6. **Control byte in byte 5** - 0x80 for most commands, 0x00 for simple ones
+1. **Command format is NOT standard SCSI** - It's a 6-byte format specific to the scanner's USB protocol (vendor-specific, not PyUSB's format)
+2. **SANE's USB layer translates commands** - SANE backend shows standard SCSI, but `sanei_usb_*` functions translate to USB-specific format
+3. **PyUSB has no translation layer** - We must send commands in the exact format the scanner expects
+4. **Future: Translation layer planned** - See `docs/refactoring-translation-layer.md` for plan to add SCSI→USB translation for future SCSI/Firewire support
+4. **Phase checking is mandatory** - Must check phase after every command
+5. **TEST_UNIT_READY is sent frequently** - Used to poll scanner status
+6. **INQUIRY with page codes** - Used to read different configuration pages
+7. **Allocation length in byte 4** - Specifies how many bytes to read
+8. **Control byte in byte 5** - 0x80 for most commands, 0x00 for simple ones (KEY DIFFERENCE from standard SCSI)
 
 ## Implementation Status
 
