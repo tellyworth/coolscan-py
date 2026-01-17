@@ -488,11 +488,6 @@ class CoolscanProtocol:
         """Write data to USB bulk endpoint."""
         try:
             result = self.usb_device.write(self.bulk_out.bEndpointAddress, data)
-            # Display data sent
-            data_hex = data.hex()
-            print(f"    📤 Sent {len(data)} bytes: {data_hex}")
-            if len(data) > 0:
-                print(f"       First byte: 0x{data[0]:02x}, Last byte: 0x{data[-1]:02x}")
             return result
         except Exception as e:
             print(f"    ❌ Write error: {e}")
@@ -502,98 +497,44 @@ class CoolscanProtocol:
         """Read data from USB bulk endpoint."""
         try:
             data = self.usb_device.read(self.bulk_in.bEndpointAddress, length)
-            # Display any data received
-            if data:
-                data_bytes = data.tobytes() if hasattr(data, 'tobytes') else bytes(data)
-                print(f"    📥 Received {len(data_bytes)} bytes: {data_bytes.hex()}")
-                if len(data_bytes) > 0:
-                    print(f"       First byte: 0x{data_bytes[0]:02x}, Last byte: 0x{data_bytes[-1]:02x}")
             return data
         except Exception as e:
             print(f"    ❌ Read error: {e}")
             raise
 
-    def wait_scanner(self, max_attempts: int = 40, delay: float = 0.5) -> bool:
+    def wait_scanner(self, max_attempts: int = 10, delay: float = 0.5) -> bool:
         """
         Wait for scanner to be ready - based on SANE backend wait_scanner().
-
-        This function keeps sending TEST_UNIT_READY repeatedly until the scanner
-        responds, handling timeouts and busy states. This is the wake-up sequence
-        that's critical for initializing communication.
         """
-        print(f"  ⏳ Waiting for scanner to be ready (max {max_attempts} attempts, {delay}s delay)...")
-
         for attempt in range(max_attempts):
             try:
-                print(f"    Attempt {attempt + 1}/{max_attempts}: Sending TEST_UNIT_READY...")
-                # Use correct 6-byte format
                 cmd = self._build_6byte_command(0x00, control=0x00)
+                self._usb_write_bulk(cmd)
+                self._usb_write_bulk(self._pack_byte(0xd0))
 
-                # Use the proper command sequence: send command, phase check, read phase, read status
                 try:
-                    # Send command
-                    self._usb_write_bulk(cmd)
-                    print(f"      ✅ Command sent successfully")
-
-                    # Send phase check
-                    phase_check = self._pack_byte(0xd0)
-                    self._usb_write_bulk(phase_check)
-
-                    # Read phase response
-                    try:
-                        phase_response = self._usb_read_bulk(1)
-                        if hasattr(phase_response, 'tobytes'):
-                            phase_response = phase_response.tobytes()
-                        phase_byte = phase_response[0] if len(phase_response) > 0 else 0
-                        print(f"      Phase: 0x{phase_byte:02x}")
-                    except Exception as e:
-                        print(f"      ⚠️  Phase read failed: {e} (continuing anyway)")
-                        phase_byte = 0x01  # Assume status phase
-
-                    # Read status (8 bytes)
-                    print(f"      Reading status (8 bytes)...")
-                    status_data = self._usb_read_bulk(8)
-                    if hasattr(status_data, 'tobytes'):
-                        status_data = status_data.tobytes()
-
-                    if status_data and len(status_data) >= 8:
-                        print(f"      ✅ Received status data!")
-                        print(f"      Status bytes: {status_data.hex()}")
-
-                        # Parse status
-                        status, parsed = self._parse_status(status_data)
-                        print(f"      Parsed status: {status}, sense: {parsed}")
-
-                        if status == StatusType.READY:
-                            print(f"  ✅ Scanner is READY after {attempt + 1} attempts!")
-                            return True
-                        elif status == StatusType.NO_DOCS:
-                            print(f"  ✅ Scanner responded (NO_DOCS) after {attempt + 1} attempts!")
-                            return True
-                        elif status == StatusType.PROCESSING:
-                            print(f"  ⏳ Scanner is PROCESSING, continuing wait...")
-                            time.sleep(delay)
-                            continue
-                        else:
-                            print(f"  ⚠️  Scanner status: {status}, continuing wait...")
-                            time.sleep(delay)
-                            continue
-                    else:
-                        print(f"      ⚠️  Incomplete status data: {len(status_data) if status_data else 0} bytes")
-                        time.sleep(delay)
-                        continue
-
-                except Exception as e:
-                    print(f"      ⚠️  Command sequence failed: {e} (will retry)")
+                    phase_response = self._usb_read_bulk(1)
+                    if hasattr(phase_response, 'tobytes'):
+                        phase_response = phase_response.tobytes()
+                except:
                     time.sleep(delay)
                     continue
 
-            except Exception as e:
-                print(f"    ⚠️  Attempt {attempt + 1} error: {e} (will retry)")
+                status_data = self._usb_read_bulk(8)
+                if hasattr(status_data, 'tobytes'):
+                    status_data = status_data.tobytes()
+
+                if status_data and len(status_data) >= 8:
+                    status, _ = self._parse_status(status_data)
+                    if status == StatusType.READY or status == StatusType.NO_DOCS:
+                        return True
+                
+                time.sleep(delay)
+            except:
                 time.sleep(delay)
                 continue
 
-        print(f"  ❌ Scanner did not become ready after {max_attempts} attempts")
+        print(f"  ⚠️  Scanner not ready after {max_attempts} attempts")
         return False
 
     def _check_phase_with_retry(self, max_retries: int = 3) -> PhaseType:
@@ -700,137 +641,86 @@ class CoolscanProtocol:
     def _issue_usb_command(self, command: bytes, data_out: bytes = b'',
                           data_in_length: int = 0) -> Tuple[bytes, StatusType]:
         """
-        Issue a USB command following the correct protocol pattern from USB capture.
-
-        Pattern:
-        1. Send command (6 bytes)
-        2. Send phase check (0xd0)
-        3. Read phase response (1 byte: 0x01 = status, 0x03 = data in)
-        4. If phase is 0x03 and data_in_length > 0: Read data
-        5. Read status (8 bytes)
+        Issue a USB command following the protocol pattern from USB capture.
         """
-        print(f"  Issuing USB command: {command.hex()}")
-
         try:
-            # Step 1: Send command
+            # Send command + phase check
             self._usb_write_bulk(command)
-            print(f"    Command sent successfully")
+            self._usb_write_bulk(self._pack_byte(0xd0))
 
-            # Step 2: Send phase check (0xd0)
-            phase_check = self._pack_byte(0xd0)
-            self._usb_write_bulk(phase_check)
-            print(f"    Phase check sent (0xd0)")
-
-            # Step 3: Read phase response (1 byte)
+            # Read phase response
             try:
                 phase_response = self._usb_read_bulk(1)
                 if hasattr(phase_response, 'tobytes'):
                     phase_response = phase_response.tobytes()
                 phase_byte = phase_response[0] if len(phase_response) > 0 else 0
-                phase_name = {
-                    0x01: 'Status',
-                    0x02: 'Data OUT',
-                    0x03: 'Data IN',
-                    0x04: 'Busy'
-                }.get(phase_byte, 'Unknown')
-                print(f"    Phase response: 0x{phase_byte:02x} ({phase_name})")
             except Exception as e:
-                print(f"    ⚠️  Phase response read failed: {e}, continuing anyway")
-                phase_byte = 0x03  # Assume data phase if we can't read phase
+                print(f"    ⚠️  Phase read failed: {e}")
+                phase_byte = 0x03
 
-            # Step 3b: Handle Busy phase (0x04) - wait and retry
+            # Handle Busy phase (0x04)
             if phase_byte == 0x04:
-                print(f"    Scanner busy, waiting and retrying phase check...")
+                print(f"    Scanner busy, retrying...")
                 for retry in range(5):
-                    time.sleep(0.5)  # Wait 500ms
+                    time.sleep(0.5)
                     try:
-                        # Send another phase check
-                        phase_check = self._pack_byte(0xd0)
-                        self._usb_write_bulk(phase_check)
+                        self._usb_write_bulk(self._pack_byte(0xd0))
                         phase_response = self._usb_read_bulk(1)
                         if hasattr(phase_response, 'tobytes'):
                             phase_response = phase_response.tobytes()
                         phase_byte = phase_response[0] if len(phase_response) > 0 else 0
-                        phase_name = {
-                            0x01: 'Status', 0x02: 'Data OUT',
-                            0x03: 'Data IN', 0x04: 'Busy'
-                        }.get(phase_byte, 'Unknown')
-                        print(f"    Retry {retry + 1}: Phase 0x{phase_byte:02x} ({phase_name})")
                         if phase_byte != 0x04:
                             break
-                    except Exception as e:
-                        print(f"    Retry {retry + 1} failed: {e}")
-
+                    except:
+                        pass
                 if phase_byte == 0x04:
-                    print(f"    ⚠️  Scanner still busy after retries, aborting")
+                    print(f"    ⚠️  Scanner still busy")
                     return b'', StatusType.BUSY
 
-            # Step 4a: Send data if phase indicates data out (0x02)
+            # Send data if phase is Data OUT (0x02)
             if phase_byte == 0x02 and len(data_out) > 0:
-                print(f"    Sending data out: {len(data_out)} bytes")
                 try:
                     self._usb_write_bulk(data_out)
-                    print(f"    Sent {len(data_out)} bytes")
-                    # Small delay to allow scanner to process data
-                    time.sleep(0.01)  # 10ms delay
-                    # After sending data, phase transitions to status (0x01)
-                    # For MODE_SELECT (0x15), the capture shows reading status directly
-                    # For WRITE (0x2a), we may need to check phase, but let's try direct status first
-                    # Go directly to status read (no phase check needed)
+                    time.sleep(0.01)
                     phase_byte = 0x01
                 except Exception as e:
                     print(f"    ⚠️  Data out failed: {e}")
-                    # Return error immediately to avoid leaving scanner in bad state
                     return b'', StatusType.ERROR
 
-            # Step 4b: Read data if phase indicates data in (0x03)
+            # Read data if phase is Data IN (0x03)
             data_in = b''
             if phase_byte == 0x03 and data_in_length > 0:
-                print(f"    Reading data in: {data_in_length} bytes")
                 try:
                     data_in = self._usb_read_bulk(data_in_length)
-                    # Convert array.array to bytes if needed
                     if hasattr(data_in, 'tobytes'):
                         data_in = data_in.tobytes()
-                    print(f"    Read {len(data_in)} bytes")
                 except Exception as e:
                     print(f"    ⚠️  Data read failed: {e}")
                     data_in = b''
 
-            # Step 5: Read status (8 bytes)
-            print(f"    Reading status...")
+            # Read status (8 bytes)
             try:
-                # Use a shorter timeout for status reads to fail faster
-                # and avoid leaving scanner in bad state
                 status_data = self._usb_read_bulk(8)
-                # Convert array.array to bytes if needed
                 if hasattr(status_data, 'tobytes'):
                     status_data = status_data.tobytes()
-                print(f"    Status data: {status_data.hex()}")
-
-                status, parsed_status = self._parse_status(status_data)
-                print(f"    Parsed status: {status}, details: {parsed_status}")
-
+                status, parsed = self._parse_status(status_data)
+                
+                # Only print if error
+                if status != StatusType.READY:
+                    print(f"    Status: {status}, sense: {parsed}")
+                
                 return data_in, status
             except Exception as e:
                 print(f"    ⚠️  Status read failed: {e}")
-                # If we timeout, the scanner might be in a bad state
-                # Try to clear it by sending a TEST_UNIT_READY
-                print(f"    Attempting to clear scanner state...")
                 try:
-                    clear_cmd = self._build_6byte_command(0x00, control=0x00)
-                    self._usb_write_bulk(clear_cmd)
-                    phase_check = self._pack_byte(0xd0)
-                    self._usb_write_bulk(phase_check)
-                    # Don't wait for response, just try to clear
+                    self._usb_write_bulk(self._build_6byte_command(0x00, control=0x00))
+                    self._usb_write_bulk(self._pack_byte(0xd0))
                 except:
                     pass
                 return data_in, StatusType.ERROR
 
         except Exception as e:
-            print(f"    Error in USB command: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"    ❌ USB command error: {e}")
             return b'', StatusType.ERROR
 
     def _issue_scsi_command(self, command: bytes, data_out: bytes = b'',
@@ -1109,100 +999,43 @@ class CoolscanProtocol:
         return bytes(lut)
 
     def _upload_lut(self, channel: int, lut_data: bytes) -> bool:
-        """
-        Upload LUT data for a specific channel.
-
-        Args:
-            channel: 1=R, 2=G, 3=B
-            lut_data: 8192 bytes of LUT data
-
-        Command format from USB capture: 2a 00 03 00 [channel] 01 00 20 00 00
-        """
+        """Upload LUT data for a specific channel (1=R, 2=G, 3=B)."""
         if len(lut_data) != 8192:
             print(f"  ⚠️  LUT data must be 8192 bytes, got {len(lut_data)}")
             return False
-
-        channel_names = {1: 'R', 2: 'G', 3: 'B'}
-        print(f"  Uploading LUT for channel {channel_names.get(channel, channel)}...")
-
-        # WRITE command: 2a 00 03 00 [channel] 01 00 20 00 00
+        
         cmd = struct.pack('BBBBBBBBBB',
-            0x2a,    # WRITE
-            0x00,    # LUN
-            0x03,    # Datatype = LUT
-            0x00,    # Reserved
-            channel, # Channel (1=R, 2=G, 3=B)
-            0x01,    # Fixed
-            0x00,    # Reserved
-            0x20,    # Length high byte (0x2000 = 8192)
-            0x00,    # Length low byte
-            0x00     # Control
+            0x2a, 0x00, 0x03, 0x00, channel, 0x01, 0x00, 0x20, 0x00, 0x00
         )
-
+        
         _, status = self._issue_command(cmd, data_out=lut_data)
         if status != StatusType.READY:
-            print(f"    ⚠️  LUT upload failed: {status}")
+            channel_names = {1: 'R', 2: 'G', 3: 'B'}
+            print(f"  ⚠️  LUT {channel_names.get(channel, channel)} upload failed")
             return False
-
-        print(f"    ✅ LUT channel {channel_names.get(channel, channel)} uploaded")
         return True
-
+    
     def upload_identity_luts(self) -> bool:
-        """
-        Upload identity LUTs for all three channels (R, G, B).
-
-        This is REQUIRED before starting a scan. The scanner will reject
-        START_SCAN with "Invalid field in parameter list" (ASC 0x26) if
-        LUTs have not been uploaded.
-        """
-        print("Uploading identity LUTs (R, G, B)...")
-
-        # Generate identity LUT (same for all channels)
+        """Upload identity LUTs for R, G, B channels (required before scan)."""
         lut_data = self._generate_identity_lut()
-
-        # Upload for each channel
-        for channel in [1, 2, 3]:  # R, G, B
+        for channel in [1, 2, 3]:
             if not self._upload_lut(channel, lut_data):
                 return False
-
-        print("  ✅ All LUTs uploaded successfully")
+        print("  ✅ LUTs uploaded")
         return True
 
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
-        """
-        Set the scan window parameters using WDB.
-
-        From USB capture analysis:
-        1. MODE_SELECT (0x15) is sent with 20 bytes of mode parameters
-        2. WRITE (0x2a) uploads LUT data for R, G, B channels (8192 bytes each)
-        """
-        # Convert WDB to bytes (for reference, not currently sent)
-        wdb_data = wdb.to_bytes()
-
-        # MODE_SELECT (0x15) - from capture: 151000001400
-        # Byte 0: 0x15 = MODE_SELECT
-        # Byte 1: 0x10 = page code
-        # Byte 4: 0x14 = 20 decimal (parameter length)
-        # Byte 5: 0x00 = control
+        """Set the scan window parameters using MODE_SELECT."""
         mode_select_cmd = self._build_6byte_command(0x15, page=0x10, alloc_length=0x14, control=0x00)
-
-        # Mode parameter block (20 bytes) - from capture
-        # The capture shows: 000000080000000000000001030600000b540000
-        # This contains mode-specific parameters; the full WDB may use defaults
         mode_params = bytes([0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
                             0x00, 0x00, 0x00, 0x01, 0x03, 0x06, 0x00, 0x00,
                             0x0b, 0x54, 0x00, 0x00])
 
-        print(f"Setting window with MODE_SELECT + mode params...")
-        print(f"  (WDB is {len(wdb_data)} bytes, using defaults for now)")
-
-        # Send MODE_SELECT with mode parameters
         _, status = self._issue_command(mode_select_cmd, data_out=mode_params)
         if status != StatusType.READY:
-            print(f"  ⚠️  MODE_SELECT failed: {status}")
+            print(f"  ⚠️  MODE_SELECT failed")
             return False
-
-        print("  ✅ MODE_SELECT succeeded (window set)")
+        print("  ✅ MODE_SELECT OK")
         return True
 
     def set_window(self, params: ScanParameters, scan_type: ScanType = ScanType.NORMAL) -> bool:
@@ -1248,28 +1081,16 @@ class CoolscanProtocol:
         return None
 
     def start_scan(self, scan_type: ScanType = ScanType.NORMAL) -> bool:
-        """
-        Start a scan operation.
-
-        Format from USB capture: 1b 00 00 00 03 00 (6 bytes)
-        Byte 4: 0x03 = start, 0x04 = stop
-
-        After START_SCAN, scanner returns phase 0x02 (Data OUT) and expects
-        3 bytes: 01 02 03 (color channel selection: R=1, G=2, B=3)
-        """
-        print("Starting scan...")
-        # Format: 1b 00 00 00 03 00 (START_STOP_UNIT with start action)
-        # Action code 0x03 is in byte 4 (alloc_length position), not byte 3!
+        """Start a scan operation."""
         cmd = self._build_6byte_command(0x1b, alloc_length=0x03, control=0x00)
-
-        # START_SCAN expects 3 bytes of data (color channel selection)
-        # From USB capture: 01 02 03 (R, G, B channels)
-        scan_data = bytes([0x01, 0x02, 0x03])
+        scan_data = bytes([0x01, 0x02, 0x03])  # R, G, B channels
 
         _, status = self._issue_command(cmd, data_out=scan_data)
-        success = status == StatusType.READY
-        print(f"Scan start: {'SUCCESS' if success else 'FAILED'}")
-        return success
+        if status != StatusType.READY:
+            print(f"  ⚠️  START_SCAN failed")
+            return False
+        print("  ✅ Scan started")
+        return True
 
     def read_scan_data(self, length: int, datatype: DataType = DataType.IMAGE_DATA) -> bytes:
         """
@@ -1328,46 +1149,28 @@ class CoolscanProtocol:
         return success
 
     def prescan(self) -> bool:
-        """
-        Perform prescan operation with proper sequence from USB capture.
-
-        Complete sequence:
-        1. MODE_SELECT + 20-byte mode params
-        2. WRITE LUT R + 8192 bytes
-        3. WRITE LUT G + 8192 bytes
-        4. WRITE LUT B + 8192 bytes
-        5. START_SCAN + 3 bytes (010203)
-        6. Wait for completion
-        """
+        """Perform prescan operation."""
         print("Starting prescan...")
 
-        # Step 1: Set window parameters with MODE_SELECT
         wdb = WindowDescriptorBlock()
-        wdb.scan_mode = 0x01  # Prescan mode
+        wdb.scan_mode = 0x01
         if not self.set_window_wdb(wdb):
-            print("Failed to set prescan window")
             return False
 
-        # Step 2-4: Upload identity LUTs (R, G, B)
         if not self.upload_identity_luts():
-            print("Failed to upload LUTs")
             return False
 
-        # Step 5: Start prescan
         if not self.start_scan():
-            print("Failed to start prescan")
             return False
 
-        # Wait 8 seconds like SANE backend
-        print("Waiting 8 seconds for prescan...")
+        print("  Waiting 8s for prescan...")
         time.sleep(8)
 
-        # Wait for scanner ready
         if not self.scanner_ready(timeout=30):
-            print("Scanner not ready after prescan")
+            print("  ⚠️  Scanner not ready after prescan")
             return False
 
-        print("Prescan completed successfully")
+        print("✅ Prescan completed")
         return True
 
     def read_capacity(self) -> Optional[dict]:
