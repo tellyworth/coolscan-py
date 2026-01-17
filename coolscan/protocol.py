@@ -1068,16 +1068,86 @@ class CoolscanProtocol:
         print(f"LUT send: {'SUCCESS' if success else 'FAILED'}")
         return success
 
+    def _generate_identity_lut(self) -> bytes:
+        """
+        Generate an identity LUT (8192 bytes).
+
+        The LUT maps each input value (0-4095) to itself.
+        Format: 4096 × 16-bit big-endian values = 8192 bytes
+        """
+        lut = bytearray(8192)
+        for i in range(4096):
+            lut[i * 2] = (i >> 8) & 0xff      # High byte
+            lut[i * 2 + 1] = i & 0xff          # Low byte
+        return bytes(lut)
+
+    def _upload_lut(self, channel: int, lut_data: bytes) -> bool:
+        """
+        Upload LUT data for a specific channel.
+
+        Args:
+            channel: 1=R, 2=G, 3=B
+            lut_data: 8192 bytes of LUT data
+
+        Command format from USB capture: 2a 00 03 00 [channel] 01 00 20 00 00
+        """
+        if len(lut_data) != 8192:
+            print(f"  ⚠️  LUT data must be 8192 bytes, got {len(lut_data)}")
+            return False
+
+        channel_names = {1: 'R', 2: 'G', 3: 'B'}
+        print(f"  Uploading LUT for channel {channel_names.get(channel, channel)}...")
+
+        # WRITE command: 2a 00 03 00 [channel] 01 00 20 00 00
+        cmd = struct.pack('BBBBBBBBBB',
+            0x2a,    # WRITE
+            0x00,    # LUN
+            0x03,    # Datatype = LUT
+            0x00,    # Reserved
+            channel, # Channel (1=R, 2=G, 3=B)
+            0x01,    # Fixed
+            0x00,    # Reserved
+            0x20,    # Length high byte (0x2000 = 8192)
+            0x00,    # Length low byte
+            0x00     # Control
+        )
+
+        _, status = self._issue_command(cmd, data_out=lut_data)
+        if status != StatusType.READY:
+            print(f"    ⚠️  LUT upload failed: {status}")
+            return False
+
+        print(f"    ✅ LUT channel {channel_names.get(channel, channel)} uploaded")
+        return True
+
+    def upload_identity_luts(self) -> bool:
+        """
+        Upload identity LUTs for all three channels (R, G, B).
+
+        This is REQUIRED before starting a scan. The scanner will reject
+        START_SCAN with "Invalid field in parameter list" (ASC 0x26) if
+        LUTs have not been uploaded.
+        """
+        print("Uploading identity LUTs (R, G, B)...")
+
+        # Generate identity LUT (same for all channels)
+        lut_data = self._generate_identity_lut()
+
+        # Upload for each channel
+        for channel in [1, 2, 3]:  # R, G, B
+            if not self._upload_lut(channel, lut_data):
+                return False
+
+        print("  ✅ All LUTs uploaded successfully")
+        return True
+
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
         """
         Set the scan window parameters using WDB.
 
         From USB capture analysis:
-        - MODE_SELECT (0x15) is sent with 20 bytes of mode parameters
-        - WRITE (0x2a) with datatype 0x03 sends LUT data (8192 bytes), NOT WDB chunks
-
-        The WDB parameters may be encoded in the MODE_SELECT data or use defaults.
-        For now, just send MODE_SELECT and consider the window set.
+        1. MODE_SELECT (0x15) is sent with 20 bytes of mode parameters
+        2. WRITE (0x2a) uploads LUT data for R, G, B channels (8192 bytes each)
         """
         # Convert WDB to bytes (for reference, not currently sent)
         wdb_data = wdb.to_bytes()
@@ -1106,11 +1176,6 @@ class CoolscanProtocol:
             return False
 
         print("  ✅ MODE_SELECT succeeded (window set)")
-
-        # NOTE: The USB capture shows WRITE (0x2a) with datatype 0x03 sends 8192 bytes
-        # of LUT data (sequential values), NOT 32-byte WDB chunks.
-        # Skipping WRITE chunks for now - the scanner may use defaults for WDB.
-
         return True
 
     def set_window(self, params: ScanParameters, scan_type: ScanType = ScanType.NORMAL) -> bool:
@@ -1236,17 +1301,32 @@ class CoolscanProtocol:
         return success
 
     def prescan(self) -> bool:
-        """Perform prescan operation with proper timing."""
+        """
+        Perform prescan operation with proper sequence from USB capture.
+
+        Complete sequence:
+        1. MODE_SELECT + 20-byte mode params
+        2. WRITE LUT R + 8192 bytes
+        3. WRITE LUT G + 8192 bytes
+        4. WRITE LUT B + 8192 bytes
+        5. START_SCAN + 3 bytes (010203)
+        6. Wait for completion
+        """
         print("Starting prescan...")
 
-        # Set window for prescan
+        # Step 1: Set window parameters with MODE_SELECT
         wdb = WindowDescriptorBlock()
         wdb.scan_mode = 0x01  # Prescan mode
         if not self.set_window_wdb(wdb):
             print("Failed to set prescan window")
             return False
 
-        # Start prescan
+        # Step 2-4: Upload identity LUTs (R, G, B)
+        if not self.upload_identity_luts():
+            print("Failed to upload LUTs")
+            return False
+
+        # Step 5: Start prescan
         if not self.start_scan():
             print("Failed to start prescan")
             return False
