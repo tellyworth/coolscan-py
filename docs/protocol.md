@@ -57,7 +57,7 @@ All commands follow this structure:
 - `0x1b`: START STOP UNIT
 - `0x1c`: RECEIVE DIAGNOSTIC RESULTS
 - `0x1d`: SEND DIAGNOSTIC
-- `0x24`: READ (10-byte format, simple read)
+- `0x24`: SET_WINDOW (10-byte command + 58-byte WDB)
 - `0x25`: READ CAPACITY (10-byte format, has variants with parameters)
 - `0x28`: READ(10) (10-byte format, with datatype codes for scan data)
 - `0x2a`: WRITE(10) (10-byte format, multiple formats for different purposes)

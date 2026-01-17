@@ -147,7 +147,7 @@ From the capture (single scan session):
 - **READ(10) (0x28)**: 172 times (with datatype codes)
 - **INQUIRY (0x12)**: 19 times
 - **READ_CAPACITY (0x25)**: 16 times
-- **READ (0x24)**: 18 times (10-byte format, simple read)
+- **SET_WINDOW (0x24)**: 18 times (10-byte command + 58-byte WDB)
 - **WRITE (0x2a)**: 12 times
 - **START_STOP_UNIT (0x1b)**: 7 times
 
@@ -184,7 +184,7 @@ From USB capture analysis, setting the window uses a two-step process:
    - Check phase again, then read status
    - Repeat for each chunk
 
-**Key Discovery**: WRITE (0x2a) is used for WDB, not SET_WINDOW (0x24). The 0x24 command appears to be for reading, not writing.
+**Key Discovery**: SET_WINDOW (0x24) sends the 58-byte Window Descriptor Block (WDB). WRITE (0x2a) with datatype 0x03 is used for LUT data (8192 bytes per channel).
 
 ## Implementation Status
 

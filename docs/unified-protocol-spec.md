@@ -57,6 +57,28 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
   - Byte 4: Action (0x03 = start, 0x04 = stop)
   - Control byte is 0x00
 
+#### SET_WINDOW (0x24) - Send Window Descriptor Block
+- **USB format**: `24 00 00 00 00 00 00 00 3a 80` (10 bytes)
+  - Byte 0: 0x24 (SET_WINDOW)
+  - Byte 1-7: 0x00 (reserved)
+  - Byte 8: 0x3a = 58 (transfer length)
+  - Byte 9: 0x80 (control)
+
+**WDB Data Format** (58 bytes):
+- Bytes 0-6: Header (zeros)
+- Byte 7: 0x32 = 50 (length of WDB data)
+- Byte 8: Window ID (0x01 or 0x02)
+- Bytes 10-13: X/Y resolution (e.g., 0x0b54 = 2900 dpi)
+- Bytes 14-23: Scan area coordinates
+- Bytes 24-29: Width/Height
+- Bytes 30-48: Various settings
+- Bytes 49-53: Scan mode settings (0x81 0x01 0x02 0x02 0xff)
+- Bytes 56-57: Checksum
+
+**Example from USB capture:**
+- Window 1: `24000000000000003a80` + 58 bytes (byte 8 = 0x01)
+- Window 2: `24000000000000003a80` + 58 bytes (byte 8 = 0x02)
+
 #### WRITE (0x2a) - Send LUT (Look-Up Table) Data
 - **USB format**: `2a 00 03 00 [channel] 01 00 [len_hi] [len_lo] 00` (10 bytes)
   - Byte 0: 0x2a (WRITE)
@@ -232,13 +254,15 @@ The scan is prepared using a multi-step process:
 ### Scan Sequence (from USB capture)
 
 1. **MODE_SELECT** (`15 10 00 00 14 00`) + 20-byte mode params
-2. **WRITE LUT R** (`2a 00 03 00 01 01 00 20 00 00`) + 8192-byte identity LUT
-3. **WRITE LUT G** (`2a 00 03 00 02 01 00 20 00 00`) + 8192-byte identity LUT
-4. **WRITE LUT B** (`2a 00 03 00 03 01 00 20 00 00`) + 8192-byte identity LUT
-5. **START_STOP_UNIT** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
-6. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data
-7. **TEST_UNIT_READY** - Poll for completion
-8. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
+2. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 1)
+3. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 2)
+4. **WRITE LUT R** (`2a 00 03 00 01 01 00 20 00 00`) + 8192-byte identity LUT
+5. **WRITE LUT G** (`2a 00 03 00 02 01 00 20 00 00`) + 8192-byte identity LUT
+6. **WRITE LUT B** (`2a 00 03 00 03 01 00 20 00 00`) + 8192-byte identity LUT
+7. **START_STOP_UNIT** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
+8. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data
+9. **TEST_UNIT_READY** - Poll for completion
+10. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
 
 ## Key Differences: SANE vs USB Capture
 

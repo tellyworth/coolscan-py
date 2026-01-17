@@ -528,7 +528,7 @@ class CoolscanProtocol:
                     status, _ = self._parse_status(status_data)
                     if status == StatusType.READY or status == StatusType.NO_DOCS:
                         return True
-                
+
                 time.sleep(delay)
             except:
                 time.sleep(delay)
@@ -704,11 +704,11 @@ class CoolscanProtocol:
                 if hasattr(status_data, 'tobytes'):
                     status_data = status_data.tobytes()
                 status, parsed = self._parse_status(status_data)
-                
+
                 # Only print if error
                 if status != StatusType.READY:
                     print(f"    Status: {status}, sense: {parsed}")
-                
+
                 return data_in, status
             except Exception as e:
                 print(f"    ⚠️  Status read failed: {e}")
@@ -1003,18 +1003,18 @@ class CoolscanProtocol:
         if len(lut_data) != 8192:
             print(f"  ⚠️  LUT data must be 8192 bytes, got {len(lut_data)}")
             return False
-        
+
         cmd = struct.pack('BBBBBBBBBB',
             0x2a, 0x00, 0x03, 0x00, channel, 0x01, 0x00, 0x20, 0x00, 0x00
         )
-        
+
         _, status = self._issue_command(cmd, data_out=lut_data)
         if status != StatusType.READY:
             channel_names = {1: 'R', 2: 'G', 3: 'B'}
             print(f"  ⚠️  LUT {channel_names.get(channel, channel)} upload failed")
             return False
         return True
-    
+
     def upload_identity_luts(self) -> bool:
         """Upload identity LUTs for R, G, B channels (required before scan)."""
         lut_data = self._generate_identity_lut()
@@ -1036,6 +1036,52 @@ class CoolscanProtocol:
             print(f"  ⚠️  MODE_SELECT failed")
             return False
         print("  ✅ MODE_SELECT OK")
+        return True
+
+    def set_scan_window(self, window_id: int = 1) -> bool:
+        """
+        Send SET_WINDOW (0x24) command with 58-byte window descriptor.
+
+        This is REQUIRED before LUT uploads and START_SCAN.
+        From USB capture: 24000000000000003a80 + 58 bytes WDB
+        """
+        # SET_WINDOW command: 24 00 00 00 00 00 00 00 3a 80
+        # Byte 8: 0x3a = 58 (transfer length)
+        cmd = struct.pack('BBBBBBBBBB', 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3a, 0x80)
+
+        # 58-byte WDB from USB capture (window_id in byte 8)
+        # This is for a basic prescan/scan setup
+        wdb = bytearray([
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32,  # Header, length=50
+            window_id,  # Window ID (1 or 2)
+            0x00,
+            0x0b, 0x54,  # X resolution (2900 dpi)
+            0x0b, 0x54,  # Y resolution (2900 dpi)
+            0x00, 0x00, 0x00, 0x00,  # Upper left X
+            0x00, 0x00, 0x00, 0x00,  # Upper left Y
+            0x00, 0x00,
+            0x0b, 0x36,  # Width
+            0x00, 0x00,
+            0x10, 0xec,  # Height
+            0x00, 0x00, 0x00, 0x02,  # Brightness, etc.
+            0x08, 0x00, 0x00, 0x00,  # Contrast, etc.
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+            0x81, 0x01, 0x02, 0x02, 0xff,  # Scan mode settings
+            0x00, 0x00,
+            0x00, 0x00,  # Checksum (will be calculated)
+        ])
+
+        # Calculate simple checksum for last 2 bytes (sum of all prior bytes mod 65536)
+        checksum = sum(wdb[:-2]) & 0xFFFF
+        wdb[-2] = (checksum >> 8) & 0xFF
+        wdb[-1] = checksum & 0xFF
+
+        _, status = self._issue_command(cmd, data_out=bytes(wdb))
+        if status != StatusType.READY:
+            print(f"  ⚠️  SET_WINDOW {window_id} failed")
+            return False
         return True
 
     def set_window(self, params: ScanParameters, scan_type: ScanType = ScanType.NORMAL) -> bool:
@@ -1152,14 +1198,24 @@ class CoolscanProtocol:
         """Perform prescan operation."""
         print("Starting prescan...")
 
+        # Step 1: MODE_SELECT with mode parameters
         wdb = WindowDescriptorBlock()
         wdb.scan_mode = 0x01
         if not self.set_window_wdb(wdb):
             return False
 
+        # Step 2: SET_WINDOW with 58-byte window descriptors (1 and 2)
+        if not self.set_scan_window(1):
+            return False
+        if not self.set_scan_window(2):
+            return False
+        print("  ✅ Windows set")
+
+        # Step 3: Upload identity LUTs for R, G, B
         if not self.upload_identity_luts():
             return False
 
+        # Step 4: Start scan
         if not self.start_scan():
             return False
 
