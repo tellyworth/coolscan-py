@@ -909,93 +909,66 @@ class CoolscanProtocol:
         Reset/cleanup scanner to restore it to a responsive state.
 
         This should be called after errors to avoid needing to power cycle.
-        Attempts USB-level recovery first, then protocol-level recovery.
+        Uses very short timeouts and limited retries to avoid hanging.
 
         Returns True if scanner appears responsive, False otherwise.
         """
-        print("🔄 Attempting to reset scanner to responsive state...")
+        print("🔄 Attempting to reset scanner state (quick, non-blocking)...")
 
-        try:
-            # Step 1: Try USB-level recovery first
-            print("  Step 1: USB-level recovery...")
-            try:
-                import usb.util
-                # Clear any stalled endpoints
-                if hasattr(self, 'bulk_out') and self.bulk_out:
-                    try:
-                        usb.util.clear_halt(self.usb_device, self.bulk_out)
-                        print(f"    Cleared halt on OUT endpoint 0x{self.bulk_out.bEndpointAddress:02x}")
-                    except Exception as e:
-                        print(f"    ⚠️  Could not clear OUT endpoint: {e}")
-
-                if hasattr(self, 'bulk_in') and self.bulk_in:
-                    try:
-                        usb.util.clear_halt(self.usb_device, self.bulk_in)
-                        print(f"    Cleared halt on IN endpoint 0x{self.bulk_in.bEndpointAddress:02x}")
-                    except Exception as e:
-                        print(f"    ⚠️  Could not clear IN endpoint: {e}")
-
-                    # Try to drain any pending data from IN endpoint (with short timeout)
-                    print("    Draining pending data...")
-                    for _ in range(5):
-                        try:
-                            self.usb_device.read(self.bulk_in.bEndpointAddress, 64, timeout=100)
-                        except:
-                            break  # No more data or error, stop draining
-
-            except Exception as e:
-                print(f"    ⚠️  USB recovery failed: {e}")
-
-            # Step 2: Small delay to let scanner process
-            import time
-            time.sleep(1.0)  # Longer delay after USB recovery
-
-            # Step 3: Try simple protocol recovery with short timeout
-            print("  Step 2: Protocol recovery (short timeout)...")
-
-            # Save original timeout and use shorter one
-            original_timeout = self.usb_device.default_timeout if self.usb_device else 30000
-            if self.usb_device:
-                self.usb_device.default_timeout = 1000  # 1 second timeout for recovery
-
-            try:
-                for attempt in range(3):
-                    try:
-                        # Just send command and phase check, don't wait for full response
-                        cmd = self._build_6byte_command(0x00, control=0x00)
-                        self._usb_write_bulk(cmd)
-                        phase_check = self._pack_byte(0xd0)
-                        self._usb_write_bulk(phase_check)
-
-                        # Try to read with short timeout
-                        try:
-                            if hasattr(self, 'bulk_in') and self.bulk_in:
-                                response = self.usb_device.read(self.bulk_in.bEndpointAddress, 8, timeout=500)
-                                if response:
-                                    print(f"    ✅ Got response after attempt {attempt + 1}")
-                                    # Restore timeout and try proper command
-                                    if self.usb_device:
-                                        self.usb_device.default_timeout = original_timeout
-                                    _, status = self._issue_command(self._build_6byte_command(0x00, control=0x00))
-                                    if status == StatusType.READY:
-                                        print("  ✅ Scanner responsive!")
-                                        return True
-                        except:
-                            pass
-
-                        time.sleep(0.3)
-                    except Exception as e:
-                        print(f"    Attempt {attempt + 1} failed: {e}")
-                        time.sleep(0.3)
-            finally:
-                if self.usb_device:
-                    self.usb_device.default_timeout = original_timeout  # Always restore timeout
-
-            print("  ⚠️  Scanner may still need power cycle")
+        if not self.usb_device:
+            print("  ⚠️  No USB device, nothing to reset")
             return False
 
+        try:
+            import time
+
+            # Save original timeout
+            original_timeout = self.usb_device.default_timeout
+
+            # Use very short timeout for all recovery operations
+            self.usb_device.default_timeout = 500  # 500ms
+
+            try:
+                # Step 1: Try to drain any pending data (non-blocking)
+                print("  Draining pending data...")
+                if hasattr(self, 'bulk_in') and self.bulk_in:
+                    for _ in range(3):
+                        try:
+                            self.usb_device.read(self.bulk_in.bEndpointAddress, 512, timeout=100)
+                        except:
+                            break
+
+                # Step 2: Brief pause
+                time.sleep(0.2)
+
+                # Step 3: Try RELEASE_UNIT with short timeout (don't check response)
+                print("  Sending RELEASE_UNIT...")
+                try:
+                    if hasattr(self, 'bulk_out') and self.bulk_out:
+                        # Just send the command bytes, don't wait for proper response
+                        release_cmd = bytes([0x17, 0x00, 0x00, 0x00, 0x00, 0x00])
+                        self.usb_device.write(self.bulk_out.bEndpointAddress, release_cmd, timeout=200)
+                except:
+                    pass
+
+                # Step 4: Brief pause and drain again
+                time.sleep(0.2)
+                if hasattr(self, 'bulk_in') and self.bulk_in:
+                    for _ in range(3):
+                        try:
+                            self.usb_device.read(self.bulk_in.bEndpointAddress, 512, timeout=100)
+                        except:
+                            break
+
+                print("  ✅ Reset commands sent (scanner state unknown)")
+                return True
+
+            finally:
+                # Always restore original timeout
+                self.usb_device.default_timeout = original_timeout
+
         except Exception as e:
-            print(f"  ❌ Reset failed: {e}")
+            print(f"  ⚠️  Reset error (non-critical): {e}")
             return False
 
     def mode_sense(self) -> Optional[int]:
@@ -1188,12 +1161,20 @@ class CoolscanProtocol:
 
         Format from USB capture: 1b 00 00 00 03 00 (6 bytes)
         Byte 4: 0x03 = start, 0x04 = stop
+
+        After START_SCAN, scanner returns phase 0x02 (Data OUT) and expects
+        3 bytes: 01 02 03 (color channel selection: R=1, G=2, B=3)
         """
         print("Starting scan...")
         # Format: 1b 00 00 00 03 00 (START_STOP_UNIT with start action)
         # Action code 0x03 is in byte 4 (alloc_length position), not byte 3!
         cmd = self._build_6byte_command(0x1b, alloc_length=0x03, control=0x00)
-        _, status = self._issue_command(cmd)
+
+        # START_SCAN expects 3 bytes of data (color channel selection)
+        # From USB capture: 01 02 03 (R, G, B channels)
+        scan_data = bytes([0x01, 0x02, 0x03])
+
+        _, status = self._issue_command(cmd, data_out=scan_data)
         success = status == StatusType.READY
         print(f"Scan start: {'SUCCESS' if success else 'FAILED'}")
         return success
