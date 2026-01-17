@@ -57,17 +57,28 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
   - Byte 4: Action (0x03 = start, 0x04 = stop)
   - Control byte is 0x00
 
-#### WRITE (0x2a) - Send Window Descriptor Block
-- **USB format**: `2a 00 03 [chunk] 01 01 00 [len_low] [len_high] 00` (10 bytes)
+#### WRITE (0x2a) - Send LUT (Look-Up Table) Data
+- **USB format**: `2a 00 03 00 [channel] 01 00 [len_hi] [len_lo] 00` (10 bytes)
   - Byte 0: 0x2a (WRITE)
   - Byte 1: 0x00 (LUN)
-  - Byte 2: 0x03 (datatype = window descriptor)
-  - Byte 3: Chunk index (0, 1, 2... for chunks 1, 2, 3...)
-  - Byte 4-5: 0x01 0x01 (fixed)
+  - Byte 2: 0x03 (datatype = LUT)
+  - Byte 3: 0x00 (reserved)
+  - Byte 4: Channel index (0x01=R, 0x02=G, 0x03=B)
+  - Byte 5: 0x01 (fixed)
   - Byte 6: 0x00 (reserved)
-  - Byte 7-8: Transfer length (little-endian: 0x20 0x00 = 32 bytes)
+  - Byte 7-8: Transfer length big-endian (0x20 0x00 = 0x2000 = 8192 bytes)
   - Byte 9: 0x00 (control)
-  - **Note**: WDB is sent in 32-byte chunks
+
+**LUT Data Format**:
+- 8192 bytes per channel (4096 entries × 2 bytes each)
+- 16-bit big-endian values
+- Identity LUT: `0000 0001 0002 0003 ... 0fff`
+- Three channels must be uploaded: R, G, B
+
+**Example from USB capture:**
+- R channel: `2a000300010100200000` → send 8192 bytes
+- G channel: `2a000300020100200000` → send 8192 bytes
+- B channel: `2a000300030100200000` → send 8192 bytes
 
 ## Communication Protocol Pattern
 
@@ -179,34 +190,37 @@ Bytes 4-7: Additional sense information
 
 ## Scan Operations
 
-### Setting Window Descriptor Block (WDB)
+### Setting Scan Parameters and LUT
 
-The window is set using a two-step process:
+The scan is prepared using a multi-step process:
 
-1. **MODE_SELECT (0x15)** - Prepare mode/page
+1. **MODE_SELECT (0x15)** - Set mode parameters
    - Command: `15 10 00 00 14 00` (6 bytes)
    - Phase check returns 0x02 (Data OUT)
    - Send 20 bytes of mode parameters: `000000080000000000000001030600000b540000`
-   - After sending data, check phase again, then read status
+   - Read status
 
-2. **WRITE (0x2a)** - Send WDB data in chunks
-   - Command format: `2a 00 03 [chunk_idx] 01 01 00 [length_low] [length_high] 00` (10 bytes)
-     - Byte 2: 0x03 = datatype (window descriptor)
-     - Byte 3: chunk index (0, 1, 2... for chunks 1, 2, 3...)
-     - Byte 4-5: 0x01 0x01 (fixed)
-     - Byte 6: 0x00 (reserved)
-     - Byte 7-8: transfer length (little-endian: 0x20 0x00 = 32 bytes)
-   - WDB is sent in 32-byte chunks
+2. **WRITE LUT (0x2a)** - Upload Look-Up Tables for R, G, B channels
+   - **CRITICAL**: Scanner requires LUT data before scanning!
+   - Command format: `2a 00 03 00 [channel] 01 00 20 00 00` (10 bytes)
+     - Byte 2: 0x03 = datatype (LUT)
+     - Byte 4: channel (0x01=R, 0x02=G, 0x03=B)
+     - Byte 7-8: length big-endian (0x20 0x00 = 0x2000 = 8192 bytes)
    - Phase check returns 0x02 (Data OUT)
-   - Send chunk data (32 bytes)
-   - After sending data, check phase again, then read status
-   - Repeat for each chunk
+   - Send 8192 bytes of LUT data (identity LUT: 0000-0fff in 16-bit big-endian)
+   - Read status
+   - Repeat for each channel (R, G, B)
 
-**Example from USB capture:**
-- Chunk 1: `2a000300010100200000` → send 32 bytes
-- Chunk 2: `2a000300020100200000` → send 32 bytes
-- Chunk 3: `2a000300030100200000` → send 32 bytes
-- (continues for all chunks)
+**LUT Commands from USB capture:**
+- R channel: `2a000300010100200000` + 8192 bytes
+- G channel: `2a000300020100200000` + 8192 bytes
+- B channel: `2a000300030100200000` + 8192 bytes
+
+**Identity LUT Data**:
+```
+0000 0001 0002 0003 0004 0005 ... 0ffe 0fff
+```
+(4096 entries × 2 bytes = 8192 bytes per channel)
 
 ### Prescan Sequence (from SANE)
 
@@ -217,15 +231,14 @@ The window is set using a two-step process:
 
 ### Scan Sequence (from USB capture)
 
-1. **MODE_SELECT + mode params** - Prepare for window setting
-2. **WRITE commands** (`2a 00 03 [chunk] 01 01 00 [len] 00`) - Send WDB in 32-byte chunks
-3. **START_STOP_UNIT** (`1b 00 00 00 03 00`) - Start scan
-4. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data with datatype codes
-   - Format: 10 bytes, byte 1 contains datatype code (0x8e, 0x8f, 0x8c, 0x87, etc.)
-5. **READ commands** (`24 00 00 00 00 00 00 00 [len_high] [len_low|0x80]`) - Simple read (10 bytes)
-   - Format: 10 bytes, allocation length in bytes 8-9
-6. **TEST_UNIT_READY** - Poll for completion
-7. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
+1. **MODE_SELECT** (`15 10 00 00 14 00`) + 20-byte mode params
+2. **WRITE LUT R** (`2a 00 03 00 01 01 00 20 00 00`) + 8192-byte identity LUT
+3. **WRITE LUT G** (`2a 00 03 00 02 01 00 20 00 00`) + 8192-byte identity LUT
+4. **WRITE LUT B** (`2a 00 03 00 03 01 00 20 00 00`) + 8192-byte identity LUT
+5. **START_STOP_UNIT** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
+6. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data
+7. **TEST_UNIT_READY** - Poll for completion
+8. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
 
 ## Key Differences: SANE vs USB Capture
 
