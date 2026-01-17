@@ -71,7 +71,14 @@ def test_basic_scan():
 
     finally:
         if protocol:
-            protocol.close()
+            try:
+                # Always try to reset scanner to responsive state
+                print("\n🔄 Cleaning up scanner state...")
+                protocol.reset_scanner()
+            except Exception as e:
+                print(f"  ⚠️  Cleanup error (non-critical): {e}")
+            finally:
+                protocol.close()
 
 
 if __name__ == "__main__":
