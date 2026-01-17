@@ -738,6 +738,33 @@ class CoolscanProtocol:
                 print(f"    ⚠️  Phase response read failed: {e}, continuing anyway")
                 phase_byte = 0x03  # Assume data phase if we can't read phase
 
+            # Step 3b: Handle Busy phase (0x04) - wait and retry
+            if phase_byte == 0x04:
+                print(f"    Scanner busy, waiting and retrying phase check...")
+                for retry in range(5):
+                    time.sleep(0.5)  # Wait 500ms
+                    try:
+                        # Send another phase check
+                        phase_check = self._pack_byte(0xd0)
+                        self._usb_write_bulk(phase_check)
+                        phase_response = self._usb_read_bulk(1)
+                        if hasattr(phase_response, 'tobytes'):
+                            phase_response = phase_response.tobytes()
+                        phase_byte = phase_response[0] if len(phase_response) > 0 else 0
+                        phase_name = {
+                            0x01: 'Status', 0x02: 'Data OUT',
+                            0x03: 'Data IN', 0x04: 'Busy'
+                        }.get(phase_byte, 'Unknown')
+                        print(f"    Retry {retry + 1}: Phase 0x{phase_byte:02x} ({phase_name})")
+                        if phase_byte != 0x04:
+                            break
+                    except Exception as e:
+                        print(f"    Retry {retry + 1} failed: {e}")
+
+                if phase_byte == 0x04:
+                    print(f"    ⚠️  Scanner still busy after retries, aborting")
+                    return b'', StatusType.BUSY
+
             # Step 4a: Send data if phase indicates data out (0x02)
             if phase_byte == 0x02 and len(data_out) > 0:
                 print(f"    Sending data out: {len(data_out)} bytes")
