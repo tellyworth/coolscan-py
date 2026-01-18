@@ -1204,6 +1204,11 @@ class CoolscanProtocol:
         if not self.set_window_wdb(wdb):
             return False
 
+        # Step 1b: Wait for scanner to be ready (required between MODE_SELECT and SET_WINDOW)
+        if not self.wait_scanner(max_attempts=5):
+            print("  ⚠️  Scanner not ready after MODE_SELECT")
+            return False
+
         # Step 2: SET_WINDOW with 58-byte window descriptors (1 and 2)
         if not self.set_scan_window(1):
             return False
