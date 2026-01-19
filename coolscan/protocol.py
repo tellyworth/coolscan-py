@@ -830,62 +830,106 @@ class CoolscanProtocol:
 
         Returns True if scanner appears responsive, False otherwise.
         """
-        print("🔄 Attempting to reset scanner state (quick, non-blocking)...")
+        print("🔄 Attempting to reset scanner state (aggressive cleanup)...")
 
         if not self.usb_device:
             print("  ⚠️  No USB device, nothing to reset")
             return False
 
         try:
-            import time
+            import usb.util
 
             # Save original timeout
             original_timeout = self.usb_device.default_timeout
 
-            # Use very short timeout for all recovery operations
+            # Use short timeout for all recovery operations
             self.usb_device.default_timeout = 500  # 500ms
 
             try:
-                # Step 1: Try to drain any pending data (non-blocking)
+                # Step 1: Clear any stalled endpoints
+                print("  Clearing endpoints...")
+                try:
+                    if hasattr(self, 'bulk_out') and self.bulk_out:
+                        usb.util.clear_halt(self.usb_device, self.bulk_out)
+                    if hasattr(self, 'bulk_in') and self.bulk_in:
+                        usb.util.clear_halt(self.usb_device, self.bulk_in)
+                except Exception as e:
+                    print(f"    (endpoint clear: {e})")
+
+                # Step 2: Drain any pending data aggressively
                 print("  Draining pending data...")
                 if hasattr(self, 'bulk_in') and self.bulk_in:
-                    for _ in range(3):
+                    for _ in range(10):  # More drain attempts
                         try:
-                            self.usb_device.read(self.bulk_in.bEndpointAddress, 512, timeout=100)
+                            self.usb_device.read(self.bulk_in.bEndpointAddress, 4096, timeout=50)
                         except:
                             break
 
-                # Step 2: Brief pause
-                time.sleep(0.2)
+                # Step 3: Send STOP_SCAN command (0x1b with action 0x04)
+                print("  Sending STOP_SCAN...")
+                try:
+                    if hasattr(self, 'bulk_out') and self.bulk_out:
+                        stop_cmd = bytes([0x1b, 0x00, 0x00, 0x00, 0x04, 0x00])
+                        self.usb_device.write(self.bulk_out.bEndpointAddress, stop_cmd, timeout=200)
+                        time.sleep(0.1)
+                        # Try to read any response
+                        try:
+                            self.usb_device.read(self.bulk_in.bEndpointAddress, 64, timeout=100)
+                        except:
+                            pass
+                except Exception as e:
+                    print(f"    (stop scan: {e})")
 
-                # Step 3: Try RELEASE_UNIT with short timeout (don't check response)
+                # Step 4: Send RELEASE_UNIT
                 print("  Sending RELEASE_UNIT...")
                 try:
                     if hasattr(self, 'bulk_out') and self.bulk_out:
-                        # Just send the command bytes, don't wait for proper response
                         release_cmd = bytes([0x17, 0x00, 0x00, 0x00, 0x00, 0x00])
                         self.usb_device.write(self.bulk_out.bEndpointAddress, release_cmd, timeout=200)
-                except:
-                    pass
+                        time.sleep(0.1)
+                        # Try to read any response
+                        try:
+                            self.usb_device.read(self.bulk_in.bEndpointAddress, 64, timeout=100)
+                        except:
+                            pass
+                except Exception as e:
+                    print(f"    (release unit: {e})")
 
-                # Step 4: Brief pause and drain again
+                # Step 5: Final drain
                 time.sleep(0.2)
                 if hasattr(self, 'bulk_in') and self.bulk_in:
-                    for _ in range(3):
+                    for _ in range(5):
                         try:
-                            self.usb_device.read(self.bulk_in.bEndpointAddress, 512, timeout=100)
+                            self.usb_device.read(self.bulk_in.bEndpointAddress, 4096, timeout=50)
                         except:
                             break
 
-                print("  ✅ Reset commands sent (scanner state unknown)")
-                return True
+                # Step 6: Try a TEST_UNIT_READY to check responsiveness
+                print("  Testing responsiveness...")
+                try:
+                    if hasattr(self, 'bulk_out') and self.bulk_out:
+                        tur_cmd = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                        self.usb_device.write(self.bulk_out.bEndpointAddress, tur_cmd, timeout=500)
+                        self.usb_device.write(self.bulk_out.bEndpointAddress, bytes([0xd0]), timeout=500)
+                        time.sleep(0.05)
+                        phase = self.usb_device.read(self.bulk_in.bEndpointAddress, 1, timeout=500)
+                        if phase and phase[0] == 0x01:  # Status phase
+                            status = self.usb_device.read(self.bulk_in.bEndpointAddress, 8, timeout=500)
+                            if status and status[0] == 0x00:
+                                print("  ✅ Scanner is responsive")
+                                return True
+                except Exception as e:
+                    print(f"    (test ready: {e})")
+
+                print("  ⚠️  Reset completed but scanner responsiveness unknown")
+                return False
 
             finally:
                 # Always restore original timeout
                 self.usb_device.default_timeout = original_timeout
 
         except Exception as e:
-            print(f"  ⚠️  Reset error (non-critical): {e}")
+            print(f"  ⚠️  Reset error: {e}")
             return False
 
     def mode_sense(self) -> Optional[int]:
@@ -1209,21 +1253,21 @@ class CoolscanProtocol:
         try:
             # INQUIRY page 0xe2 (film position/status)
             cmd = self._build_6byte_command(0x12, page=0x01, param2=0xe2, alloc_length=0x04, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=4, verbose=False)
+            data, status = self._issue_command(cmd, data_in_length=4)
             if status == StatusType.READY and len(data) >= 4:
                 full_len = data[3]
                 if full_len > 4:
                     cmd = self._build_6byte_command(0x12, page=0x01, param2=0xe2, alloc_length=full_len, control=0x80)
-                    self._issue_command(cmd, data_in_length=full_len, verbose=False)
+                    self._issue_command(cmd, data_in_length=full_len)
 
             # INQUIRY page 0x01 (supported pages)
             cmd = self._build_6byte_command(0x12, page=0x01, param2=0x01, alloc_length=0x04, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=4, verbose=False)
+            data, status = self._issue_command(cmd, data_in_length=4)
             if status == StatusType.READY and len(data) >= 4:
                 full_len = data[3]
                 if full_len > 4:
                     cmd = self._build_6byte_command(0x12, page=0x01, param2=0x01, alloc_length=full_len, control=0x80)
-                    self._issue_command(cmd, data_in_length=full_len, verbose=False)
+                    self._issue_command(cmd, data_in_length=full_len)
         except Exception as e:
             print(f"  ⚠️  INQUIRY after MODE_SELECT failed: {e}")
             # Continue anyway - these may not be strictly required
