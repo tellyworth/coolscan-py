@@ -67,17 +67,48 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 **WDB Data Format** (58 bytes):
 - Bytes 0-6: Header (zeros)
 - Byte 7: 0x32 = 50 (length of WDB data)
-- Byte 8: Window ID (0x01 or 0x02)
-- Bytes 10-13: X/Y resolution (e.g., 0x0b54 = 2900 dpi)
-- Bytes 14-23: Scan area coordinates
-- Bytes 24-29: Width/Height
-- Bytes 30-48: Various settings
-- Bytes 49-53: Scan mode settings (0x81 0x01 0x02 0x02 0xff)
-- Bytes 56-57: Checksum
+- Byte 8: Window ID (0x01=R, 0x02=G, 0x03=B, 0x09=IR)
+- Byte 9: Reserved (0x00)
+- Bytes 10-11: X resolution (big-endian)
+- Bytes 12-13: Y resolution (big-endian)
+- Bytes 14-17: X offset (4 bytes, big-endian)
+- Bytes 18-21: Y offset (4 bytes, big-endian)
+- Bytes 22-25: Width (4 bytes, big-endian)
+- Bytes 26-29: Height (4 bytes, big-endian)
+- Byte 30: Brightness
+- Byte 31: Threshold
+- Byte 32: Contrast
+- Byte 33: Image composition (0x05 for prescan, 0x02 for normal)
+- Byte 34: Pixel composition/depth (0x0c=12-bit prescan, 0x08=8-bit normal)
+- Bytes 35-47: Reserved zeros (13 bytes)
+- Byte 48: Multiread/ordering
+- Byte 49: Averaging (0x80) | Positive/Negative (0x01=positive)
+- Byte 50: Scan kind (0x01=normal, 0x02=prescan/AE, 0x20=AE, 0x40=AE_WB)
+- Byte 51: Scan mode (0x02=single, 0x10=multi)
+- Byte 52: Color interleave (0x02)
+- Byte 53: AE byte (0xff)
+- Bytes 54-57: **Exposure value** (4 bytes, big-endian, in 10ns units) - NOT a checksum!
 
-**Example from USB capture:**
-- Window 1: `24000000000000003a80` + 58 bytes (byte 8 = 0x01)
-- Window 2: `24000000000000003a80` + 58 bytes (byte 8 = 0x02)
+**Prescan vs Normal Scan WDBs:**
+| Parameter | Prescan (AE) | Normal (Full) |
+|-----------|-------------|---------------|
+| Resolution | 0x0060 (96 DPI) | 0x0b54 (2900 DPI) |
+| Scan kind (byte 50) | 0x02 | 0x01 |
+| Image comp (byte 33) | 0x05 | 0x02 |
+| Depth (byte 34) | 0x0c (12-bit) | 0x08 (8-bit) |
+| Windows | 1, 2, 3 only | 1, 2, 3 (+ 9 for IR) |
+
+**Example Prescan WDB (from USB capture):**
+```
+0000000000000032 01 0060 0060 00000000 00000000 00000b36 00008760
+00 00 00 05 0c 00000000000000000000000000 00 81 02 02 02 ff 0000a381
+```
+
+**Example Normal WDB:**
+```
+0000000000000032 01 0b54 0b54 00000000 00000000 00000b36 000010ec
+00 00 00 02 08 00000000000000000000000000 00 81 01 02 02 ff 00009ce6
+```
 
 #### WRITE (0x2a) - Send LUT (Look-Up Table) Data
 - **USB format**: `2a 00 03 00 [channel] 01 00 [len_hi] [len_lo] 00` (10 bytes)
@@ -244,25 +275,47 @@ The scan is prepared using a multi-step process:
 ```
 (4096 entries × 2 bytes = 8192 bytes per channel)
 
-### Prescan Sequence (from SANE)
+### Prescan Sequence (Verified Working - January 2026)
 
-1. Set window with WDB (scan_mode = 0x01 for prescan)
-2. Start scan (`1b 00 00 00 03 00`)
-3. Wait 8 seconds
-4. Wait for scanner ready
+The prescan performs auto-exposure (AE) at low resolution to determine optimal exposure values.
 
-### Scan Sequence (from USB capture)
+**Command Sequence:**
+1. **MODE_SELECT** (`15 10 00 00 14 00`) + 20-byte mode params
+2. **Wait** ~150ms for scanner to process
+3. **TEST_UNIT_READY** - Ensure scanner is ready
+4. **SET_WINDOW** × 3 (windows 1, 2, 3 for RGB, NOT window 9)
+   - Uses prescan WDBs: 96 DPI, scan_kind=0x02
+5. **TEST_UNIT_READY** - Required before LUT upload
+6. **WRITE LUT R/G/B** × 3 - Upload identity LUTs
+7. **START_SCAN** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
+8. **Polling Loop** - TEST_UNIT_READY every ~100ms
+   - Status `0202040100000000` = NOT READY (scanner is scanning)
+   - Status `0000000000000000` = READY (scan pass complete)
+9. **READ** commands to get exposure/calibration data
+10. Process may repeat for multiple passes
+
+**Timing (from USB capture):**
+- START_SCAN to first READY: ~13 seconds
+- Full prescan cycle: ~25+ seconds with data reading
+
+**Key Insight:** The scanner returns status with sense_key=4 (NOT READY) while scanning.
+Poll with TEST_UNIT_READY until status returns sense_key=0 (READY).
+
+### Full Scan Sequence (from USB capture)
 
 1. **MODE_SELECT** (`15 10 00 00 14 00`) + 20-byte mode params
 2. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 1)
 3. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 2)
-4. **WRITE LUT R** (`2a 00 03 00 01 01 00 20 00 00`) + 8192-byte identity LUT
-5. **WRITE LUT G** (`2a 00 03 00 02 01 00 20 00 00`) + 8192-byte identity LUT
-6. **WRITE LUT B** (`2a 00 03 00 03 01 00 20 00 00`) + 8192-byte identity LUT
-7. **START_STOP_UNIT** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
-8. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data
-9. **TEST_UNIT_READY** - Poll for completion
-10. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
+4. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 3)
+5. **(Optional) SET_WINDOW** for window 9 (infrared channel)
+6. **TEST_UNIT_READY** - Required before LUT upload
+7. **WRITE LUT R** (`2a 00 03 00 01 01 00 20 00 00`) + 8192-byte identity LUT
+8. **WRITE LUT G** (`2a 00 03 00 02 01 00 20 00 00`) + 8192-byte identity LUT
+9. **WRITE LUT B** (`2a 00 03 00 03 01 00 20 00 00`) + 8192-byte identity LUT
+10. **START_SCAN** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03` for RGB)
+11. **Polling Loop** - TEST_UNIT_READY until scanner is ready
+12. **READ** commands to get scan data
+13. **STOP_SCAN** (`1b 00 00 00 04 00`) when complete
 
 ## Key Differences: SANE vs USB Capture
 
