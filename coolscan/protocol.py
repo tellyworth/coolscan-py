@@ -1204,16 +1204,40 @@ class CoolscanProtocol:
         if not self.set_window_wdb(wdb):
             return False
 
-        # Step 1b: Wait for scanner to be ready (required between MODE_SELECT and SET_WINDOW)
+        # Step 1b: INQUIRY commands required between MODE_SELECT and SET_WINDOW
+        # From USB capture: INQUIRY 0xe2 (film status), INQUIRY 0x01 (capabilities)
+        try:
+            # INQUIRY page 0xe2 (film position/status)
+            cmd = self._build_6byte_command(0x12, page=0x01, param2=0xe2, alloc_length=0x04, control=0x80)
+            data, status = self._issue_command(cmd, data_in_length=4, verbose=False)
+            if status == StatusType.READY and len(data) >= 4:
+                full_len = data[3]
+                if full_len > 4:
+                    cmd = self._build_6byte_command(0x12, page=0x01, param2=0xe2, alloc_length=full_len, control=0x80)
+                    self._issue_command(cmd, data_in_length=full_len, verbose=False)
+
+            # INQUIRY page 0x01 (supported pages)
+            cmd = self._build_6byte_command(0x12, page=0x01, param2=0x01, alloc_length=0x04, control=0x80)
+            data, status = self._issue_command(cmd, data_in_length=4, verbose=False)
+            if status == StatusType.READY and len(data) >= 4:
+                full_len = data[3]
+                if full_len > 4:
+                    cmd = self._build_6byte_command(0x12, page=0x01, param2=0x01, alloc_length=full_len, control=0x80)
+                    self._issue_command(cmd, data_in_length=full_len, verbose=False)
+        except Exception as e:
+            print(f"  ⚠️  INQUIRY after MODE_SELECT failed: {e}")
+            # Continue anyway - these may not be strictly required
+
+        # Step 1c: Small delay then TEST_UNIT_READY (from USB capture ~100ms gap)
+        time.sleep(0.1)
         if not self.wait_scanner(max_attempts=5):
             print("  ⚠️  Scanner not ready after MODE_SELECT")
             return False
 
-        # Step 2: SET_WINDOW with 58-byte window descriptors (1 and 2)
-        if not self.set_scan_window(1):
-            return False
-        if not self.set_scan_window(2):
-            return False
+        # Step 2: SET_WINDOW with 58-byte window descriptors (windows 1, 2, 3, 9 from capture)
+        for win_id in [1, 2, 3, 9]:
+            if not self.set_scan_window(win_id):
+                return False
         print("  ✅ Windows set")
 
         # Step 3: Upload identity LUTs for R, G, B
