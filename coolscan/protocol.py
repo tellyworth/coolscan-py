@@ -1269,6 +1269,11 @@ class CoolscanProtocol:
                 return False
         print("  ✅ Windows set")
 
+        # Step 2b: TEST_UNIT_READY between SET_WINDOW and LUTs (from capture)
+        if not self.test_unit_ready():
+            print("  ⚠️  Scanner not ready before LUT upload")
+            return False
+
         # Step 3: Upload identity LUTs for R, G, B
         if not self.upload_identity_luts():
             return False
