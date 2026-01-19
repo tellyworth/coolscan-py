@@ -1082,47 +1082,53 @@ class CoolscanProtocol:
         print("  ✅ MODE_SELECT OK")
         return True
 
-    def set_scan_window(self, window_id: int = 1) -> bool:
+    def set_scan_window(self, window_id: int = 1, scan_type: str = 'prescan') -> bool:
         """
         Send SET_WINDOW (0x24) command with 58-byte window descriptor.
 
         This is REQUIRED before LUT uploads and START_SCAN.
         From USB capture: 24000000000000003a80 + 58 bytes WDB
+
+        Args:
+            window_id: Window ID (1=R, 2=G, 3=B, 9=IR)
+            scan_type: 'prescan' for low-res AE scan, 'normal' for full scan
         """
         # SET_WINDOW command: 24 00 00 00 00 00 00 00 3a 80
-        # Byte 8: 0x3a = 58 (transfer length)
         cmd = struct.pack('BBBBBBBBBB', 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3a, 0x80)
 
-        # 58-byte WDB from USB capture (window_id in byte 8)
-        # This is for a basic prescan/scan setup
-        wdb = bytearray([
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32,  # Header, length=50
-            window_id,  # Window ID (1 or 2)
-            0x00,
-            0x0b, 0x54,  # X resolution (2900 dpi)
-            0x0b, 0x54,  # Y resolution (2900 dpi)
-            0x00, 0x00, 0x00, 0x00,  # Upper left X
-            0x00, 0x00, 0x00, 0x00,  # Upper left Y
-            0x00, 0x00,
-            0x0b, 0x36,  # Width
-            0x00, 0x00,
-            0x10, 0xec,  # Height
-            0x00, 0x00, 0x00, 0x02,  # Brightness, etc.
-            0x08, 0x00, 0x00, 0x00,  # Contrast, etc.
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00,
-            0x81, 0x01, 0x02, 0x02, 0xff,  # Scan mode settings
-            0x00, 0x00,
-            0x00, 0x00,  # Checksum (will be calculated)
-        ])
+        # WDB data from USB capture - prescan uses low resolution (96 DPI)
+        # Structure: header(8) + window_id(1) + res_xy(4) + offset_xy(8) + size(8) +
+        #            brightness/threshold/contrast/composition(4) + depth(1) + zeros(13) +
+        #            multiread(1) + averaging(1) + scan_kind(1) + scan_mode(1) +
+        #            color_interleave(1) + ae(1) + exposure(4)
+        # Key differences:
+        #   - prescan: res=0x0060 (96 DPI), scan_kind=0x02
+        #   - normal: res=0x0b54 (2900 DPI), scan_kind=0x01
 
-        # Calculate simple checksum for last 2 bytes (sum of all prior bytes mod 65536)
-        checksum = sum(wdb[:-2]) & 0xFFFF
-        wdb[-2] = (checksum >> 8) & 0xFF
-        wdb[-1] = checksum & 0xFF
+        if scan_type == 'prescan':
+            # Exact bytes from USB capture for prescan (low-res AE scan)
+            # Resolution: 0x0060 = 96 DPI, scan_kind: 0x02
+            wdb_data = {
+                1: bytes.fromhex('0000000000000032010000600060000000000000000000000b3600008760000000050c000000000000000000000000000081020202ff0000a381'),
+                2: bytes.fromhex('0000000000000032020000600060000000000000000000000b3600008760000000050c000000000000000000000000000081020202ff00008452'),
+                3: bytes.fromhex('0000000000000032030000600060000000000000000000000b3600008760000000050c000000000000000000000000000081020202ff00004e29'),
+            }
+        else:
+            # Full resolution scan (2900 DPI), scan_kind: 0x01
+            wdb_data = {
+                1: bytes.fromhex('000000000000003201000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff00009ce6'),
+                2: bytes.fromhex('000000000000003202000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff0000f912'),
+                3: bytes.fromhex('000000000000003203000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff0000d77a'),
+                9: bytes.fromhex('000000000000003209000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff0002056c'),
+            }
 
-        _, status = self._issue_command(cmd, data_out=bytes(wdb))
+        wdb = wdb_data.get(window_id)
+        if wdb is None:
+            print(f"  ⚠️  Unknown window ID {window_id} for scan_type={scan_type}")
+            return False
+
+        print(f"    Sending SET_WINDOW {window_id}...")
+        _, status = self._issue_command(cmd, data_out=wdb)
         if status != StatusType.READY:
             print(f"  ⚠️  SET_WINDOW {window_id} failed")
             return False
@@ -1248,39 +1254,18 @@ class CoolscanProtocol:
         if not self.set_window_wdb(wdb):
             return False
 
-        # Step 1b: INQUIRY commands required between MODE_SELECT and SET_WINDOW
-        # From USB capture: INQUIRY 0xe2 (film status), INQUIRY 0x01 (capabilities)
-        try:
-            # INQUIRY page 0xe2 (film position/status)
-            cmd = self._build_6byte_command(0x12, page=0x01, param2=0xe2, alloc_length=0x04, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=4)
-            if status == StatusType.READY and len(data) >= 4:
-                full_len = data[3]
-                if full_len > 4:
-                    cmd = self._build_6byte_command(0x12, page=0x01, param2=0xe2, alloc_length=full_len, control=0x80)
-                    self._issue_command(cmd, data_in_length=full_len)
-
-            # INQUIRY page 0x01 (supported pages)
-            cmd = self._build_6byte_command(0x12, page=0x01, param2=0x01, alloc_length=0x04, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=4)
-            if status == StatusType.READY and len(data) >= 4:
-                full_len = data[3]
-                if full_len > 4:
-                    cmd = self._build_6byte_command(0x12, page=0x01, param2=0x01, alloc_length=full_len, control=0x80)
-                    self._issue_command(cmd, data_in_length=full_len)
-        except Exception as e:
-            print(f"  ⚠️  INQUIRY after MODE_SELECT failed: {e}")
-            # Continue anyway - these may not be strictly required
-
-        # Step 1c: Small delay then TEST_UNIT_READY (from USB capture ~100ms gap)
-        time.sleep(0.1)
+        # Step 1b: Wait for scanner to be ready after MODE_SELECT
+        # USB capture shows ~130ms gap between MODE_SELECT and SET_WINDOW
+        time.sleep(0.15)
         if not self.wait_scanner(max_attempts=5):
             print("  ⚠️  Scanner not ready after MODE_SELECT")
             return False
 
-        # Step 2: SET_WINDOW with 58-byte window descriptors (windows 1, 2, 3, 9 from capture)
-        for win_id in [1, 2, 3, 9]:
-            if not self.set_scan_window(win_id):
+        # Step 2: SET_WINDOW with 58-byte window descriptors
+        # For prescan: only windows 1, 2, 3 (RGB) - no infrared (window 9)
+        # USB capture shows exactly 3 SET_WINDOW commands for prescan
+        for win_id in [1, 2, 3]:
+            if not self.set_scan_window(win_id, scan_type='prescan'):
                 return False
         print("  ✅ Windows set")
 
