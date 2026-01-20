@@ -163,7 +163,7 @@ From the capture (single scan session):
 7. **Allocation length in byte 4** - Specifies how many bytes to read
 8. **Control byte in byte 5** - 0x80 for most commands, 0x00 for simple ones (KEY DIFFERENCE from standard SCSI)
 
-## Window Setting Sequence
+## Window Setting Sequence and Data Types
 
 ### MODE_SELECT + WRITE Pattern
 
@@ -175,16 +175,47 @@ From USB capture analysis, setting the window uses a two-step process:
    - Send 20 bytes: `000000080000000000000001030600000b540000`
    - Check phase again, then read status
 
-2. **WRITE (0x2a)** - Send WDB in 32-byte chunks
-   - Command format: `2a000300[chunk]010100[length]00` (10 bytes)
-   - Chunk index in byte 3 (0, 1, 2...)
-   - Length bytes 7-8 are little-endian (0x20 0x00 = 32 bytes)
-   - Phase check returns 0x02 (Data OUT)
-   - Send chunk data (32 bytes)
-   - Check phase again, then read status
-   - Repeat for each chunk
+2. **WRITE (0x2a)** - Originally misinterpreted as sending WDB chunks; capture and SANE
+   code analysis show it is actually used for LUT and other data types. WDBs are sent
+   by SET_WINDOW (0x24), not via WRITE.
 
-**Key Discovery**: SET_WINDOW (0x24) sends the 58-byte Window Descriptor Block (WDB). WRITE (0x2a) with datatype 0x03 is used for LUT data (8192 bytes per channel).
+**Key Discovery**: SET_WINDOW (0x24) sends the 58-byte Window Descriptor Block (WDB).
+WRITE (0x2a) with datatype 0x03 is used for LUT data (8192 bytes per channel).
+
+### READ/WRITE Datatypes Observed (0x28 / 0x2a)
+
+From `usb_capture_timing.txt` we see several distinct datatype usages:
+
+- `0x00` (READ): Image data blocks (`28000000000001fec080`, `280000000000002d0080`)
+- `0x87` (READ): Internal status / progress (`28008700000000000680`, `...21 80`, `...18 80`)
+- `0x8e` (READ): Exposure / calibration tables (`28008e00000000000680`, `28008e000000000d8880`)
+- `0x8f` (WRITE): Small control blocks (`2a008f00000300003400`)
+- `0x03` (WRITE): LUT data (`2a000300010100200000`, etc.)
+
+These align with the unified spec section on READ/WRITE datatypes and help explain
+the blocks that appear after START_SCAN in the prescan capture.
+
+## Prescan Post-START_SCAN Timeline (Summarised)
+
+After the prescan `START_SCAN` (`1b0000000300` + `010203`), the capture shows:
+
+1. **Immediate status / progress reads** using datatype `0x87` (small 6–33 byte blocks)
+2. **Polling loop** using TEST_UNIT_READY (`000000000000`) until the scanner
+   transitions from BUSY (`0202040100000000`) to READY (`0000000000000000`)
+3. **Image data transfer** via READ(10) with datatype `0x00`:
+   - Two large blocks of 130752 bytes (`28000000000001fec080`)
+   - One tail block of 11520 bytes (`280000000000002d0080`)
+4. **Exposure / calibration phase**:
+   - INQUIRY page `0xc1` (short then long) to read back configuration/WDB
+   - READ(10) with datatype `0x8e` (6-byte header + 3456-byte table)
+5. **Control writeback**:
+   - WRITE(10) with datatype `0x8f` and 52-byte payload (`2a008f00000300003400`)
+
+On the SANE side this corresponds roughly to `cs3_scan()` followed by
+`cs3_get_exposure()`: SANE uses `GET_WINDOW` (0x25) to read 58-byte WDBs and
+extract exposure from bytes 54–57, while the LS-40 USB capture shows Nikon Scan
+using INQUIRY `0xc1` + datatype `0x8e` instead. Both routes ultimately obtain the
+same exposure information that prescan is designed to measure.
 
 ## Implementation Status
 

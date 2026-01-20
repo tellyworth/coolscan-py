@@ -133,6 +133,32 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 - G channel: `2a000300020100200000` → send 8192 bytes
 - B channel: `2a000300030100200000` → send 8192 bytes
 
+#### READ/WRITE Datatypes (0x28 / 0x2a)
+
+The scanner uses **datatype codes in byte 2** of READ(10) / WRITE(10) commands to
+distinguish what is being transferred:
+
+- `0x00` (READ): Image data blocks (prescan / full scan pixels)
+- `0x87` (READ): Internal status / progress blocks (6–33 byte payloads)
+- `0x8e` (READ): Exposure / calibration tables (prescan statistics)
+- `0x8f` (WRITE): Small control blocks (e.g. frame / exposure program writeback)
+- `0x03` (WRITE): LUT data (as described above)
+
+Examples from `usb_capture_timing.txt`:
+
+- Image data:
+  - `28000000000001fec080` → READ 0x1fec0 bytes of scan data
+  - `280000000000002d0080` → READ 0x2d00 bytes (final tail block)
+- Status / progress:
+  - `28008700000000000680` → READ 6 bytes (datatype 0x87)
+  - `28008700000000002180` → READ 0x21 bytes (datatype 0x87)
+  - `28008700000000001880` → READ 0x18 bytes (datatype 0x87)
+- Exposure / calibration:
+  - `28008e00000000000680` → READ 6 bytes (header)
+  - `28008e000000000d8880` → READ 0x0d88 bytes (3456-byte table)
+- Control / writeback:
+  - `2a008f00000300003400` → WRITE 0x34 bytes (datatype 0x8f)
+
 ## Communication Protocol Pattern
 
 ### Standard Command Sequence (from USB capture)
