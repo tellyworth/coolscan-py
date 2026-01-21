@@ -316,6 +316,37 @@ The enhanced implementation includes retry logic and proper timing:
 
 ## Development
 
+### Code Quality and Linting
+
+The project includes linting configuration to catch syntax and style errors early:
+
+```bash
+# Quick syntax check (catches indentation errors)
+make syntax-check
+
+# Run full linting (flake8 + mypy)
+make lint
+
+# Auto-format code with black
+make format
+
+# Run all checks (lint + tests)
+make check-all
+```
+
+**Linting Tools:**
+- **flake8** - Style guide enforcement (configured in `.flake8`)
+- **black** - Code formatter (configured in `pyproject.toml`)
+- **mypy** - Type checking (configured in `pyproject.toml`)
+
+**Makefile Targets:**
+- `make syntax-check` - Quick Python syntax validation (catches indentation errors)
+- `make lint` - Run flake8 and mypy
+- `make lint-fix` - Auto-format code with black
+- `make test` - Run all tests
+- `make test-fast` - Run tests with short traceback, stop on first failure
+- `make check-all` - Run linting + tests
+
 ### Architecture
 - `coolscan/device.py` - Scanner detection and device management
 - `coolscan/protocol.py` - Enhanced SANE-based communication protocol

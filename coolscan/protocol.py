@@ -1359,6 +1359,117 @@ class CoolscanProtocol:
             print(f"    ⚠️  Failed to read exposure data: {e}")
             return None
 
+    def get_window(self, window_id: int) -> Optional[bytes]:
+        """
+        Read back a Window Descriptor Block (WDB) using GET_WINDOW command.
+
+        From USB capture: 25010000000100003a80 (window 1)
+        Format: 25 01 00 00 00 [window_id] 00 00 3a 80 (10 bytes)
+        Returns 58-byte WDB.
+
+        Args:
+            window_id: Window ID (0x01=R, 0x02=G, 0x03=B, 0x09=IR)
+
+        Returns:
+            58-byte WDB data, or None if failed
+        """
+        if self.verbose:
+            print(f"  Reading WDB for window {window_id}...")
+
+        # GET_WINDOW command: 25 01 00 00 00 [window_id] 00 00 3a 80
+        cmd = struct.pack('BBBBBBBBBB',
+            0x25,  # GET_WINDOW command
+            0x01,  # Subcommand/page
+            0x00,  # Reserved
+            0x00,  # Reserved
+            0x00,  # Reserved
+            window_id,  # Window ID (0x01=R, 0x02=G, 0x03=B, 0x09=IR)
+            0x00,  # Reserved
+            0x00,  # Reserved
+            0x3a,  # Allocation length (58 bytes)
+            0x80   # Control byte
+        )
+
+        try:
+            data, status = self._issue_command(cmd, data_in_length=58)
+            if status == StatusType.READY and len(data) == 58:
+                if self.verbose:
+                    print(f"    Read WDB for window {window_id}: {len(data)} bytes")
+                return data
+            else:
+                print(f"    ⚠️  Failed to read WDB: status={status}, len={len(data) if data else 0}")
+                return None
+        except Exception as e:
+            print(f"    ⚠️  Error reading WDB: {e}")
+            return None
+
+    def extract_exposure_from_wdb(self, wdb: bytes) -> Optional[int]:
+        """
+        Extract exposure value from WDB bytes 54-57.
+
+        From SANE backend (coolscan3.c):
+        exposure = 65536 * (256 * wdb[54] + wdb[55]) + 256 * wdb[56] + wdb[57]
+
+        Value is in 10ns units.
+
+        Args:
+            wdb: 58-byte Window Descriptor Block
+
+        Returns:
+            Exposure value in 10ns units, or None if invalid
+        """
+        if len(wdb) < 58:
+            return None
+
+        # Extract 4-byte exposure value (big-endian) from bytes 54-57
+        exposure = (65536 * (256 * wdb[54] + wdb[55]) +
+                    256 * wdb[56] + wdb[57])
+
+        return exposure
+
+    def get_exposure_values(self, colors: list = [1, 2, 3]) -> Optional[dict]:
+        """
+        Get exposure values for specified color channels by reading WDBs.
+
+        This is equivalent to SANE's cs3_get_exposure() function.
+        Reads WDBs for each color channel and extracts exposure from bytes 54-57.
+
+        Args:
+            colors: List of window IDs (default [1, 2, 3] for R, G, B)
+
+        Returns:
+            Dict with keys 'R', 'G', 'B' (and optionally 'IR') mapping to exposure
+            values in 10ns units, or None if failed
+        """
+        if self.verbose:
+            print("  Getting exposure values from WDBs...")
+
+        exposure_values = {}
+        color_names = {1: 'R', 2: 'G', 3: 'B', 9: 'IR'}
+
+        for window_id in colors:
+            wdb = self.get_window(window_id)
+            if wdb is None:
+                print(f"    ⚠️  Failed to read WDB for window {window_id}")
+                continue
+
+            exposure = self.extract_exposure_from_wdb(wdb)
+            if exposure is not None:
+                color_name = color_names.get(window_id, f'Window{window_id}')
+                exposure_values[color_name] = exposure
+                if self.verbose:
+                    # Convert to milliseconds for readability
+                    exposure_ms = exposure / 100000.0  # 10ns units -> ms
+                    print(f"    {color_name}: {exposure} (10ns) = {exposure_ms:.2f} ms")
+            else:
+                print(f"    ⚠️  Failed to extract exposure from WDB for window {window_id}")
+
+        if len(exposure_values) == 0:
+            print("    ⚠️  No exposure values extracted")
+            return None
+
+        return exposure_values
+
     def cancel_scan(self) -> bool:
         """Cancel the current scan operation."""
         cmd = self._parse_command("c0 00 00 00 00 00")
@@ -1439,6 +1550,16 @@ class CoolscanProtocol:
         if exposure_data is None:
             print("  ⚠️  Failed to read exposure data")
             # Don't fail - image data was already read
+
+        # Step 8: Get exposure values from WDBs (optional but recommended)
+        # This reads back the WDBs and extracts exposure from bytes 54-57
+        # Equivalent to SANE's cs3_get_exposure() function
+        exposure_values = self.get_exposure_values(colors=[1, 2, 3])  # R, G, B
+        if exposure_values:
+            if self.verbose:
+                print("  ✅ Exposure values extracted from WDBs")
+        else:
+            print("  ⚠️  Could not extract exposure values from WDBs")
 
         print("✅ Prescan completed")
         return True
