@@ -691,7 +691,7 @@ class CoolscanProtocol:
                     return b'', StatusType.ERROR
 
             # Read data if phase is Data IN (0x03)
-            data_in = b''
+                data_in = b''
             if phase_byte == 0x03 and data_in_length > 0:
                 try:
                     data_in = self._usb_read_bulk(data_in_length)
@@ -701,7 +701,7 @@ class CoolscanProtocol:
                     print(f"    ⚠️  Data read failed: {e}")
                     data_in = b''
 
-            # Read status (8 bytes)
+                # Read status (8 bytes)
             try:
                 status_data = self._usb_read_bulk(8)
                 if hasattr(status_data, 'tobytes'):
@@ -720,7 +720,7 @@ class CoolscanProtocol:
                     self._usb_write_bulk(self._pack_byte(0xd0))
                 except:
                     pass
-                return data_in, StatusType.ERROR
+                    return data_in, StatusType.ERROR
 
         except Exception as e:
             print(f"    ❌ USB command error: {e}")
@@ -1202,9 +1202,10 @@ class CoolscanProtocol:
         - Image data: 28000000000001fec080 (130752 bytes, datatype 0x00)
         - Status: 28008700000000000680 (6 bytes, datatype 0x87)
         - Exposure: 28008e00000000000680 (6 bytes header, datatype 0x8e)
-        - Exposure table: 28008e000000000d8880 (3456 bytes, datatype 0x8e)
+        - Exposure table: 28008e000000000d8880 (3464 bytes, datatype 0x8e)
         """
-        print(f"Reading scan data (datatype: {datatype.name}, length: {length})...")
+        if self.verbose:
+            print(f"Reading scan data (datatype: {datatype.name}, length: {length})...")
         # Format: 28 00 [datatype] 00 00 00 [len_hi] [len_mid] [len_lo] 80
         # From capture: 28000000000001fec080 = 28 00 00 00 00 00 01 fe c0 80
         # Byte 0: 0x28 (READ command)
@@ -1227,10 +1228,136 @@ class CoolscanProtocol:
         data, status = self._issue_command(cmd, data_in_length=length)
 
         if status == StatusType.READY:
-            print(f"Read {len(data)} bytes successfully")
+            if self.verbose:
+                print(f"Read {len(data)} bytes successfully")
             return data
         else:
             raise RuntimeError(f"Read scan data failed with status {status}")
+
+    def poll_until_ready(self, timeout: int = 30, poll_interval: float = 0.1) -> bool:
+        """
+        Poll scanner with TEST_UNIT_READY until it's ready (not busy/processing).
+
+        From USB capture: After START_SCAN, scanner returns status 0x0202040100000000
+        (PROCESSING) while scanning, then 0x0000000000000000 (READY) when complete.
+
+        Args:
+            timeout: Maximum time to wait in seconds
+            poll_interval: Time between polls in seconds (default 0.1s = 100ms)
+
+        Returns:
+            True if scanner becomes ready, False if timeout
+        """
+        max_attempts = int(timeout / poll_interval)
+        start_time = time.time()
+
+        for attempt in range(max_attempts):
+            try:
+                cmd = self._build_6byte_command(0x00, control=0x00)
+                _, status = self._issue_command(cmd)
+
+                if status == StatusType.READY:
+                    elapsed = time.time() - start_time
+                    if self.verbose:
+                        print(f"  Scanner ready after {elapsed:.1f}s ({attempt + 1} polls)")
+                    return True
+                elif status == StatusType.ERROR:
+                    # Some errors might indicate still processing
+                    if self.verbose and attempt % 10 == 0:
+                        print(f"  Polling... (attempt {attempt + 1}, status: {status.name})")
+
+                time.sleep(poll_interval)
+            except Exception as e:
+                if self.verbose:
+                    print(f"  Poll error (attempt {attempt + 1}): {e}")
+                time.sleep(poll_interval)
+                continue
+
+        elapsed = time.time() - start_time
+        print(f"  ⚠️  Scanner not ready after {elapsed:.1f}s ({max_attempts} polls)")
+        return False
+
+    def read_prescan_image_data(self) -> bytes:
+        """
+        Read prescan image data blocks.
+
+        From USB capture: Two 130752-byte blocks + one 11520-byte residual block.
+        Total: 2 * 130752 + 11520 = 273024 bytes
+
+        Returns:
+            Concatenated image data bytes
+        """
+        if self.verbose:
+            print("  Reading prescan image data...")
+
+        all_data = bytearray()
+
+        # Block 1: 130752 bytes (0x01fec0)
+        try:
+            data1 = self.read_scan_data(130752, DataType.IMAGE_DATA)
+            all_data.extend(data1)
+            if self.verbose:
+                print(f"    Read block 1: {len(data1)} bytes")
+        except Exception as e:
+            print(f"    ⚠️  Failed to read block 1: {e}")
+            return bytes(all_data)
+
+        # Block 2: 130752 bytes (0x01fec0)
+        try:
+            data2 = self.read_scan_data(130752, DataType.IMAGE_DATA)
+            all_data.extend(data2)
+            if self.verbose:
+                print(f"    Read block 2: {len(data2)} bytes")
+        except Exception as e:
+            print(f"    ⚠️  Failed to read block 2: {e}")
+            return bytes(all_data)
+
+        # Residual block: 11520 bytes (0x2d00)
+        try:
+            data3 = self.read_scan_data(11520, DataType.IMAGE_DATA)
+            all_data.extend(data3)
+            if self.verbose:
+                print(f"    Read residual block: {len(data3)} bytes")
+        except Exception as e:
+            print(f"    ⚠️  Failed to read residual block: {e}")
+            return bytes(all_data)
+
+        if self.verbose:
+            print(f"  ✅ Total image data: {len(all_data)} bytes")
+        return bytes(all_data)
+
+    def read_exposure_data(self) -> Optional[dict]:
+        """
+        Read exposure/calibration data (datatype 0x8e).
+
+        From USB capture:
+        1. Read 6-byte header: 28008e00000000000680
+        2. Read 3464-byte table: 28008e000000000d8880
+
+        Returns:
+            Dict with 'header' and 'table' keys, or None if failed
+        """
+        if self.verbose:
+            print("  Reading exposure/calibration data...")
+
+        try:
+            # Read header (6 bytes)
+            header = self.read_scan_data(6, DataType.EXPOSURE_CALIBRATION)
+            if self.verbose:
+                print(f"    Read exposure header: {len(header)} bytes")
+
+            # Read table (3464 bytes = 0x0d88)
+            table = self.read_scan_data(0x0d88, DataType.EXPOSURE_CALIBRATION)
+            if self.verbose:
+                print(f"    Read exposure table: {len(table)} bytes")
+
+            return {
+                'header': header,
+                'table': table
+            }
+        except Exception as e:
+            print(f"    ⚠️  Failed to read exposure data: {e}")
+            return None
 
     def cancel_scan(self) -> bool:
         """Cancel the current scan operation."""
@@ -1291,12 +1418,27 @@ class CoolscanProtocol:
         if not self.start_scan():
             return False
 
-        print("  Waiting 8s for prescan...")
-        time.sleep(8)
-
-        if not self.scanner_ready(timeout=30):
+        # Step 5: Poll until scanner is ready (replaces fixed 8s sleep)
+        # From USB capture: Scanner returns PROCESSING status while scanning,
+        # then READY when complete (~13 seconds for prescan)
+        print("  Waiting for prescan to complete...")
+        if not self.poll_until_ready(timeout=30, poll_interval=0.1):
             print("  ⚠️  Scanner not ready after prescan")
             return False
+
+        # Step 6: Read prescan image data
+        # From USB capture: Two 130752-byte blocks + one 11520-byte residual
+        image_data = self.read_prescan_image_data()
+        if len(image_data) == 0:
+            print("  ⚠️  No image data read")
+            # Don't fail - exposure data might still be useful
+
+        # Step 7: Read exposure/calibration data
+        # From USB capture: 6-byte header + 3464-byte table (datatype 0x8e)
+        exposure_data = self.read_exposure_data()
+        if exposure_data is None:
+            print("  ⚠️  Failed to read exposure data")
+            # Don't fail - image data was already read
 
         print("✅ Prescan completed")
         return True
@@ -1484,8 +1626,9 @@ class CoolscanProtocol:
                     # Not supported on macOS, that's OK
                     pass
 
-                usb.util.dispose_resources(self.usb_device)
             except Exception:
                 # Ignore errors during cleanup
                 pass
+            finally:
+                usb.util.dispose_resources(self.usb_device)
         # TODO: Close SCSI connection if needed
