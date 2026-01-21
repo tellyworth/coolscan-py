@@ -49,8 +49,11 @@ class StatusType(Enum):
 # Data type codes from SANE backend
 class DataType(Enum):
     """Data type codes for READ/SEND commands."""
-    IMAGE_DATA = 0x00
+    IMAGE_DATA = 0x00  # Image/pixel data (prescan and full scan)
     LUT = 0x01
+    STATUS_PROGRESS = 0x87  # Internal status/progress information
+    EXPOSURE_CALIBRATION = 0x8e  # Exposure/calibration tables
+    CONTROL_FRAME = 0x8f  # Control/frame position data (WRITE)
     IMAGE_POSITIONS = 0x88
     SHADING_DATA = 0xa0
     USER_REG_GAMMA = 0xc0
@@ -1192,27 +1195,33 @@ class CoolscanProtocol:
         """
         Read scan data from the scanner with proper datatype.
 
-        Format from USB capture: 24 00 00 00 00 00 00 00 3a 80 (10 bytes)
-        This is READ command (0x24) with allocation length 0x3a (58 bytes)
-        Bytes 8-9: Allocation length (big-endian, 2 bytes), byte 9 has 0x80 control bit
+        Format from USB capture: 28 00 [datatype] 00 00 00 [len_hi] [len_mid] [len_lo] 80 (10 bytes)
+        This is READ(10) command (0x28) with datatype in byte 2 and 3-byte length.
+
+        Examples from USB capture:
+        - Image data: 28000000000001fec080 (130752 bytes, datatype 0x00)
+        - Status: 28008700000000000680 (6 bytes, datatype 0x87)
+        - Exposure: 28008e00000000000680 (6 bytes header, datatype 0x8e)
+        - Exposure table: 28008e000000000d8880 (3456 bytes, datatype 0x8e)
         """
         print(f"Reading scan data (datatype: {datatype.name}, length: {length})...")
-        # Format: 24 00 00 00 00 00 00 00 [length_high] [length_low|0x80]
-        # From capture: 24000000000000003a80 = 24 00 00 00 00 00 00 00 3a 80
-        # Bytes 8-9: Allocation length (big-endian, 2 bytes)
-        length_high = (length >> 8) & 0xff
-        length_low = length & 0xff
+        # Format: 28 00 [datatype] 00 00 00 [len_hi] [len_mid] [len_lo] 80
+        # From capture: 28000000000001fec080 = 28 00 00 00 00 00 01 fe c0 80
+        # Byte 0: 0x28 (READ command)
+        # Byte 2: Datatype (0x00=image, 0x87=status, 0x8e=exposure)
+        # Bytes 6-8: Length (3 bytes, big-endian)
+        # Byte 9: 0x80 (control byte)
         cmd = struct.pack('BBBBBBBBBB',
-            0x24,  # READ command
+            0x28,  # READ(10) command (0x28, not 0x24!)
+            0x00,  # Reserved
+            datatype.value,  # Datatype in byte 2
             0x00,  # Reserved
             0x00,  # Reserved
             0x00,  # Reserved
-            0x00,  # Reserved
-            0x00,  # Reserved
-            0x00,  # Reserved
-            0x00,  # Reserved
-            length_high,  # Allocation length high byte
-            length_low | 0x80  # Allocation length low byte | control bit
+            (length >> 16) & 0xff,  # Length high byte
+            (length >> 8) & 0xff,   # Length mid byte
+            length & 0xff,           # Length low byte
+            0x80   # Control byte
         )
 
         data, status = self._issue_command(cmd, data_in_length=length)
