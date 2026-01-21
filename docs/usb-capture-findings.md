@@ -201,14 +201,20 @@ After the prescan `START_SCAN` (`1b0000000300` + `010203`), the capture shows:
 
 1. **Immediate status / progress reads** using datatype `0x87` (small 6–33 byte blocks)
 2. **Polling loop** using TEST_UNIT_READY (`000000000000`) until the scanner
-   transitions from BUSY (`0202040100000000`) to READY (`0000000000000000`)
+   transitions from PROCESSING (`0202040100000000`) to READY (`0000000000000000`)
+   - **Implementation**: `poll_until_ready()` method polls every ~100ms
+   - **Timing**: ~13 seconds from START_SCAN to READY (dynamic, not fixed)
 3. **Image data transfer** via READ(10) with datatype `0x00`:
    - Two large blocks of 130752 bytes (`28000000000001fec080`)
    - One tail block of 11520 bytes (`280000000000002d0080`)
+   - **Implementation**: `read_prescan_image_data()` method reads all three blocks
+   - **Total**: 273024 bytes of prescan image data
 4. **Exposure / calibration phase**:
-   - INQUIRY page `0xc1` (short then long) to read back configuration/WDB
-   - READ(10) with datatype `0x8e` (6-byte header + 3456-byte table)
-5. **Control writeback**:
+   - INQUIRY page `0xc1` (short then long) to read back configuration/WDB (optional)
+   - READ(10) with datatype `0x8e` (6-byte header + 3464-byte table)
+   - **Implementation**: `read_exposure_data()` method reads header and table
+   - **Note**: Table size is 3464 bytes (0x0d88), not 3456 bytes
+5. **Control writeback** (optional):
    - WRITE(10) with datatype `0x8f` and 52-byte payload (`2a008f00000300003400`)
 
 On the SANE side this corresponds roughly to `cs3_scan()` followed by
@@ -216,6 +222,11 @@ On the SANE side this corresponds roughly to `cs3_scan()` followed by
 extract exposure from bytes 54–57, while the LS-40 USB capture shows Nikon Scan
 using INQUIRY `0xc1` + datatype `0x8e` instead. Both routes ultimately obtain the
 same exposure information that prescan is designed to measure.
+
+**Implementation Methods:**
+- `poll_until_ready(timeout=30, poll_interval=0.1)` - Dynamic polling until ready
+- `read_prescan_image_data()` - Reads all image data blocks (273024 bytes total)
+- `read_exposure_data()` - Reads exposure header (6 bytes) and table (3464 bytes)
 
 ## Implementation Status
 

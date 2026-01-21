@@ -233,7 +233,7 @@ Examples from `usb_capture_timing.txt`:
 ### From SANE Backend
 
 - **wait_scanner()**: Up to 40 attempts with 0.5 second delays (20 seconds max)
-- **Prescan timing**: 8 second sleep after starting prescan
+- **Prescan timing**: Originally used 8 second sleep, now uses dynamic polling (`poll_until_ready()`)
 - **Handles DEVICE_BUSY**: Retries on busy status
 
 ### From USB Capture
@@ -314,18 +314,25 @@ The prescan performs auto-exposure (AE) at low resolution to determine optimal e
 5. **TEST_UNIT_READY** - Required before LUT upload
 6. **WRITE LUT R/G/B** × 3 - Upload identity LUTs
 7. **START_SCAN** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
-8. **Polling Loop** - TEST_UNIT_READY every ~100ms
-   - Status `0202040100000000` = NOT READY (scanner is scanning)
+8. **Polling Loop** - `poll_until_ready()` polls with TEST_UNIT_READY every ~100ms
+   - Status `0202040100000000` = PROCESSING (scanner is scanning)
    - Status `0000000000000000` = READY (scan pass complete)
-9. **READ** commands to get exposure/calibration data
-10. Process may repeat for multiple passes
+9. **Read Image Data** - `read_prescan_image_data()` reads:
+   - Two 130752-byte blocks (`28000000000001fec080`)
+   - One 11520-byte residual block (`280000000000002d0080`)
+   - Total: 273024 bytes of prescan image data
+10. **Read Exposure Data** - `read_exposure_data()` reads:
+    - 6-byte header (`28008e00000000000680`)
+    - 3464-byte exposure/calibration table (`28008e000000000d8880`)
+11. Process may repeat for multiple passes
 
 **Timing (from USB capture):**
-- START_SCAN to first READY: ~13 seconds
+- START_SCAN to first READY: ~13 seconds (dynamic polling, not fixed sleep)
 - Full prescan cycle: ~25+ seconds with data reading
 
-**Key Insight:** The scanner returns status with sense_key=4 (NOT READY) while scanning.
-Poll with TEST_UNIT_READY until status returns sense_key=0 (READY).
+**Key Insight:** The scanner returns status with sense_key=0x02 (PROCESSING) while scanning.
+Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The implementation uses
+`poll_until_ready()` for dynamic polling instead of a fixed 8-second sleep.
 
 ### Full Scan Sequence (from USB capture)
 

@@ -229,9 +229,10 @@ Full: 1b0000000400  (stop)
 ### ✅ Verified Correct
 
 1. **wait_scanner() logic**: 40 attempts, 0.5s delays matches SANE
-2. **Prescan timing**: 8 second sleep matches SANE
+2. **Prescan timing**: Originally used 8 second sleep (matches SANE), now uses dynamic polling (`poll_until_ready()`) which is more efficient
 3. **Initialization sequence**: High-level flow matches SANE
 4. **Phase checking**: SANE uses phase checks, matches USB pattern
+5. **Prescan data reading**: Now implements full data reading phase (`read_prescan_image_data()`, `read_exposure_data()`)
 
 ### ⚠️ Differences (Expected)
 
