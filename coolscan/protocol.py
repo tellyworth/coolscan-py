@@ -509,36 +509,44 @@ class CoolscanProtocol:
         """
         Wait for scanner to be ready - based on SANE backend wait_scanner().
         """
-        for attempt in range(max_attempts):
-            try:
-                cmd = self._build_6byte_command(0x00, control=0x00)
-                self._usb_write_bulk(cmd)
-                self._usb_write_bulk(self._pack_byte(0xd0))
+        # Use shorter timeout for wait_scanner to fail faster
+        original_timeout = self.usb_device.default_timeout
+        self.usb_device.default_timeout = 2000  # 2 seconds instead of 30
 
+        try:
+            for attempt in range(max_attempts):
                 try:
-                    phase_response = self._usb_read_bulk(1)
-                    if hasattr(phase_response, 'tobytes'):
-                        phase_response = phase_response.tobytes()
+                    cmd = self._build_6byte_command(0x00, control=0x00)
+                    self._usb_write_bulk(cmd)
+                    self._usb_write_bulk(self._pack_byte(0xd0))
+
+                    try:
+                        phase_response = self._usb_read_bulk(1)
+                        if hasattr(phase_response, 'tobytes'):
+                            phase_response = phase_response.tobytes()
+                    except:
+                        time.sleep(delay)
+                        continue
+
+                    status_data = self._usb_read_bulk(8)
+                    if hasattr(status_data, 'tobytes'):
+                        status_data = status_data.tobytes()
+
+                    if status_data and len(status_data) >= 8:
+                        status, _ = self._parse_status(status_data)
+                        if status == StatusType.READY or status == StatusType.NO_DOCS:
+                            return True
+
+                    time.sleep(delay)
                 except:
                     time.sleep(delay)
                     continue
 
-                status_data = self._usb_read_bulk(8)
-                if hasattr(status_data, 'tobytes'):
-                    status_data = status_data.tobytes()
-
-                if status_data and len(status_data) >= 8:
-                    status, _ = self._parse_status(status_data)
-                    if status == StatusType.READY or status == StatusType.NO_DOCS:
-                        return True
-
-                time.sleep(delay)
-            except:
-                time.sleep(delay)
-                continue
-
-        print(f"  ⚠️  Scanner not ready after {max_attempts} attempts")
-        return False
+            print(f"  ⚠️  Scanner not ready after {max_attempts} attempts")
+            return False
+        finally:
+            # Restore original timeout
+            self.usb_device.default_timeout = original_timeout
 
     def _check_phase_with_retry(self, max_retries: int = 3) -> PhaseType:
         """Check phase with retry logic."""
@@ -688,13 +696,8 @@ class CoolscanProtocol:
                 try:
                     self._usb_write_bulk(data_out)
                     time.sleep(0.01)
-                    # After sending data, check phase again for status
-                    self._usb_write_bulk(self._pack_byte(0xd0))
-                    phase_response = self._usb_read_bulk(1)
-                    if hasattr(phase_response, 'tobytes'):
-                        phase_response = phase_response.tobytes()
-                    phase_byte = phase_response[0] if len(phase_response) > 0 else 0x01
-
+                    # After sending DATA_OUT, go straight to reading status (like SANE)
+                    # No phase check needed - status is next in the protocol sequence
                 except Exception as e:
                     print(f"    ⚠️  Data out failed: {e}")
                     return b'', StatusType.ERROR
@@ -746,32 +749,40 @@ class CoolscanProtocol:
 
         Uses the correct 6-byte command format from USB capture.
         """
-        if page >= 0:
-            # Page-specific inquiry - two-step process
-            # First: Get length (4 bytes)
-            cmd = self._build_6byte_command(0x12, page=0x01, param2=page, alloc_length=4, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=4)
+        # Use shorter timeout for INQUIRY to fail faster
+        original_timeout = self.usb_device.default_timeout
+        self.usb_device.default_timeout = 2000  # 2 seconds instead of 30
 
-            if status == StatusType.READY and len(data) >= 4:
-                # Extract actual length from response
-                # Response format: 06 [page] [length_high] [length_low]
-                if len(data) >= 4:
-                    length = data[3] + 4  # Length is in byte 3, add 4 for header
-                else:
-                    length = 4
+        try:
+            if page >= 0:
+                # Page-specific inquiry - two-step process
+                # First: Get length (4 bytes)
+                cmd = self._build_6byte_command(0x12, page=0x01, param2=page, alloc_length=4, control=0x80)
+                data, status = self._issue_command(cmd, data_in_length=4)
 
-                # Second: Get full data
-                cmd = self._build_6byte_command(0x12, page=0x01, param2=page, alloc_length=length, control=0x80)
-                data, status = self._issue_command(cmd, data_in_length=length)
-        else:
-            # Standard inquiry (36 bytes) - format: 12 00 00 00 24 80
-            cmd = self._build_6byte_command(0x12, page=0x00, alloc_length=0x24, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=36)
+                if status == StatusType.READY and len(data) >= 4:
+                    # Extract actual length from response
+                    # Response format: 06 [page] [length_high] [length_low]
+                    if len(data) >= 4:
+                        length = data[3] + 4  # Length is in byte 3, add 4 for header
+                    else:
+                        length = 4
 
-        if status == StatusType.READY:
-            return data
-        else:
-            raise RuntimeError(f"INQUIRY failed with status {status}")
+                    # Second: Get full data
+                    cmd = self._build_6byte_command(0x12, page=0x01, param2=page, alloc_length=length, control=0x80)
+                    data, status = self._issue_command(cmd, data_in_length=length)
+            else:
+                # Standard inquiry (36 bytes) - format: 12 00 00 00 24 80
+                cmd = self._build_6byte_command(0x12, page=0x00, alloc_length=0x24, control=0x80)
+                data, status = self._issue_command(cmd, data_in_length=36)
+
+            if status == StatusType.READY:
+                return data
+            else:
+                raise RuntimeError(f"INQUIRY failed with status {status}")
+        finally:
+            # Restore original timeout
+            self.usb_device.default_timeout = original_timeout
 
     def scanner_ready(self, timeout: int = 30) -> bool:
         """
@@ -869,9 +880,9 @@ class CoolscanProtocol:
                 print("  Clearing endpoints...")
                 try:
                     if hasattr(self, 'bulk_out') and self.bulk_out:
-                        usb.util.clear_halt(self.usb_device, self.bulk_out)
+                        self.usb_device.clear_halt(self.bulk_out.bEndpointAddress)
                     if hasattr(self, 'bulk_in') and self.bulk_in:
-                        usb.util.clear_halt(self.usb_device, self.bulk_in)
+                        self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
                 except Exception as e:
                     print(f"    (endpoint clear: {e})")
 
@@ -1637,8 +1648,13 @@ class CoolscanProtocol:
                     product = inquiry_data[16:32].decode('ascii', errors='ignore').strip()
                     revision = inquiry_data[32:36].decode('ascii', errors='ignore').strip()
                     print(f"  ✅ Device: {vendor} {product} {revision}")
+                else:
+                    print(f"  ❌ Standard INQUIRY returned insufficient data")
+                    return False
             except Exception as e:
-                print(f"  ⚠️  Standard INQUIRY failed: {e}")
+                print(f"  ❌ Standard INQUIRY failed: {e}")
+                print("  Aborting initialization - scanner is not responding")
+                return False
 
             # 2. Wait for scanner ready (multiple TEST_UNIT_READY)
             print("\n2. Waiting for scanner ready...")
