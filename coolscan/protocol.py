@@ -680,18 +680,26 @@ class CoolscanProtocol:
                     print(f"    ⚠️  Scanner still busy")
                     return b'', StatusType.BUSY
 
+            # Initialize data_in before any phase-specific handling
+            data_in = b''
+
             # Send data if phase is Data OUT (0x02)
             if phase_byte == 0x02 and len(data_out) > 0:
                 try:
                     self._usb_write_bulk(data_out)
                     time.sleep(0.01)
-                    phase_byte = 0x01
+                    # After sending data, check phase again for status
+                    self._usb_write_bulk(self._pack_byte(0xd0))
+                    phase_response = self._usb_read_bulk(1)
+                    if hasattr(phase_response, 'tobytes'):
+                        phase_response = phase_response.tobytes()
+                    phase_byte = phase_response[0] if len(phase_response) > 0 else 0x01
+
                 except Exception as e:
                     print(f"    ⚠️  Data out failed: {e}")
                     return b'', StatusType.ERROR
 
             # Read data if phase is Data IN (0x03)
-                data_in = b''
             if phase_byte == 0x03 and data_in_length > 0:
                 try:
                     data_in = self._usb_read_bulk(data_in_length)
@@ -701,7 +709,7 @@ class CoolscanProtocol:
                     print(f"    ⚠️  Data read failed: {e}")
                     data_in = b''
 
-                # Read status (8 bytes)
+            # Read status (8 bytes) - always read status after command
             try:
                 status_data = self._usb_read_bulk(8)
                 if hasattr(status_data, 'tobytes'):
@@ -720,7 +728,7 @@ class CoolscanProtocol:
                     self._usb_write_bulk(self._pack_byte(0xd0))
                 except:
                     pass
-                    return data_in, StatusType.ERROR
+                return data_in, StatusType.ERROR
 
         except Exception as e:
             print(f"    ❌ USB command error: {e}")
@@ -782,27 +790,35 @@ class CoolscanProtocol:
         """
         print("Testing unit ready...")
 
-        # Try multiple times with delays (like the SANE backend)
-        for attempt in range(3):
-            try:
-                if attempt > 0:
-                    print(f"  Retry attempt {attempt + 1}...")
-                    time.sleep(1)  # Wait 1 second between attempts
+        # Use shorter timeout for TEST_UNIT_READY to fail faster
+        original_timeout = self.usb_device.default_timeout
+        self.usb_device.default_timeout = 2000  # 2 seconds instead of 30
 
-                # Format: 00 00 00 00 00 00 (all zeros)
-                cmd = self._build_6byte_command(0x00, control=0x00)
-                print(f"  Sending TEST UNIT READY command: {cmd.hex()}")
-                _, status = self._issue_command(cmd)
-                print(f"  Status: {status}")
+        try:
+            # Try multiple times with shorter delays for faster failure detection
+            for attempt in range(3):
+                try:
+                    if attempt > 0:
+                        print(f"  Retry attempt {attempt + 1}...")
+                        time.sleep(0.2)  # Shorter delay between attempts (200ms instead of 1s)
 
-                if status == StatusType.READY:
-                    return True
+                    # Format: 00 00 00 00 00 00 (all zeros)
+                    cmd = self._build_6byte_command(0x00, control=0x00)
+                    print(f"  Sending TEST UNIT READY command: {cmd.hex()}")
+                    _, status = self._issue_command(cmd)
+                    print(f"  Status: {status}")
 
-            except Exception as e:
-                print(f"  Error in test_unit_ready (attempt {attempt + 1}): {e}")
-                continue
+                    if status == StatusType.READY:
+                        return True
 
-        return False
+                except Exception as e:
+                    print(f"  Error in test_unit_ready (attempt {attempt + 1}): {e}")
+                    continue
+
+            return False
+        finally:
+            # Restore original timeout
+            self.usb_device.default_timeout = original_timeout
 
     def reserve_unit(self) -> bool:
         """Reserve the scanner unit (like SANE coolscan_grab_scanner)."""
