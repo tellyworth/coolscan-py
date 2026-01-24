@@ -257,13 +257,16 @@ class ScannerInfo:
 class CoolscanProtocol:
     """Implements the Coolscan communication protocol."""
 
-    def __init__(self, device):
+    def __init__(self, device, verbose: bool = False):
         self.device = device
         self.interface = device.interface
         self.usb_device = None
         self.scsi_fd = None
         self.scanner_info = None
         self.mud = 2700  # Measurement Unit Divisor
+        self.verbose = verbose  # Control verbose output
+        self._last_status_raw = None  # Store last raw status for detailed logging
+        self._last_status_parsed = None  # Store last parsed status
 
         if self.interface.value == "usb":
             self._init_usb()
@@ -655,6 +658,10 @@ class CoolscanProtocol:
         Issue a USB command following the protocol pattern from USB capture.
         """
         try:
+            # Initialize data_in early (may be set during Overflow handling)
+            data_in = b''
+            remaining_data_length = data_in_length  # Track how much data we still need to read
+
             # Send command + phase check
             self._usb_write_bulk(command)
             self._usb_write_bulk(self._pack_byte(0xd0))
@@ -666,8 +673,55 @@ class CoolscanProtocol:
                     phase_response = phase_response.tobytes()
                 phase_byte = phase_response[0] if len(phase_response) > 0 else 0
             except Exception as e:
-                print(f"    ⚠️  Phase read failed: {e}")
-                phase_byte = 0x03
+                # Handle Overflow - for READ commands, this might mean data is already available
+                if "Overflow" in str(e) or "84" in str(e):
+                    # Overflow means we tried to read 1 byte but more is available
+                    # For READ commands, try to read a small buffer and extract phase byte
+                    if data_in_length > 0:
+                        # Try to read a small chunk to get the phase byte
+                        # The first byte should be the phase (0x03 for DATA_IN)
+                        try:
+                            # Read a small buffer (up to 64 bytes) to get phase + start of data
+                            chunk = self._usb_read_bulk(min(64, data_in_length + 1))
+                            if hasattr(chunk, 'tobytes'):
+                                chunk = chunk.tobytes()
+                            if len(chunk) > 0:
+                                phase_byte = chunk[0]
+                                # If we got data, we'll need to prepend it to the full data read
+                                # Store it for later use
+                                if len(chunk) > 1:
+                                    # We got phase + some data, store the data part
+                                    data_in = chunk[1:]
+                                    # Adjust remaining_data_length to account for what we already read
+                                    remaining_data_length -= len(data_in)
+                                else:
+                                    data_in = b''
+                                print(f"    ⚠️  Overflow on phase read - extracted phase=0x{phase_byte:02x}, got {len(chunk)-1} bytes of data")
+                            else:
+                                phase_byte = 0x03  # Default to DATA_IN
+                                data_in = b''
+                        except Exception as e2:
+                            print(f"    ⚠️  Failed to read chunk after Overflow: {e2}")
+                            phase_byte = 0x03  # Assume DATA_IN phase
+                            data_in = b''
+                    else:
+                        # No data expected - might be status
+                        try:
+                            status_data = self._usb_read_bulk(8)
+                            if hasattr(status_data, 'tobytes'):
+                                status_data = status_data.tobytes()
+                            if len(status_data) >= 8:
+                                status, parsed = self._parse_status(status_data)
+                                print(f"    ⚠️  Got status directly (Overflow on phase): {status}")
+                                return b'', status
+                        except:
+                            pass
+                        phase_byte = 0x03  # Default to DATA_IN
+                        data_in = b''
+                else:
+                    print(f"    ⚠️  Phase read failed: {e}")
+                    phase_byte = 0x03  # Assume DATA_IN phase
+                    data_in = b''
 
             # Handle Busy phase (0x04)
             if phase_byte == 0x04:
@@ -688,8 +742,7 @@ class CoolscanProtocol:
                     print(f"    ⚠️  Scanner still busy")
                     return b'', StatusType.BUSY
 
-            # Initialize data_in before any phase-specific handling
-            data_in = b''
+            # data_in already initialized at start of function
 
             # Send data if phase is Data OUT (0x02)
             if phase_byte == 0x02 and len(data_out) > 0:
@@ -703,14 +756,23 @@ class CoolscanProtocol:
                     return b'', StatusType.ERROR
 
             # Read data if phase is Data IN (0x03)
-            if phase_byte == 0x03 and data_in_length > 0:
+            if phase_byte == 0x03 and remaining_data_length > 0:
                 try:
-                    data_in = self._usb_read_bulk(data_in_length)
-                    if hasattr(data_in, 'tobytes'):
-                        data_in = data_in.tobytes()
+                    # If we already got some data from Overflow handling, prepend it
+                    existing_data = data_in
+
+                    if remaining_data_length > 0:
+                        new_data = self._usb_read_bulk(remaining_data_length)
+                        if hasattr(new_data, 'tobytes'):
+                            new_data = new_data.tobytes()
+                        data_in = existing_data + new_data
+                    else:
+                        data_in = existing_data
                 except Exception as e:
                     print(f"    ⚠️  Data read failed: {e}")
-                    data_in = b''
+                    # Keep existing data if we have it
+                    if len(data_in) == 0:
+                        data_in = b''
 
             # Read status (8 bytes) - always read status after command
             try:
@@ -719,9 +781,20 @@ class CoolscanProtocol:
                     status_data = status_data.tobytes()
                 status, parsed = self._parse_status(status_data)
 
+                # Store raw status for detailed logging (especially for START_SCAN)
+                # This allows us to check ASCQ values
+                if len(status_data) == 8:
+                    self._last_status_raw = status_data
+                    self._last_status_parsed = parsed
+                else:
+                    self._last_status_raw = None
+                    self._last_status_parsed = None
+
                 # Only print if error
                 if status != StatusType.READY:
                     print(f"    Status: {status}, sense: {parsed}")
+                    if len(status_data) == 8:
+                        print(f"    Raw status: {status_data.hex()}")
 
                 return data_in, status
             except Exception as e:
@@ -731,7 +804,7 @@ class CoolscanProtocol:
                     self._usb_write_bulk(self._pack_byte(0xd0))
                 except:
                     pass
-                return data_in, StatusType.ERROR
+                    return data_in, StatusType.ERROR
 
         except Exception as e:
             print(f"    ❌ USB command error: {e}")
@@ -1211,10 +1284,87 @@ class CoolscanProtocol:
         cmd = self._build_6byte_command(0x1b, alloc_length=0x03, control=0x00)
         scan_data = bytes([0x01, 0x02, 0x03])  # R, G, B channels
 
-        _, status = self._issue_command(cmd, data_out=scan_data)
-        if status != StatusType.READY:
-            print(f"  ⚠️  START_SCAN failed")
+        # Issue command and capture the raw status response
+        # We need to get the actual 8-byte status to check ASCQ
+        data, status = self._issue_command(cmd, data_out=scan_data)
+
+        # Check the actual sense codes from the status response
+        # USB capture shows START_SCAN returns: 0209800601000000
+        # sense_key=9 (0x09), ASC=128 (0x80), ASCQ=6 (0x06)
+        # This is expected and scanner continues to work
+        # However, our status parser might classify this as ERROR or READY
+        # We need to check the actual sense codes regardless of status type
+
+        # Always log the sense codes for START_SCAN to diagnose issues
+        if self._last_status_parsed:
+            sense_key = self._last_status_parsed.get('sense_key', 0)
+            sense_asc = self._last_status_parsed.get('sense_asc', 0)
+            sense_ascq = self._last_status_parsed.get('sense_ascq', 0)
+            if self._last_status_raw:
+                print(f"  START_SCAN status: {status}, sense: key=0x{sense_key:02x}, ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}")
+                print(f"  Raw status: {self._last_status_raw.hex()}")
+
+            # USB capture shows ASCQ=6 is expected (scan starts)
+            if sense_key == 0x09 and sense_asc == 0x80:
+                if sense_ascq == 0x06:
+                    print(f"  ✅ ASCQ=6 (expected) - scan should start")
+                elif sense_ascq == 0x01:
+                    print(f"  ⚠️  ASCQ=1 (unexpected) - scan may not start")
+        else:
+                    print(f"  ⚠️  ASCQ=0x{sense_ascq:02x} (unexpected)")
+
+        if status == StatusType.ERROR:
+            # Log the actual sense codes for debugging
+            if self._last_status_parsed:
+                sense_key = self._last_status_parsed.get('sense_key', 0)
+                sense_asc = self._last_status_parsed.get('sense_asc', 0)
+                sense_ascq = self._last_status_parsed.get('sense_ascq', 0)
+                print(f"  ⚠️  START_SCAN returned error status")
+                print(f"     Sense: key=0x{sense_key:02x}, ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}")
+                if self._last_status_raw:
+                    print(f"     Raw status: {self._last_status_raw.hex()}")
+
+                # USB capture shows ASCQ=6 is expected (scan starts)
+                # ASCQ=1 indicates scan command was rejected - this is a real error
+                if sense_key == 0x09 and sense_asc == 0x80:
+                    if sense_ascq == 0x06:
+                        print(f"     ✅ ASCQ=6 (expected) - scan should start")
+                        # Continue - this is expected
+                        return True
+                    elif sense_ascq == 0x01:
+                        print(f"     ❌ ASCQ=1 (error) - scan command rejected")
+                        print(f"     Scanner did not start the scan. Possible causes:")
+                        print(f"       - Scanner not in correct state (needs reset?)")
+                        print(f"       - Missing prerequisite commands")
+                        print(f"       - WDB configuration issue")
+                        print(f"       - Scanner hardware issue or no film inserted")
+                        # Fail immediately - this is a real error
+                        return False
+                    else:
+                        print(f"     ⚠️  ASCQ=0x{sense_ascq:02x} (unexpected)")
+                        # Unknown ASCQ - be conservative and fail
+                        return False
+            else:
+                print(f"  ⚠️  START_SCAN returned error status (no sense details)")
+
+            # Unknown error - fail to be safe
             return False
+        elif status != StatusType.READY:
+            print(f"  ⚠️  START_SCAN failed with status: {status}")
+            return False
+
+        # If we get here, status is READY
+        # But USB capture shows START_SCAN should return ERROR with sense_key=9, ASC=128, ASCQ=6
+        # Log this for debugging
+        if self._last_status_parsed:
+            sense_key = self._last_status_parsed.get('sense_key', 0)
+            sense_asc = self._last_status_parsed.get('sense_asc', 0)
+            sense_ascq = self._last_status_parsed.get('sense_ascq', 0)
+            if sense_key != 0x00:  # If sense_key is not 0, it's unusual for READY status
+                print(f"  ⚠️  START_SCAN returned READY but sense_key=0x{sense_key:02x}, ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}")
+                if self._last_status_raw:
+                    print(f"     Raw status: {self._last_status_raw.hex()}")
+
         print("  ✅ Scan started")
         return True
 
@@ -1233,33 +1383,42 @@ class CoolscanProtocol:
         """
         if self.verbose:
             print(f"Reading scan data (datatype: {datatype.name}, length: {length})...")
-        # Format: 28 00 [datatype] 00 00 00 [len_hi] [len_mid] [len_lo] 80
-        # From capture: 28000000000001fec080 = 28 00 00 00 00 00 01 fe c0 80
-        # Byte 0: 0x28 (READ command)
-        # Byte 2: Datatype (0x00=image, 0x87=status, 0x8e=exposure)
-        # Bytes 6-8: Length (3 bytes, big-endian)
-        # Byte 9: 0x80 (control byte)
-        cmd = struct.pack('BBBBBBBBBB',
-            0x28,  # READ(10) command (0x28, not 0x24!)
-            0x00,  # Reserved
-            datatype.value,  # Datatype in byte 2
-            0x00,  # Reserved
-            0x00,  # Reserved
-            0x00,  # Reserved
-            (length >> 16) & 0xff,  # Length high byte
-            (length >> 8) & 0xff,   # Length mid byte
-            length & 0xff,           # Length low byte
-            0x80   # Control byte
-        )
 
-        data, status = self._issue_command(cmd, data_in_length=length)
+        # Use shorter timeout for read operations to fail faster
+        original_timeout = self.usb_device.default_timeout
+        self.usb_device.default_timeout = 5000  # 5 seconds instead of 30
 
-        if status == StatusType.READY:
-            if self.verbose:
-                print(f"Read {len(data)} bytes successfully")
-            return data
-        else:
-            raise RuntimeError(f"Read scan data failed with status {status}")
+        try:
+            # Format: 28 00 [datatype] 00 00 00 [len_hi] [len_mid] [len_lo] 80
+            # From capture: 28000000000001fec080 = 28 00 00 00 00 00 01 fe c0 80
+            # Byte 0: 0x28 (READ command)
+            # Byte 2: Datatype (0x00=image, 0x87=status, 0x8e=exposure)
+            # Bytes 6-8: Length (3 bytes, big-endian)
+            # Byte 9: 0x80 (control byte)
+            cmd = struct.pack('BBBBBBBBBB',
+                0x28,  # READ(10) command (0x28, not 0x24!)
+                0x00,  # Reserved
+                datatype.value,  # Datatype in byte 2
+                0x00,  # Reserved
+                0x00,  # Reserved
+                0x00,  # Reserved
+                (length >> 16) & 0xff,  # Length high byte
+                (length >> 8) & 0xff,   # Length mid byte
+                length & 0xff,           # Length low byte
+                0x80   # Control byte
+            )
+
+            data, status = self._issue_command(cmd, data_in_length=length)
+
+            if status == StatusType.READY:
+                if self.verbose:
+                    print(f"Read {len(data)} bytes successfully")
+                return data
+            else:
+                raise RuntimeError(f"Read scan data failed with status {status}")
+        finally:
+            # Restore original timeout
+            self.usb_device.default_timeout = original_timeout
 
     def poll_until_ready(self, timeout: int = 30, poll_interval: float = 0.1) -> bool:
         """
@@ -1285,23 +1444,38 @@ class CoolscanProtocol:
 
                 if status == StatusType.READY:
                     elapsed = time.time() - start_time
-                    if self.verbose:
-                        print(f"  Scanner ready after {elapsed:.1f}s ({attempt + 1} polls)")
+                    print(f"  ✅ Scanner ready after {elapsed:.1f}s ({attempt + 1} polls)")
                     return True
+                elif status == StatusType.PROCESSING:
+                    # Scanner is actively scanning - continue polling
+                    if attempt % 20 == 0:  # Print every 2 seconds (20 * 0.1s)
+                        elapsed = time.time() - start_time
+                        print(f"  Scanning... ({elapsed:.1f}s, attempt {attempt + 1})")
+                    # Continue polling - don't return yet
                 elif status == StatusType.ERROR:
                     # Some errors might indicate still processing
-                    if self.verbose and attempt % 10 == 0:
-                        print(f"  Polling... (attempt {attempt + 1}, status: {status.name})")
+                    if attempt % 20 == 0:
+                        elapsed = time.time() - start_time
+                        print(f"  Polling... ({elapsed:.1f}s, attempt {attempt + 1}, status: {status.name})")
+                    # Continue polling - don't return yet
+                else:
+                    # Unknown status - continue polling
+                    if attempt % 20 == 0:
+                        elapsed = time.time() - start_time
+                        print(f"  Polling... ({elapsed:.1f}s, attempt {attempt + 1}, status: {status.name})")
 
                 time.sleep(poll_interval)
             except Exception as e:
-                if self.verbose:
-                    print(f"  Poll error (attempt {attempt + 1}): {e}")
+                elapsed = time.time() - start_time
+                if attempt % 20 == 0:  # Print errors periodically too
+                    print(f"  Poll error ({elapsed:.1f}s, attempt {attempt + 1}): {e}")
                 time.sleep(poll_interval)
                 continue
 
+        # Timeout - scanner never became ready
         elapsed = time.time() - start_time
         print(f"  ⚠️  Scanner not ready after {elapsed:.1f}s ({max_attempts} polls)")
+        print(f"  ⚠️  Last status was PROCESSING - scanner may still be scanning")
         return False
 
     def read_prescan_image_data(self) -> bytes:
@@ -1522,6 +1696,23 @@ class CoolscanProtocol:
         """Perform prescan operation."""
         print("Starting prescan...")
 
+        # Step 0: Ensure scanner is ready before starting
+        # If scanner is in a bad state, try to reset it
+        if not self.test_unit_ready():
+            print("  ⚠️  Scanner not ready, attempting reset...")
+            self.reset_scanner()
+            # Wait a bit for scanner to recover
+            time.sleep(0.5)
+            if not self.wait_scanner(max_attempts=5, delay=0.2):
+                print("  ❌ Scanner not responsive after reset")
+                return False
+
+        # Step 0b: Reserve unit (required before scan operations)
+        # USB capture shows RESERVE_UNIT (0x16) before prescan sequence
+        if not self.reserve_unit():
+            print("  ⚠️  Failed to reserve unit - scanner may be in use")
+            return False
+
         # Step 1: MODE_SELECT with mode parameters
         wdb = WindowDescriptorBlock()
         wdb.scan_mode = 0x01
@@ -1552,17 +1743,106 @@ class CoolscanProtocol:
         if not self.upload_identity_luts():
             return False
 
+        # Step 3b: TEST_UNIT_READY after LUT upload (may be needed before START_SCAN)
+        # USB capture shows status is READY after LUTs, but adding check for safety
+        if not self.test_unit_ready():
+            print("  ⚠️  Scanner not ready after LUT upload")
+            # Don't fail - continue anyway as USB capture shows START_SCAN works
+
         # Step 4: Start scan
         if not self.start_scan():
+            # Release unit on failure
+            self.release_unit()
             return False
+
+        # Step 4b: Read initial status/progress blocks after START_SCAN
+        # USB capture shows immediate READ of status/progress (datatype 0x87) after START_SCAN
+        # This appears to be required to get the scanner into the scanning state
+        # USB capture sequence: START_SCAN -> read 6-byte status block -> read 33-byte status block
+        # Note: These reads may fail with ABORTED COMMAND - that's OK, scanner will continue
+        try:
+            # Read first status/progress block (6 bytes, datatype 0x87)
+            # Command: 28008700000000000680
+            status_block1 = self.read_scan_data(6, DataType.STATUS_PROGRESS)
+            if len(status_block1) > 0:
+                if self.verbose:
+                    print(f"  Status/progress block 1: {len(status_block1)} bytes")
+        except Exception as e:
+            # ABORTED COMMAND (sense_key=11) is common here - scanner may not be ready yet
+            # This is non-fatal - continue to polling
+            if self.verbose:
+                print(f"  (Status/progress block 1 skipped: {e})")
+
+        try:
+            # Read second status/progress block (33 bytes, datatype 0x87)
+            # Command: 28008700000000002180
+            status_block2 = self.read_scan_data(33, DataType.STATUS_PROGRESS)
+            if len(status_block2) > 0:
+                if self.verbose:
+                    print(f"  Status/progress block 2: {len(status_block2)} bytes")
+        except Exception as e:
+            # ABORTED COMMAND is common here too - non-fatal
+            if self.verbose:
+                print(f"  (Status/progress block 2 skipped: {e})")
 
         # Step 5: Poll until scanner is ready (replaces fixed 8s sleep)
         # From USB capture: Scanner returns PROCESSING status while scanning,
         # then READY when complete (~13 seconds for prescan)
         print("  Waiting for prescan to complete...")
-        if not self.poll_until_ready(timeout=30, poll_interval=0.1):
-            print("  ⚠️  Scanner not ready after prescan")
+        ready = self.poll_until_ready(timeout=30, poll_interval=0.1)
+        if not ready:
+            print("  ⚠️  Scanner not ready after prescan - aborting data read")
             return False
+        print("  ✅ Scanner confirmed ready, proceeding to read data...")
+
+        # Small delay after READY to allow scanner to prepare data buffers
+        # USB capture shows ~1ms delay between READY status and first READ command
+        time.sleep(0.05)  # 50ms delay to let scanner settle
+
+        # Clear any pending data in USB buffers before reading
+        # This prevents Overflow errors from leftover data from polling
+        # USB capture shows GET_WINDOW commands before image data read, which might clear buffer
+        # But we'll also explicitly drain any pending data
+        try:
+            # Clear halt on IN endpoint to reset any error state
+            self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
+            time.sleep(0.01)  # Brief delay after clear_halt
+
+            # Try to drain any pending data (non-blocking, short timeout)
+            # This handles leftover data from TEST_UNIT_READY polling
+            # Use pyusb's read with short timeout to fail fast if no data
+            drained = 0
+            original_timeout = self.usb_device.default_timeout
+            self.usb_device.default_timeout = 100  # 100ms timeout for draining
+            try:
+                for attempt in range(10):  # More attempts
+                    try:
+                        chunk = self.usb_device.read(self.bulk_in.bEndpointAddress, 4096)
+                        if hasattr(chunk, 'tobytes'):
+                            chunk = chunk.tobytes()
+                        if len(chunk) > 0:
+                            drained += len(chunk)
+                            if self.verbose:
+                                print(f"  Drained {len(chunk)} bytes from buffer (attempt {attempt+1})")
+                        else:
+                            break  # No more data
+                    except (usb.core.USBTimeoutError, usb.core.USBError) as e:
+                        # Timeout or other USB error - no more data
+                        if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                            break  # No more data
+                        # Other USB errors might indicate no data
+                        break
+                    except Exception:
+                        break  # No more data or other error
+            finally:
+                self.usb_device.default_timeout = original_timeout
+            if drained > 0:
+                print(f"  Drained {drained} bytes from USB buffer before data read")
+            elif self.verbose:
+                print("  No data to drain from buffer")
+        except Exception as e:
+            if self.verbose:
+                print(f"  (Buffer clear: {e})")
 
         # Step 6: Read prescan image data
         # From USB capture: Two 130752-byte blocks + one 11520-byte residual
