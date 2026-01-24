@@ -11,120 +11,127 @@ import numpy as np
 
 from .device import ScannerDevice
 from .protocol import (
-    CoolscanProtocol, ScanParameters, ScanType, StatusType, 
-    WindowDescriptorBlock, DataType, ScannerInfo
+    CoolscanProtocol,
+    ScanParameters,
+    ScanType,
+    StatusType,
+    WindowDescriptorBlock,
+    DataType,
+    ScannerInfo,
 )
 
 
 class CoolscanScanner:
     """High-level interface for Coolscan scanner operations."""
-    
+
     def __init__(self, device: ScannerDevice):
         self.device = device
         self.protocol = None
         self.is_connected = False
         self.scan_in_progress = False
         self.scanner_info = None
-    
+
     def connect(self) -> bool:
         """Connect to the scanner using enhanced SANE sequence."""
         try:
             print("Connecting to scanner...")
             self.protocol = CoolscanProtocol(self.device)
-            
+
             # Initialize scanner with full SANE sequence
             if not self.protocol.initialize_scanner():
                 raise RuntimeError("Scanner initialization failed")
-            
+
             # Get scanner info
             self.scanner_info = self.protocol.get_internal_info()
-            
+
             self.is_connected = True
             print("Scanner connected successfully")
             return True
-            
+
         except Exception as e:
             print(f"Failed to connect to scanner: {e}")
             self.is_connected = False
             return False
-    
+
     def disconnect(self):
         """Disconnect from the scanner."""
         if self.protocol:
             if self.scan_in_progress:
                 self.cancel_scan()
-            
+
             try:
                 self.protocol.release_unit()
             except:
                 pass
-            
+
             try:
                 self.protocol.close()
             except:
                 pass
-        
+
         self.protocol = None
         self.is_connected = False
         self.scan_in_progress = False
         self.scanner_info = None
-    
+
     def get_device_info(self) -> dict:
         """Get detailed device information."""
         if not self.is_connected:
             raise RuntimeError("Scanner not connected")
-        
+
         try:
             # Get standard inquiry data
             inquiry_data = self.protocol.inquiry()
-            
+
             if len(inquiry_data) >= 36:
-                vendor = inquiry_data[8:16].decode('ascii', errors='ignore').strip()
-                product = inquiry_data[16:32].decode('ascii', errors='ignore').strip()
-                revision = inquiry_data[32:36].decode('ascii', errors='ignore').strip()
-                
+                vendor = inquiry_data[8:16].decode("ascii", errors="ignore").strip()
+                product = inquiry_data[16:32].decode("ascii", errors="ignore").strip()
+                revision = inquiry_data[32:36].decode("ascii", errors="ignore").strip()
+
                 info = {
-                    'vendor': vendor,
-                    'product': product,
-                    'revision': revision,
-                    'interface': self.device.interface.value,
-                    'device_path': self.device.device_path
+                    "vendor": vendor,
+                    "product": product,
+                    "revision": revision,
+                    "interface": self.device.interface.value,
+                    "device_path": self.device.device_path,
                 }
-                
+
                 # Add scanner info if available
                 if self.scanner_info:
-                    info.update({
-                        'ad_bits': self.scanner_info.ad_bits,
-                        'output_bits': self.scanner_info.output_bits,
-                        'max_resolution': self.scanner_info.max_resolution,
-                        'x_max_pixels': self.scanner_info.x_max_pixels,
-                        'y_max_pixels': self.scanner_info.y_max_pixels,
-                        'auto_feeder': bool(self.scanner_info.auto_feeder),
-                        'analog_gamma': bool(self.scanner_info.analog_gamma),
-                        'device_errors': self.scanner_info.device_errors
-                    })
-                
+                    info.update(
+                        {
+                            "ad_bits": self.scanner_info.ad_bits,
+                            "output_bits": self.scanner_info.output_bits,
+                            "max_resolution": self.scanner_info.max_resolution,
+                            "x_max_pixels": self.scanner_info.x_max_pixels,
+                            "y_max_pixels": self.scanner_info.y_max_pixels,
+                            "auto_feeder": bool(self.scanner_info.auto_feeder),
+                            "analog_gamma": bool(self.scanner_info.analog_gamma),
+                            "device_errors": self.scanner_info.device_errors,
+                        }
+                    )
+
                 return info
             else:
                 return {
-                    'vendor': self.device.vendor,
-                    'product': self.device.model,
-                    'revision': self.device.revision,
-                    'interface': self.device.interface.value,
-                    'device_path': self.device.device_path
+                    "vendor": self.device.vendor,
+                    "product": self.device.model,
+                    "revision": self.device.revision,
+                    "interface": self.device.interface.value,
+                    "device_path": self.device.device_path,
                 }
-                
+
         except Exception as e:
             print(f"Error getting device info: {e}")
             return {
-                'vendor': self.device.vendor,
-                'product': self.device.model,
-                'revision': self.device.revision,
-                'interface': self.device.interface.value,
-                'device_path': self.device.device_path,
-                'error': str(e)
+                "vendor": self.device.vendor,
+                "product": self.device.model,
+                "revision": self.device.revision,
+                "interface": self.device.interface.value,
+                "device_path": self.device.device_path,
+                "error": str(e),
             }
-    
+
     def scan_preview(self, output_path: str, resolution: int = 270) -> bool:
         """Perform a preview scan."""
         params = ScanParameters(
@@ -133,13 +140,18 @@ class CoolscanScanner:
             x_min=0,
             y_min=0,
             x_max=1000,  # Small preview area
-            y_max=1000
+            y_max=1000,
         )
-        
+
         return self._perform_scan(params, output_path, "preview")
-    
-    def scan_full(self, output_path: str, resolution: int = 2700, 
-                  negative: bool = False, infrared: bool = False) -> bool:
+
+    def scan_full(
+        self,
+        output_path: str,
+        resolution: int = 2700,
+        negative: bool = False,
+        infrared: bool = False,
+    ) -> bool:
         """Perform a full resolution scan."""
         params = ScanParameters(
             resolution=resolution,
@@ -149,53 +161,55 @@ class CoolscanScanner:
             x_min=0,
             y_min=0,
             x_max=0,  # Full area
-            y_max=0
+            y_max=0,
         )
-        
+
         return self._perform_scan(params, output_path, "full")
-    
-    def scan_area(self, output_path: str, x_min: int, y_min: int, 
-                  x_max: int, y_max: int, resolution: int = 2700) -> bool:
+
+    def scan_area(
+        self,
+        output_path: str,
+        x_min: int,
+        y_min: int,
+        x_max: int,
+        y_max: int,
+        resolution: int = 2700,
+    ) -> bool:
         """Scan a specific area."""
         params = ScanParameters(
-            resolution=resolution,
-            preview=False,
-            x_min=x_min,
-            y_min=y_min,
-            x_max=x_max,
-            y_max=y_max
+            resolution=resolution, preview=False, x_min=x_min, y_min=y_min, x_max=x_max, y_max=y_max
         )
-        
+
         return self._perform_scan(params, output_path, "area")
-    
+
     def prescan(self) -> bool:
         """Perform a prescan operation."""
         if not self.is_connected:
             raise RuntimeError("Scanner not connected")
-        
+
         if self.scan_in_progress:
             raise RuntimeError("Scan already in progress")
-        
+
         try:
             print("Starting prescan...")
-            
+
             # Reserve unit
             if not self.protocol.reserve_unit():
                 raise RuntimeError("Failed to reserve unit for prescan")
-            
+
             # Perform prescan
             success = self.protocol.prescan()
-            
+
             # Release unit
             self.protocol.release_unit()
-            
+
             if success:
                 print("Prescan completed successfully")
             else:
                 print("Prescan failed")
-            
+
             return success
-            
+
         except Exception as e:
             print(f"Prescan failed: {e}")
             try:
@@ -203,32 +217,32 @@ class CoolscanScanner:
             except:
                 pass
             return False
-    
+
     def auto_focus(self) -> bool:
         """Perform auto focus operation."""
         if not self.is_connected:
             raise RuntimeError("Scanner not connected")
-        
+
         try:
             print("Performing auto focus...")
-            
+
             # Reserve unit
             if not self.protocol.reserve_unit():
                 raise RuntimeError("Failed to reserve unit for auto focus")
-            
+
             # Perform auto focus
             success = self.protocol.auto_focus()
-            
+
             # Release unit
             self.protocol.release_unit()
-            
+
             if success:
                 print("Auto focus completed successfully")
             else:
                 print("Auto focus failed")
-            
+
             return success
-            
+
         except Exception as e:
             print(f"Auto focus failed: {e}")
             try:
@@ -236,31 +250,39 @@ class CoolscanScanner:
             except:
                 pass
             return False
-    
+
     def _perform_scan(self, params: ScanParameters, output_path: str, scan_type: str) -> bool:
         """Perform a scan with the given parameters using enhanced SANE sequence."""
         if not self.is_connected:
             raise RuntimeError("Scanner not connected")
-        
+
         if self.scan_in_progress:
             raise RuntimeError("Scan already in progress")
-        
+
         try:
             print(f"Starting {scan_type} scan...")
-            
+
             # Use the enhanced scan sequence from SANE backend
             if not self.protocol.perform_scan_sequence(params):
                 raise RuntimeError("Scan sequence failed")
-            
+
             self.scan_in_progress = True
-            
+
             # Read scan data with proper datatype
             print("Reading scan data...")
-            
+
             # Calculate expected data size
-            width = params.x_max if params.x_max > 0 else (self.scanner_info.x_max_pixels if self.scanner_info else 2592)
-            height = params.y_max if params.y_max > 0 else (self.scanner_info.y_max_pixels if self.scanner_info else 3888)
-            
+            width = (
+                params.x_max
+                if params.x_max > 0
+                else (self.scanner_info.x_max_pixels if self.scanner_info else 2592)
+            )
+            height = (
+                params.y_max
+                if params.y_max > 0
+                else (self.scanner_info.y_max_pixels if self.scanner_info else 3888)
+            )
+
             if params.infrared:
                 # 4-channel image (RGB + IR)
                 bytes_per_pixel = 4
@@ -269,52 +291,52 @@ class CoolscanScanner:
                 # 3-channel RGB image
                 bytes_per_pixel = 3
                 datatype = DataType.IMAGE_DATA
-            
+
             total_bytes = width * height * bytes_per_pixel
-            
+
             # Read scan data in chunks
             chunk_size = 64 * 1024  # 64KB chunks
             scan_data = bytearray()
-            
+
             for offset in range(0, total_bytes, chunk_size):
                 chunk_length = min(chunk_size, total_bytes - offset)
                 chunk_data = self.protocol.read_scan_data(chunk_length, datatype)
                 scan_data.extend(chunk_data)
-                
+
                 # Progress indicator
                 progress = (offset + chunk_length) / total_bytes * 100
                 print(f"Scan progress: {progress:.1f}%")
-            
+
             # Convert scan data to image
             if params.infrared:
                 # Reshape to 4-channel image
                 image_data = np.array(scan_data, dtype=np.uint8)
                 image_data = image_data.reshape((height, width, 4))
-                image = Image.fromarray(image_data, 'RGBA')
+                image = Image.fromarray(image_data, "RGBA")
             else:
                 # Reshape to 3-channel RGB image
                 image_data = np.array(scan_data, dtype=np.uint8)
                 image_data = image_data.reshape((height, width, 3))
-                image = Image.fromarray(image_data, 'RGB')
-            
+                image = Image.fromarray(image_data, "RGB")
+
             # Save the image
             image.save(output_path)
-            
+
             print(f"Scan completed and saved to {output_path}")
             self.scan_in_progress = False
             return True
-            
+
         except Exception as e:
             print(f"Scan failed: {e}")
             if self.scan_in_progress:
                 self.cancel_scan()
             return False
-    
+
     def cancel_scan(self) -> bool:
         """Cancel the current scan operation."""
         if not self.scan_in_progress:
             return True
-        
+
         try:
             if self.protocol.cancel_scan():
                 self.scan_in_progress = False
@@ -326,38 +348,35 @@ class CoolscanScanner:
         except Exception as e:
             print(f"Error cancelling scan: {e}")
             return False
-    
+
     def wait_for_ready(self, timeout: int = 30) -> bool:
         """Wait for the scanner to be ready."""
         if not self.is_connected:
             return False
-        
+
         return self.protocol.scanner_ready(timeout)
-    
+
     def get_scanner_status(self) -> dict:
         """Get current scanner status."""
         if not self.is_connected:
-            return {'status': 'disconnected'}
-        
+            return {"status": "disconnected"}
+
         try:
             ready = self.protocol.test_unit_ready()
             return {
-                'status': 'ready' if ready else 'not_ready',
-                'scan_in_progress': self.scan_in_progress,
-                'scanner_info': self.scanner_info.__dict__ if self.scanner_info else None
+                "status": "ready" if ready else "not_ready",
+                "scan_in_progress": self.scan_in_progress,
+                "scanner_info": self.scanner_info.__dict__ if self.scanner_info else None,
             }
         except Exception as e:
-            return {
-                'status': 'error',
-                'error': str(e)
-            }
-    
+            return {"status": "error", "error": str(e)}
+
     def __enter__(self):
         """Context manager entry."""
         if not self.connect():
             raise RuntimeError("Failed to connect to scanner")
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.disconnect()
@@ -369,8 +388,13 @@ def scan_preview(device: ScannerDevice, output_path: str, resolution: int = 270)
         return scanner.scan_preview(output_path, resolution)
 
 
-def scan_full(device: ScannerDevice, output_path: str, resolution: int = 2700,
-              negative: bool = False, infrared: bool = False) -> bool:
+def scan_full(
+    device: ScannerDevice,
+    output_path: str,
+    resolution: int = 2700,
+    negative: bool = False,
+    infrared: bool = False,
+) -> bool:
     """Quick full scan function."""
     with CoolscanScanner(device) as scanner:
         return scanner.scan_full(output_path, resolution, negative, infrared)

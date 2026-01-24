@@ -11,7 +11,8 @@ Run with: python -m pytest tests/test_scanner.py -v
 import pytest
 from unittest.mock import Mock, MagicMock, patch, call
 import sys
-sys.path.insert(0, '.')
+
+sys.path.insert(0, ".")
 
 from coolscan.scanner import (
     CoolscanScanner,
@@ -19,14 +20,15 @@ from coolscan.scanner import (
     scan_full,
     get_scanner_info,
     prescan_scanner,
-    auto_focus_scanner
+    auto_focus_scanner,
 )
 from coolscan.protocol import ScanParameters, ScannerInfo, DataType
 
 
 class MockInterface:
     """Mock interface enum."""
-    value = 'usb'
+
+    value = "usb"
 
 
 class MockDevice:
@@ -38,7 +40,7 @@ class MockDevice:
         self.revision = "1.20"
         self.interface = MockInterface()
         self.device_path = "/dev/usb/scanner0"
-        self.vendor_id = 0x04b0
+        self.vendor_id = 0x04B0
         self.product_id = 0x4000
 
 
@@ -74,7 +76,7 @@ class TestCoolscanScannerInit:
 class TestCoolscanScannerConnect:
     """Test connection functionality."""
 
-    @patch('coolscan.scanner.CoolscanProtocol')
+    @patch("coolscan.scanner.CoolscanProtocol")
     def test_connect_success(self, mock_protocol_class):
         """Successful connection initializes scanner."""
         device = MockDevice()
@@ -95,7 +97,7 @@ class TestCoolscanScannerConnect:
         mock_protocol.initialize_scanner.assert_called_once()
         mock_protocol.get_internal_info.assert_called_once()
 
-    @patch('coolscan.scanner.CoolscanProtocol')
+    @patch("coolscan.scanner.CoolscanProtocol")
     def test_connect_init_fails(self, mock_protocol_class):
         """Connection fails if initialization fails."""
         device = MockDevice()
@@ -110,7 +112,7 @@ class TestCoolscanScannerConnect:
         assert result is False
         assert scanner.is_connected is False
 
-    @patch('coolscan.scanner.CoolscanProtocol')
+    @patch("coolscan.scanner.CoolscanProtocol")
     def test_connect_exception(self, mock_protocol_class):
         """Connection handles exceptions gracefully."""
         device = MockDevice()
@@ -203,18 +205,18 @@ class TestCoolscanScannerGetDeviceInfo:
 
         # Mock inquiry response (36+ bytes with vendor/product/revision)
         inquiry_data = bytearray(36)
-        inquiry_data[8:16] = b'Nikon   '
-        inquiry_data[16:32] = b'LS-40 ED        '
-        inquiry_data[32:36] = b'1.20'
+        inquiry_data[8:16] = b"Nikon   "
+        inquiry_data[16:32] = b"LS-40 ED        "
+        inquiry_data[32:36] = b"1.20"
         scanner.protocol.inquiry.return_value = inquiry_data
 
         info = scanner.get_device_info()
 
-        assert info['vendor'] == 'Nikon'
-        assert info['product'] == 'LS-40 ED'
-        assert info['revision'] == '1.20'
-        assert info['ad_bits'] == 14
-        assert info['max_resolution'] == 4000
+        assert info["vendor"] == "Nikon"
+        assert info["product"] == "LS-40 ED"
+        assert info["revision"] == "1.20"
+        assert info["ad_bits"] == 14
+        assert info["max_resolution"] == 4000
 
     def test_get_device_info_short_inquiry(self):
         """Get device info falls back on short inquiry."""
@@ -226,8 +228,8 @@ class TestCoolscanScannerGetDeviceInfo:
 
         info = scanner.get_device_info()
 
-        assert info['vendor'] == 'Nikon'
-        assert info['product'] == 'LS-40 ED'
+        assert info["vendor"] == "Nikon"
+        assert info["product"] == "LS-40 ED"
 
     def test_get_device_info_inquiry_error(self):
         """Get device info handles inquiry errors."""
@@ -239,8 +241,8 @@ class TestCoolscanScannerGetDeviceInfo:
 
         info = scanner.get_device_info()
 
-        assert 'error' in info
-        assert info['vendor'] == 'Nikon'
+        assert "error" in info
+        assert info["vendor"] == "Nikon"
 
 
 class TestCoolscanScannerPrescan:
@@ -424,7 +426,7 @@ class TestCoolscanScannerGetStatus:
 
         status = scanner.get_scanner_status()
 
-        assert status['status'] == 'disconnected'
+        assert status["status"] == "disconnected"
 
     def test_status_ready(self):
         """Status shows ready when test_unit_ready succeeds."""
@@ -437,9 +439,9 @@ class TestCoolscanScannerGetStatus:
 
         status = scanner.get_scanner_status()
 
-        assert status['status'] == 'ready'
-        assert status['scan_in_progress'] is False
-        assert status['scanner_info'] is not None
+        assert status["status"] == "ready"
+        assert status["scan_in_progress"] is False
+        assert status["scanner_info"] is not None
 
     def test_status_not_ready(self):
         """Status shows not_ready when test_unit_ready fails."""
@@ -451,7 +453,7 @@ class TestCoolscanScannerGetStatus:
 
         status = scanner.get_scanner_status()
 
-        assert status['status'] == 'not_ready'
+        assert status["status"] == "not_ready"
 
     def test_status_error(self):
         """Status shows error on exception."""
@@ -463,14 +465,14 @@ class TestCoolscanScannerGetStatus:
 
         status = scanner.get_scanner_status()
 
-        assert status['status'] == 'error'
-        assert 'error' in status
+        assert status["status"] == "error"
+        assert "error" in status
 
 
 class TestCoolscanScannerContextManager:
     """Test context manager functionality."""
 
-    @patch('coolscan.scanner.CoolscanProtocol')
+    @patch("coolscan.scanner.CoolscanProtocol")
     def test_context_manager_connects(self, mock_protocol_class):
         """Context manager connects on entry."""
         device = MockDevice()
@@ -483,7 +485,7 @@ class TestCoolscanScannerContextManager:
         with CoolscanScanner(device) as scanner:
             assert scanner.is_connected is True
 
-    @patch('coolscan.scanner.CoolscanProtocol')
+    @patch("coolscan.scanner.CoolscanProtocol")
     def test_context_manager_disconnects(self, mock_protocol_class):
         """Context manager disconnects on exit."""
         device = MockDevice()
@@ -499,7 +501,7 @@ class TestCoolscanScannerContextManager:
         mock_protocol.release_unit.assert_called()
         mock_protocol.close.assert_called()
 
-    @patch('coolscan.scanner.CoolscanProtocol')
+    @patch("coolscan.scanner.CoolscanProtocol")
     def test_context_manager_connect_fails(self, mock_protocol_class):
         """Context manager raises on connect failure."""
         device = MockDevice()
@@ -573,7 +575,7 @@ class TestCoolscanScannerScanFull:
 class TestConvenienceFunctions:
     """Test module-level convenience functions."""
 
-    @patch('coolscan.scanner.CoolscanScanner')
+    @patch("coolscan.scanner.CoolscanScanner")
     def test_prescan_scanner(self, mock_scanner_class):
         """prescan_scanner uses context manager correctly."""
         device = MockDevice()
@@ -586,7 +588,7 @@ class TestConvenienceFunctions:
 
         mock_scanner.prescan.assert_called_once()
 
-    @patch('coolscan.scanner.CoolscanScanner')
+    @patch("coolscan.scanner.CoolscanScanner")
     def test_auto_focus_scanner(self, mock_scanner_class):
         """auto_focus_scanner uses context manager correctly."""
         device = MockDevice()
@@ -600,5 +602,5 @@ class TestConvenienceFunctions:
         mock_scanner.auto_focus.assert_called_once()
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

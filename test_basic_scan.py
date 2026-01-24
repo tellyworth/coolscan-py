@@ -27,10 +27,16 @@ def test_basic_scan():
     print(f"📷 Scanner: {scanner}\n")
 
     protocol = None
+    capture_file = "test_basic_scan_capture.txt"
     try:
         # Create protocol and initialize
         print("🔌 Connecting and initializing...")
         protocol = CoolscanProtocol(scanner)
+
+        # Enable USB capture logging
+        print(f"📝 Enabling USB capture logging to {capture_file}...")
+        protocol.enable_usb_capture(capture_file)
+
         print("✅ Connected\n")
 
         # Initialize scanner
@@ -79,6 +85,7 @@ def test_basic_scan():
                 print(f"  ⚠️  Cleanup error (non-critical): {e}")
             finally:
                 protocol.close()
+                print(f"📝 USB capture saved to {capture_file}")
 
 
 if __name__ == "__main__":
