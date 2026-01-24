@@ -838,11 +838,11 @@ class CoolscanProtocol:
                         data_in = existing_data + new_data
                     else:
                         data_in = existing_data
-            except Exception as e:
-                print(f"    ⚠️  Data read failed: {e}")
-                # Keep existing data if we have it
-                if len(data_in) == 0:
-                    data_in = b''
+                except Exception as e:
+                    print(f"    ⚠️  Data read failed: {e}")
+                    # Keep existing data if we have it
+                    if len(data_in) == 0:
+                        data_in = b''
 
             # Read status (8 bytes) - always read status after command
             try:
@@ -874,7 +874,7 @@ class CoolscanProtocol:
                     self._usb_write_bulk(self._pack_byte(0xd0))
                 except:
                     pass
-                    return data_in, StatusType.ERROR
+                return data_in, StatusType.ERROR
 
         except Exception as e:
             print(f"    ❌ USB command error: {e}")
@@ -897,11 +897,11 @@ class CoolscanProtocol:
         self.usb_device.default_timeout = 2000  # 2 seconds instead of 30
 
         try:
-        if page >= 0:
+            if page >= 0:
                 # Page-specific inquiry - two-step process
                 # First: Get length (4 bytes)
                 cmd = self._build_6byte_command(0x12, page=0x01, param2=page, alloc_length=4, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=4)
+                data, status = self._issue_command(cmd, data_in_length=4)
 
                 if status == StatusType.READY and len(data) >= 4:
                     # Extract actual length from response
@@ -913,16 +913,16 @@ class CoolscanProtocol:
 
                     # Second: Get full data
                     cmd = self._build_6byte_command(0x12, page=0x01, param2=page, alloc_length=length, control=0x80)
-                data, status = self._issue_command(cmd, data_in_length=length)
-        else:
+                    data, status = self._issue_command(cmd, data_in_length=length)
+            else:
                 # Standard inquiry (36 bytes) - format: 12 00 00 00 24 80
                 cmd = self._build_6byte_command(0x12, page=0x00, alloc_length=0x24, control=0x80)
-            data, status = self._issue_command(cmd, data_in_length=36)
+                data, status = self._issue_command(cmd, data_in_length=36)
 
-        if status == StatusType.READY:
-            return data
-        else:
-            raise RuntimeError(f"INQUIRY failed with status {status}")
+            if status == StatusType.READY:
+                return data
+            else:
+                raise RuntimeError(f"INQUIRY failed with status {status}")
         finally:
             # Restore original timeout
             self.usb_device.default_timeout = original_timeout
@@ -950,26 +950,26 @@ class CoolscanProtocol:
 
         try:
             # Try multiple times with shorter delays for faster failure detection
-        for attempt in range(3):
-            try:
-                if attempt > 0:
-                    print(f"  Retry attempt {attempt + 1}...")
+            for attempt in range(3):
+                try:
+                    if attempt > 0:
+                        print(f"  Retry attempt {attempt + 1}...")
                         time.sleep(0.2)  # Shorter delay between attempts (200ms instead of 1s)
 
                     # Format: 00 00 00 00 00 00 (all zeros)
                     cmd = self._build_6byte_command(0x00, control=0x00)
-                print(f"  Sending TEST UNIT READY command: {cmd.hex()}")
-                _, status = self._issue_command(cmd)
-                print(f"  Status: {status}")
+                    print(f"  Sending TEST UNIT READY command: {cmd.hex()}")
+                    _, status = self._issue_command(cmd)
+                    print(f"  Status: {status}")
 
-                if status == StatusType.READY:
-                    return True
+                    if status == StatusType.READY:
+                        return True
 
-            except Exception as e:
-                print(f"  Error in test_unit_ready (attempt {attempt + 1}): {e}")
-                continue
+                except Exception as e:
+                    print(f"  Error in test_unit_ready (attempt {attempt + 1}): {e}")
+                    continue
 
-        return False
+            return False
         finally:
             # Restore original timeout
             self.usb_device.default_timeout = original_timeout
@@ -1090,7 +1090,7 @@ class CoolscanProtocol:
                             status = self.usb_device.read(self.bulk_in.bEndpointAddress, 8, timeout=500)
                             if status and status[0] == 0x00:
                                 print("  ✅ Scanner is responsive")
-        return True
+                                return True
                 except Exception as e:
                     print(f"    (test ready: {e})")
 
@@ -1478,14 +1478,14 @@ class CoolscanProtocol:
                 0x80   # Control byte
             )
 
-        data, status = self._issue_command(cmd, data_in_length=length)
+            data, status = self._issue_command(cmd, data_in_length=length)
 
-        if status == StatusType.READY:
+            if status == StatusType.READY:
                 if self.verbose:
                     print(f"Read {len(data)} bytes successfully")
-            return data
-        else:
-            raise RuntimeError(f"Read scan data failed with status {status}")
+                return data
+            else:
+                raise RuntimeError(f"Read scan data failed with status {status}")
         finally:
             # Restore original timeout
             self.usb_device.default_timeout = original_timeout
@@ -2123,5 +2123,5 @@ class CoolscanProtocol:
                 # Ignore errors during cleanup
                 pass
             finally:
-            usb.util.dispose_resources(self.usb_device)
+                usb.util.dispose_resources(self.usb_device)
         # TODO: Close SCSI connection if needed
