@@ -1879,6 +1879,9 @@ class CoolscanProtocol:
             return False
 
         # Step 1: SET_WINDOW with 58-byte window descriptors
+        # Note: MODE_SELECT happens earlier in the session (during initialization),
+        # not right before prescan. USB capture shows MODE_SELECT at line 239 (~36s),
+        # while prescan SET_WINDOW commands are at lines 695-715 (~87s).
         # For prescan: only windows 1, 2, 3 (RGB) - no infrared (window 9)
         # USB capture shows exactly 3 SET_WINDOW commands for prescan
         for win_id in [1, 2, 3]:
@@ -2135,6 +2138,23 @@ class CoolscanProtocol:
                 print(f"  ✅ Capacity info retrieved")
             else:
                 print(f"  ⚠️  READ_CAPACITY failed, continuing anyway...")
+
+            # 6. MODE_SELECT - required before SET_WINDOW operations
+            # USB capture shows MODE_SELECT at line 239 (~36s) during initialization
+            print("\n6. Sending MODE_SELECT...")
+            mode_select_cmd = self._build_6byte_command(0x15, page=0x10, alloc_length=0x14, control=0x00)
+            mode_params = bytes([
+                0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x01, 0x03, 0x06, 0x00, 0x00,
+                0x0B, 0x54, 0x00, 0x00
+            ])
+            _, status = self._issue_command(mode_select_cmd, data_out=mode_params)
+            if status != StatusType.READY:
+                print("  ⚠️  MODE_SELECT failed")
+                return False
+            print("  ✅ MODE_SELECT OK")
+            # Small delay after MODE_SELECT (USB capture shows ~150ms)
+            time.sleep(0.15)
 
             print("\n✅ Scanner initialization completed")
             return True
