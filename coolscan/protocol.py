@@ -541,10 +541,12 @@ class CoolscanProtocol:
         """Write data to USB bulk endpoint."""
         try:
             # Perform the actual USB write first
-            result = self.usb_device.write(self.bulk_out.bEndpointAddress, data)
+            result = self.usb_device.write(
+                self.bulk_out.bEndpointAddress, data, timeout=self.usb_device.default_timeout
+            )
 
             # Log after successful write (don't let logging interfere with USB operations)
-            if self._usb_capture_log:
+            if self._usb_capture_log and self._usb_capture_start_time is not None:
                 try:
                     timestamp = time.time() - self._usb_capture_start_time
                     endpoint = f"0x{self.bulk_out.bEndpointAddress:02x}"
@@ -575,7 +577,9 @@ class CoolscanProtocol:
         """Read data from USB bulk endpoint."""
         try:
             # Perform the actual USB read first
-            data = self.usb_device.read(self.bulk_in.bEndpointAddress, length)
+            data = self.usb_device.read(
+                self.bulk_in.bEndpointAddress, length, timeout=self.usb_device.default_timeout
+            )
 
             # Convert to bytes if it's an array.array (pyusb sometimes returns array.array)
             if hasattr(data, "tobytes"):
@@ -586,7 +590,7 @@ class CoolscanProtocol:
                 data_bytes = data
 
             # Log after successful read (don't let logging interfere with USB operations)
-            if self._usb_capture_log:
+            if self._usb_capture_log and self._usb_capture_start_time is not None:
                 try:
                     timestamp = time.time() - self._usb_capture_start_time
                     endpoint = f"0x{self.bulk_in.bEndpointAddress:02x}"
@@ -1875,9 +1879,6 @@ class CoolscanProtocol:
             return False
 
         # Step 1: SET_WINDOW with 58-byte window descriptors
-        # Note: MODE_SELECT happens earlier in the session (during initialization),
-        # not right before prescan. USB capture shows MODE_SELECT at line 239 (~36s),
-        # while prescan SET_WINDOW commands are at lines 695-715 (~87s).
         # For prescan: only windows 1, 2, 3 (RGB) - no infrared (window 9)
         # USB capture shows exactly 3 SET_WINDOW commands for prescan
         for win_id in [1, 2, 3]:
