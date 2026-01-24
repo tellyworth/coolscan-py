@@ -1713,20 +1713,10 @@ class CoolscanProtocol:
             print("  ⚠️  Failed to reserve unit - scanner may be in use")
             return False
 
-        # Step 1: MODE_SELECT with mode parameters
-        wdb = WindowDescriptorBlock()
-        wdb.scan_mode = 0x01
-        if not self.set_window_wdb(wdb):
-            return False
-
-        # Step 1b: Wait for scanner to be ready after MODE_SELECT
-        # USB capture shows ~130ms gap between MODE_SELECT and SET_WINDOW
-        time.sleep(0.15)
-        if not self.wait_scanner(max_attempts=5):
-            print("  ⚠️  Scanner not ready after MODE_SELECT")
-            return False
-
-        # Step 2: SET_WINDOW with 58-byte window descriptors
+        # Step 1: SET_WINDOW with 58-byte window descriptors
+        # Note: MODE_SELECT happens earlier in the session (during initialization),
+        # not right before prescan. USB capture shows MODE_SELECT at line 239 (~36s),
+        # while prescan SET_WINDOW commands are at lines 695-715 (~87s).
         # For prescan: only windows 1, 2, 3 (RGB) - no infrared (window 9)
         # USB capture shows exactly 3 SET_WINDOW commands for prescan
         for win_id in [1, 2, 3]:
@@ -1743,13 +1733,10 @@ class CoolscanProtocol:
         if not self.upload_identity_luts():
             return False
 
-        # Step 3b: TEST_UNIT_READY after LUT upload (may be needed before START_SCAN)
-        # USB capture shows status is READY after LUTs, but adding check for safety
-        if not self.test_unit_ready():
-            print("  ⚠️  Scanner not ready after LUT upload")
-            # Don't fail - continue anyway as USB capture shows START_SCAN works
-
         # Step 4: Start scan
+        # Note: USB capture shows direct transition from LUT uploads to START_SCAN
+        # (no TEST_UNIT_READY after LUTs). The extra TEST_UNIT_READY might cause
+        # scanner to reject START_SCAN with ASCQ=1 instead of accepting with ASCQ=6.
         if not self.start_scan():
             # Release unit on failure
             self.release_unit()
