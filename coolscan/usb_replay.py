@@ -151,7 +151,13 @@ class ReplayUsbDevice:
     def read(self, ep, length, timeout=None):
         if ep != self._bulk_in_ep:
             raise ValueError(f"ReplayUsbDevice: unexpected IN endpoint {ep:#x}")
-        return self._replay.consume_in_read(length)
+        try:
+            return self._replay.consume_in_read(length)
+        except ReplayExhaustedError:
+            # Prescan/idle drain reads after the fixture ends; behave like an empty IN.
+            import usb.core
+
+            raise usb.core.USBTimeoutError("timed out", errno=10060)
 
     def clear_halt(self, ep):
         return None

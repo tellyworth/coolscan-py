@@ -46,6 +46,8 @@ That runs **real `CoolscanProtocol` logic** without hardware and without simulat
 
 **Tests:** `tests/test_usb_replay_transport.py` (first INQUIRY, parser edge cases); `tests/test_usb_replay_init_sequence.py` — **`initialize_scanner()` through MODE_SELECT** matches **`test_basic_scan_capture.txt` lines 1–83** (line 84 is the next host transaction, start of the prescan-era segment).
 
+**Prescan replay:** `tests/test_usb_replay_prescan_sequence.py` — **`prescan()`** bulk I/O matches **lines 88–134** (replay starts at 88 so the first capture TUR before that does not duplicate `prescan`’s opening `test_unit_ready`). Post–`START_SCAN` steps use mocks until the fixture includes the full post-`START_SCAN` READ sequence. **LUT OUT rows** in the text capture must carry the **full 8192-byte** hex payload (parser checks the length column); truncated rows were regenerated from the identity LUT pattern used by the stack.
+
 **Fallback** (if injection is too invasive for a given area): Keep **targeted mocks** on specific methods but assert **exact bytes** passed in/out, still derived from `test_basic_scan_capture.txt`.
 
 ## Handling non-determinism (retries, extra polls)
