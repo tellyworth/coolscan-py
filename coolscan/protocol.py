@@ -1763,6 +1763,7 @@ class CoolscanProtocol:
 
             return {"header": header, "table": table}
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             print(f"    ⚠️  Failed to read exposure data: {e}")
             return None
 
@@ -1808,6 +1809,7 @@ class CoolscanProtocol:
                 print(f"    ⚠️  Failed to read WDB: status={status}, len={len(data) if data else 0}")
                 return None
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             print(f"    ⚠️  Error reading WDB: {e}")
             return None
 
