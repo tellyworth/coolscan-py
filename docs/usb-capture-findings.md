@@ -209,6 +209,7 @@ After the prescan `START_SCAN` (`1b0000000300` + `010203`), the capture shows:
    - One tail block of 11520 bytes (`280000000000002d0080`)
    - **Implementation**: `read_prescan_image_data()` method reads all three blocks
    - **Total**: 273024 bytes of prescan image data
+   - **Pcap vs stack (important):** `tshark` / `parse_pcapng.extract_usb_traffic` often shows each logical block as **several IN rows** (e.g. ~65508-byte chunks) with **8-byte status** between chunks, sometimes with the **same READ(10) CDB issued again** on OUT. `CoolscanProtocol._issue_usb_command` instead performs **one** `_usb_read_bulk(data_in_length)` per `read_scan_data()` call. Replay tests (`UsbCaptureReplay`) therefore model **one IN bulk per logical read**; see `docs/capture-driven-development-plan.md` (**Pcap vs text fixture**).
 4. **Exposure / calibration phase**:
    - INQUIRY page `0xc1` (short then long) to read back configuration/WDB (optional)
    - READ(10) with datatype `0x8e` (6-byte header + 3464-byte table)
@@ -227,6 +228,8 @@ same exposure information that prescan is designed to measure.
 - `poll_until_ready(timeout=30, poll_interval=0.1)` - Dynamic polling until ready
 - `read_prescan_image_data()` - Reads all image data blocks (273024 bytes total)
 - `read_exposure_data()` - Reads exposure header (6 bytes) and table (3464 bytes)
+
+**Replay / fixture status:** `test_basic_scan_capture.txt` lines **88–208** are enforced by `tests/test_usb_replay_prescan_sequence.py` against real `prescan()` (only `time.sleep` patched). The post-READY segment orders traffic to match **`prescan()`** (image READs, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the raw chronological order in an unedited pcap export.
 
 ## Implementation Status
 

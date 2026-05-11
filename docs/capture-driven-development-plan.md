@@ -13,7 +13,7 @@ This project implements a Python scanner stack for Nikon Coolscan hardware using
 | Role | Artifact |
 |------|----------|
 | Raw reference | `ls40-single-bw.pcapng` |
-| Human/machine-friendly trace | `test_basic_scan_capture.txt` (columns: time, endpoint, length, hex payload). **Currently a slice** of the session (extend from `ls40-single-bw.pcapng` / `parse_pcapng.py` as milestones need more lines). As of the plan write-up, lines **84–133** cover TUR → reserve → three `SET_WINDOW` → TUR → three LUT `WRITE`s → `START_SCAN` + WDB; lines **134+** begin post-`START_SCAN` traffic. |
+| Human/machine-friendly trace | `test_basic_scan_capture.txt` (columns: time, endpoint, length, hex or `@path` for large IN). **~212 lines** today (including footer comments). **1–83:** init through MODE_SELECT (replay-locked). **84–87:** extra `TEST_UNIT_READY` before the prescan-aligned window. **88–208:** full `prescan()` USB replay slice (includes post-`START_SCAN` status, poll, image READs, exposure, `GET_WINDOW`). Lines **84–133** still describe the TUR → reserve → three `SET_WINDOW` → TUR → LUT `WRITE`s → `START_SCAN` + WDB band; **134+** continue into post-`START_SCAN` traffic. |
 | Deeper analysis | `docs/usb-capture-findings.md`, `docs/unified-protocol-spec.md` |
 | Second opinion | SANE backend source (intent, naming, edge cases); **wire format defers to capture** when they disagree |
 
@@ -59,15 +59,22 @@ Captures may include **retries, NAKs, or repeated** `TEST_UNIT_READY` / phase ch
 
 Normalize once per slice when building the fixture, document the rule in the test docstring.
 
+## Pcap vs text fixture (maintenance)
+
+- **`*.pcapng` is gitignored** but should exist beside the repo for offline regeneration (`parse_pcapng.py`, `scripts/export_usb_capture_text.py`); **`tshark`** must be on `PATH`.
+- The checked-in text file is **not** a contiguous bulk prefix of the pcap from the first frame: the first transactions match, then an early **8-byte status IN** is **normalized to zeros** (fixture elision), after which the stream **re-aligns** with the pcap around the READ CAPACITY–style sequence beginning with host OUT `120101000480`.
+- **`CoolscanProtocol._issue_usb_command`** performs **one** bulk IN read for the full `data_in_length` (e.g. 130752 for a prescan image block). **`tshark`** often records that as **multiple IN rows** (e.g. ~65508-byte chunks plus 8-byte status) and may show **repeated identical READ(10) OUT CDBs** per chunk. Strict replay therefore uses **one IN event per logical read**; large payloads use **`@tests/fixtures/...`** files (currently zero-filled placeholders unless refreshed from a merged pcap extract).
+- Post-**READY** prescan tail in the text file follows **`prescan()` call order** (image → exposure → `GET_WINDOW`), which can differ from **chronological bus order** in an unedited export.
+
 ## Milestones (vertical slices)
 
 Work in **order along the real single-bw session**, extending only as far as needed for a working scan:
 
-1. **Init / inquiry / mode** — Match capture through stable “ready for scan setup” point; update docs when locked. *(Replay test locks lines **1–83** through MODE_SELECT; extend the text fixture from `ls40-single-bw.pcapng` when tests need traffic past the current **136** lines.)*
-2. **Prescan setup** — SET_WINDOW ×3, LUT upload, START_SCAN; match capture sequence and payloads.
-3. **Post-START_SCAN** — Status reads, polling pattern, first meaningful **image-related READ** per capture.
-4. **Full prescan image path** — Complete bulk reads for prescan dimensions from capture.
-5. **Full scan path** (still single-bw) — Extend to final image completion as in capture.
+1. **Init / inquiry / mode** — **Done (replay).** `tests/test_usb_replay_init_sequence.py` locks **`test_basic_scan_capture.txt` lines 1–83** through MODE_SELECT (line 84 is the next host transaction). Fixture remains an **edited** slice of `ls40-single-bw.pcapng`, not a raw prefix (see **Pcap vs text fixture** above).
+2. **Prescan setup** — **Done (fixture + mocks).** SET_WINDOW ×3, LUT upload, START_SCAN and earlier path are in the text capture; `tests/test_prescan_sequence_verification.py` still uses mocks for inner calls.
+3. **Post-START_SCAN** — **Done (replay slice).** Status reads (`0x87`), `poll_until_ready()` pattern, READY transition through line **168** of the text file; covered by `tests/test_usb_replay_prescan_sequence.py` from line **88**.
+4. **Full prescan image path** — **Done (replay harness).** `tests/test_usb_replay_prescan_sequence.py` matches **lines 88–208** including three image `READ`s (`@` fixture blobs), exposure `0x8e`, three `GET_WINDOW`s. Payload bytes in `@` files are placeholders until explicitly refreshed from pcap merges.
+5. **Full scan path** (still single-bw) — **Not started.** Extend to final image completion per capture; add replay or golden tests when that slice exists in the text fixture.
 
 After each milestone: **`pytest` green**, **docs updated** (what is now guaranteed vs capture), **git commit** (see below).
 
@@ -105,4 +112,4 @@ Use a narrower path while iterating (e.g. `tests/test_prescan_sequence_verificat
 
 ---
 
-*Last updated: aligned with discussion to use `ls40-single-bw` + `test_basic_scan_capture.txt` as the single narrative source, fake transport where possible, and phased vertical milestones.*
+*Last updated (2026-05): milestone status and “Pcap vs text fixture” maintenance notes; prescan replay through line 208.*
