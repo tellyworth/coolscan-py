@@ -334,7 +334,7 @@ The prescan performs auto-exposure (AE) at low resolution to determine optimal e
 Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The implementation uses
 `poll_until_ready()` for dynamic polling instead of a fixed 8-second sleep.
 
-**USB replay tests:** `tests/test_usb_replay_prescan_sequence.py` locks bulk I/O for `prescan()` against `test_basic_scan_capture.txt` **lines 88–208** (`CoolscanProtocol(..., usb_capture_replay=...)`). The checked-in text tail follows **code call order** (image data, then exposure, then `GET_WINDOW`), and large IN rows may use **`@tests/fixtures/...`** indirection; a raw `tshark` export can split the same logical READ into multiple IN rows (see `docs/capture-driven-development-plan.md`, **Pcap vs text fixture**).
+**USB replay tests:** `tests/test_usb_replay_prescan_sequence.py` locks bulk I/O for `prescan()` against `test_basic_scan_capture.txt` **lines 88–208** (`CoolscanProtocol(..., usb_capture_replay=...)`). The checked-in text tail follows **code call order** (image data, then exposure, then `GET_WINDOW`), and large IN rows use **`@tests/fixtures/prescan_image_block*.bin`** (rebuilt from `ls40-single-bw.pcapng` via **`scripts/refresh_prescan_image_fixtures.py`**). A raw `tshark` export can split the same logical READ into multiple IN rows (see `docs/capture-driven-development-plan.md`, **Pcap vs text fixture**).
 
 ### Full Scan Sequence (from USB capture)
 

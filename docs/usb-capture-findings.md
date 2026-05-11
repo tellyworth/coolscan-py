@@ -209,7 +209,7 @@ After the prescan `START_SCAN` (`1b0000000300` + `010203`), the capture shows:
    - One tail block of 11520 bytes (`280000000000002d0080`)
    - **Implementation**: `read_prescan_image_data()` method reads all three blocks
    - **Total**: 273024 bytes of prescan image data
-   - **Pcap vs stack (important):** `tshark` / `parse_pcapng.extract_usb_traffic` often shows each logical block as **several IN rows** (e.g. ~65508-byte chunks) with **8-byte status** between chunks, sometimes with the **same READ(10) CDB issued again** on OUT. `CoolscanProtocol._issue_usb_command` instead performs **one** `_usb_read_bulk(data_in_length)` per `read_scan_data()` call. Replay tests (`UsbCaptureReplay`) therefore model **one IN bulk per logical read**; see `docs/capture-driven-development-plan.md` (**Pcap vs text fixture**).
+   - **Pcap vs stack (important):** `tshark` / `parse_pcapng.extract_usb_traffic` often shows each logical block as **several IN rows** (e.g. ~65508-byte chunks) with **8-byte status** between chunks, sometimes with the **same READ(10) CDB issued again** on OUT. `CoolscanProtocol._issue_usb_command` instead performs **one** `_usb_read_bulk(data_in_length)` per `read_scan_data()` call. Replay tests (`UsbCaptureReplay`) therefore model **one IN bulk per logical read**; `scripts/refresh_prescan_image_fixtures.py` rebuilds the three **`@` fixture blobs** by concatenating wire-order image INs then slicing **130752|130752|11520**. See `docs/capture-driven-development-plan.md` (**Pcap vs text fixture**).
 4. **Exposure / calibration phase**:
    - INQUIRY page `0xc1` (short then long) to read back configuration/WDB (optional)
    - READ(10) with datatype `0x8e` (6-byte header + 3464-byte table)
