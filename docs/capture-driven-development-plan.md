@@ -35,6 +35,17 @@ This project implements a Python scanner stack for Nikon Coolscan hardware using
 
 That runs **real `CoolscanProtocol` logic** without hardware and without simulating all of libusb.
 
+### Implemented harness
+
+| Piece | Location |
+|-------|----------|
+| Parser + strict replay cursor | `coolscan/usb_replay.py` — `UsbCaptureReplay`, `ReplayUsbDevice`, `ReplayError` subclasses |
+| Wire protocol to replay | `CoolscanProtocol(..., usb_capture_replay=replay)` (keyword-only). Uses bulk endpoints **0x01** / **0x82** only; no libusb device. |
+| Fail-fast | When `usb_capture_replay` is set, **`ReplayError`** is re-raised from `_usb_read_bulk` / `_usb_write_bulk`, `_issue_usb_command`, `wait_scanner`, `_check_phase` / `_check_phase_with_retry`, and `initialize_scanner` paths instead of being turned into generic `StatusType.ERROR` / swallowed retries. |
+| `close()` | Skips `usb.util` teardown when replay is active. |
+
+**Tests:** `tests/test_usb_replay_transport.py` (first INQUIRY, parser edge cases); `tests/test_usb_replay_init_sequence.py` — **`initialize_scanner()` through MODE_SELECT** matches **`test_basic_scan_capture.txt` lines 1–83** (line 84 is the next host transaction, start of the prescan-era segment).
+
 **Fallback** (if injection is too invasive for a given area): Keep **targeted mocks** on specific methods but assert **exact bytes** passed in/out, still derived from `test_basic_scan_capture.txt`.
 
 ## Handling non-determinism (retries, extra polls)
@@ -50,7 +61,7 @@ Normalize once per slice when building the fixture, document the rule in the tes
 
 Work in **order along the real single-bw session**, extending only as far as needed for a working scan:
 
-1. **Init / inquiry / mode** — Match capture through stable “ready for scan setup” point; update docs when locked.
+1. **Init / inquiry / mode** — Match capture through stable “ready for scan setup” point; update docs when locked. *(Replay test locks lines **1–83** through MODE_SELECT; extend the text fixture from `ls40-single-bw.pcapng` when tests need traffic past the current **136** lines.)*
 2. **Prescan setup** — SET_WINDOW ×3, LUT upload, START_SCAN; match capture sequence and payloads.
 3. **Post-START_SCAN** — Status reads, polling pattern, first meaningful **image-related READ** per capture.
 4. **Full prescan image path** — Complete bulk reads for prescan dimensions from capture.

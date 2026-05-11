@@ -20,6 +20,8 @@ try:
 except ImportError:
     USB_AVAILABLE = False
 
+from coolscan.usb_replay import ReplayError
+
 
 class PhaseType(Enum):
     """USB communication phases."""
@@ -286,6 +288,11 @@ class CoolscanProtocol:
             self._init_usb()
         else:
             self._init_scsi()
+
+    def _replay_reraise_if_needed(self, exc: BaseException) -> None:
+        """When driving I/O from a capture replay, do not swallow replay mismatch errors."""
+        if self._usb_capture_replay is not None and isinstance(exc, ReplayError):
+            raise exc
 
     def _init_usb_from_replay(self):
         """Bind bulk endpoints to capture replay traffic (no libusb)."""
@@ -592,6 +599,7 @@ class CoolscanProtocol:
 
             return result
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             print(f"    ❌ Write error: {e}")
             raise
 
@@ -629,6 +637,7 @@ class CoolscanProtocol:
 
             return data_bytes
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             print(f"    ❌ Read error: {e}")
             raise
 
@@ -651,7 +660,8 @@ class CoolscanProtocol:
                         phase_response = self._usb_read_bulk(1)
                         if hasattr(phase_response, "tobytes"):
                             phase_response = phase_response.tobytes()
-                    except:
+                    except Exception as e:
+                        self._replay_reraise_if_needed(e)
                         time.sleep(delay)
                         continue
 
@@ -665,7 +675,8 @@ class CoolscanProtocol:
                             return True
 
                     time.sleep(delay)
-                except:
+                except Exception as e:
+                    self._replay_reraise_if_needed(e)
                     time.sleep(delay)
                     continue
 
@@ -685,6 +696,7 @@ class CoolscanProtocol:
                 # Longer delay between retries to allow scanner time to respond
                 time.sleep(0.5 * (attempt + 1))
             except Exception as e:
+                self._replay_reraise_if_needed(e)
                 print(f"Phase check attempt {attempt + 1} failed: {e}")
                 # Longer delay on error too
                 time.sleep(1.0 * (attempt + 1))
@@ -761,6 +773,7 @@ class CoolscanProtocol:
                 print(f"      ⚠️  No phase response received")
                 return PhaseType.NONE
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             print(f"      ⚠️  Phase check error: {e}")
         return PhaseType.NONE
 
@@ -795,6 +808,7 @@ class CoolscanProtocol:
                     phase_response = phase_response.tobytes()
                 phase_byte = phase_response[0] if len(phase_response) > 0 else 0
             except Exception as e:
+                self._replay_reraise_if_needed(e)
                 # Handle Overflow - for READ commands, this might mean data is already available
                 if "Overflow" in str(e) or "84" in str(e):
                     # Overflow means we tried to read 1 byte but more is available
@@ -825,6 +839,7 @@ class CoolscanProtocol:
                                 phase_byte = 0x03  # Default to DATA_IN
                                 data_in = b""
                         except Exception as e2:
+                            self._replay_reraise_if_needed(e2)
                             print(f"    ⚠️  Failed to read chunk after Overflow: {e2}")
                             phase_byte = 0x03  # Assume DATA_IN phase
                             data_in = b""
@@ -838,7 +853,8 @@ class CoolscanProtocol:
                                 status, parsed = self._parse_status(status_data)
                                 print(f"    ⚠️  Got status directly (Overflow on phase): {status}")
                                 return b"", status
-                        except:
+                        except Exception as e_ov:
+                            self._replay_reraise_if_needed(e_ov)
                             pass
                         phase_byte = 0x03  # Default to DATA_IN
                         data_in = b""
@@ -860,7 +876,8 @@ class CoolscanProtocol:
                         phase_byte = phase_response[0] if len(phase_response) > 0 else 0
                         if phase_byte != 0x04:
                             break
-                    except:
+                    except Exception as e_busy:
+                        self._replay_reraise_if_needed(e_busy)
                         pass
                 if phase_byte == 0x04:
                     print(f"    ⚠️  Scanner still busy")
@@ -876,6 +893,7 @@ class CoolscanProtocol:
                     # After sending DATA_OUT, go straight to reading status (like SANE)
                     # No phase check needed - status is next in the protocol sequence
                 except Exception as e:
+                    self._replay_reraise_if_needed(e)
                     print(f"    ⚠️  Data out failed: {e}")
                     return b"", StatusType.ERROR
 
@@ -893,6 +911,7 @@ class CoolscanProtocol:
                     else:
                         data_in = existing_data
                 except Exception as e:
+                    self._replay_reraise_if_needed(e)
                     print(f"    ⚠️  Data read failed: {e}")
                     # Keep existing data if we have it
                     if len(data_in) == 0:
@@ -922,15 +941,18 @@ class CoolscanProtocol:
 
                 return data_in, status
             except Exception as e:
+                self._replay_reraise_if_needed(e)
                 print(f"    ⚠️  Status read failed: {e}")
                 try:
                     self._usb_write_bulk(self._build_6byte_command(0x00, control=0x00))
                     self._usb_write_bulk(self._pack_byte(0xD0))
-                except:
+                except Exception as e_tur:
+                    self._replay_reraise_if_needed(e_tur)
                     pass
                 return data_in, StatusType.ERROR
 
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             print(f"    ❌ USB command error: {e}")
             return b"", StatusType.ERROR
 
@@ -2113,6 +2135,7 @@ class CoolscanProtocol:
                     print(f"  ❌ Standard INQUIRY returned insufficient data")
                     return False
             except Exception as e:
+                self._replay_reraise_if_needed(e)
                 print(f"  ❌ Standard INQUIRY failed: {e}")
                 print("  Aborting initialization - scanner is not responding")
                 return False
@@ -2146,6 +2169,7 @@ class CoolscanProtocol:
                             # MUD might be in the data
                             pass
                 except Exception as e:
+                    self._replay_reraise_if_needed(e)
                     print(f"    ⚠️  Page 0x{page:02x} failed: {e}")
 
             # 4. RESERVE_UNIT
@@ -2182,6 +2206,7 @@ class CoolscanProtocol:
             return True
 
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             print(f"❌ Scanner initialization failed: {e}")
             import traceback
 
@@ -2243,6 +2268,10 @@ class CoolscanProtocol:
         """Close the connection to the scanner."""
         # Disable USB capture if active
         self.disable_usb_capture()
+
+        if self._usb_capture_replay is not None:
+            self.usb_device = None
+            return
 
         if self.usb_device:
             try:
