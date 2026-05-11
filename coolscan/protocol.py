@@ -1674,6 +1674,7 @@ class CoolscanProtocol:
 
                 time.sleep(poll_interval)
             except Exception as e:
+                self._replay_reraise_if_needed(e)
                 elapsed = time.time() - start_time
                 if attempt % 20 == 0:  # Print errors periodically too
                     print(f"  Poll error ({elapsed:.1f}s, attempt {attempt + 1}): {e}")
@@ -1964,6 +1965,7 @@ class CoolscanProtocol:
                 if self.verbose:
                     print(f"  Status/progress block 1: {len(status_block1)} bytes")
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             # ABORTED COMMAND (sense_key=11) is common here - scanner may not be ready yet
             # This is non-fatal - continue to polling
             if self.verbose:
@@ -1977,6 +1979,7 @@ class CoolscanProtocol:
                 if self.verbose:
                     print(f"  Status/progress block 2: {len(status_block2)} bytes")
         except Exception as e:
+            self._replay_reraise_if_needed(e)
             # ABORTED COMMAND is common here too - non-fatal
             if self.verbose:
                 print(f"  (Status/progress block 2 skipped: {e})")
