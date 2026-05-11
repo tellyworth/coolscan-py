@@ -1,8 +1,13 @@
 """
 Replay USB bulk traffic from ``test_basic_scan_capture.txt``-style fixtures.
 
-Columns: ``timestamp \\t endpoint \\t length \\t hex``. Host OUT uses ``0x01``,
+Columns: ``timestamp \\t endpoint \\t length \\t payload``. Host OUT uses ``0x01``,
 host IN uses ``0x82`` (matches ``CoolscanProtocol`` hardcoded endpoints).
+
+Payload is either **hex** (even length, no prefix) or ``@relative/path`` to a
+**binary file** (resolved from the capture file's directory); the file's byte
+length must equal the length column. Use this for large IN transfers (e.g.
+image ``READ`` data).
 """
 
 from __future__ import annotations
@@ -34,17 +39,56 @@ class ReplayDirectionError(ReplayError):
     """The next fixture event does not match the requested transfer direction."""
 
 
+def _decode_payload_field(
+    lineno: int,
+    field: str,
+    declared: int,
+    base_dir: Path,
+) -> bytes:
+    field = field.strip()
+    if field.startswith("@"):
+        rel = field[1:].lstrip("/")
+        path = (base_dir / rel).resolve()
+        root = base_dir.resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Line {lineno}: payload path must stay under capture directory"
+            ) from exc
+        data = path.read_bytes()
+        if len(data) != declared:
+            raise ValueError(
+                f"Line {lineno}: file {rel} length {len(data)} != length column {declared}"
+            )
+        return data
+    payload = bytes.fromhex(field)
+    if len(payload) != declared:
+        raise ValueError(
+            f"Line {lineno}: length column {declared} != decoded hex length {len(payload)}"
+        )
+    return payload
+
+
 def _parse_capture_lines(
     lines: List[str],
     *,
     line_start: int = 1,
     line_end: Optional[int] = None,
+    base_dir: Optional[Path] = None,
 ) -> List[Tuple[Literal["out", "in"], bytes]]:
     """
     Parse capture lines into ordered (direction, payload) pairs.
 
     ``line_start`` / ``line_end`` are 1-based inclusive line numbers in ``lines``.
+
+    ``base_dir`` is used to resolve ``@path`` payload references (defaults to cwd).
     """
+    if base_dir is None:
+        base_dir = Path.cwd()
+    else:
+        base_dir = base_dir.resolve()
+
     events: List[Tuple[Literal["out", "in"], bytes]] = []
     for lineno, line in enumerate(lines, start=1):
         if line_end is not None and lineno > line_end:
@@ -59,11 +103,7 @@ def _parse_capture_lines(
             continue
         ep = int(parts[1], 0)
         declared = int(parts[2])
-        payload = bytes.fromhex(parts[3])
-        if len(payload) != declared:
-            raise ValueError(
-                f"Line {lineno}: length column {declared} != decoded hex length {len(payload)}"
-            )
+        payload = _decode_payload_field(lineno, parts[3], declared, base_dir)
         if ep == BULK_OUT_EP:
             events.append(("out", payload))
         elif ep == BULK_IN_EP:
@@ -91,7 +131,14 @@ class UsbCaptureReplay:
         p = Path(path)
         text = p.read_text(encoding="utf-8")
         lines = text.splitlines()
-        return cls(_parse_capture_lines(lines, line_start=line_start, line_end=line_end))
+        return cls(
+            _parse_capture_lines(
+                lines,
+                line_start=line_start,
+                line_end=line_end,
+                base_dir=p.parent.resolve(),
+            )
+        )
 
     @property
     def position(self) -> int:

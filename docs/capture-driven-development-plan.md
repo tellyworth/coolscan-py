@@ -46,7 +46,7 @@ That runs **real `CoolscanProtocol` logic** without hardware and without simulat
 
 **Tests:** `tests/test_usb_replay_transport.py` (first INQUIRY, parser edge cases); `tests/test_usb_replay_init_sequence.py` — **`initialize_scanner()` through MODE_SELECT** matches **`test_basic_scan_capture.txt` lines 1–83** (line 84 is the next host transaction, start of the prescan-era segment).
 
-**Prescan replay:** `tests/test_usb_replay_prescan_sequence.py` — **`prescan()`** bulk I/O matches **lines 88–193** (replay starts at 88 so the first capture TUR before that does not duplicate `prescan`’s opening `test_unit_ready`). Tail after **START_SCAN** mixes **synthetic** rows (poll / exposure / `GET_WINDOW`) where no pcap is checked in, plus real capture-derived bytes where present; **image bulk** `read_prescan_image_data` remains mocked until multi-hundred-kilobyte `READ` lines are exported. **LUT OUT rows** must be **full-length** hex (parser checks the length column). **Tooling:** `scripts/export_usb_capture_text.py` writes more text lines from `ls40-single-bw.pcapng` when `tshark` is available.
+**Prescan replay:** `tests/test_usb_replay_prescan_sequence.py` — **`prescan()`** bulk I/O matches **lines 88–208** (replay starts at 88 so the first capture TUR before that does not duplicate `prescan`’s opening `test_unit_ready`). The post-**READY** tail is **synthetic** where needed: it follows **`CoolscanProtocol.prescan()` order** (three image `READ`s via `read_prescan_image_data`, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the chronological bus order in a raw export. Large IN payloads use **`@tests/fixtures/...` binary files** resolved from the capture file’s directory (see `coolscan/usb_replay.py`). **LUT OUT rows** must be **full-length** hex (parser checks the length column). **Tooling:** `scripts/export_usb_capture_text.py` writes more text lines from `ls40-single-bw.pcapng` when `tshark` is available.
 
 **Fallback** (if injection is too invasive for a given area): Keep **targeted mocks** on specific methods but assert **exact bytes** passed in/out, still derived from `test_basic_scan_capture.txt`.
 
@@ -76,7 +76,7 @@ After each milestone: **`pytest` green**, **docs updated** (what is now guarante
 - After each **passing milestone**, update **`docs/unified-protocol-spec.md`** and/or **`docs/usb-capture-findings.md`** with a short note: what sequence is now test-locked and any caveats (normalization, optional retries).
 - **Commit discipline:** One commit per **logical chunk** (e.g. one milestone or one fixture+test+fix cluster). Message should state which capture slice is now enforced.
 
-*(Agents: commit only when the user explicitly authorizes commits for that session.)*
+*(Agents: commit when the user has authorized commits for the session.)*
 
 ## Subagent roles
 
