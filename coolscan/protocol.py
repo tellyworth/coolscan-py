@@ -265,7 +265,7 @@ class ScannerInfo:
 class CoolscanProtocol:
     """Implements the Coolscan communication protocol."""
 
-    def __init__(self, device, verbose: bool = False):
+    def __init__(self, device, verbose: bool = False, *, usb_capture_replay=None):
         self.device = device
         self.interface = device.interface
         self.usb_device = None
@@ -277,14 +277,36 @@ class CoolscanProtocol:
         self._last_status_parsed = None  # Store last parsed status
         self._usb_capture_log = None  # File handle for USB capture logging
         self._usb_capture_start_time = None  # Start time for relative timestamps
+        self._usb_capture_replay = usb_capture_replay
+
+        if usb_capture_replay is not None and self.interface.value != "usb":
+            raise ValueError("usb_capture_replay is only valid for USB interface devices")
 
         if self.interface.value == "usb":
             self._init_usb()
         else:
             self._init_scsi()
 
+    def _init_usb_from_replay(self):
+        """Bind bulk endpoints to capture replay traffic (no libusb)."""
+        from coolscan.usb_replay import ReplayUsbDevice
+
+        class _Ep:
+            __slots__ = ("bEndpointAddress", "wMaxPacketSize")
+
+            def __init__(self, addr: int) -> None:
+                self.bEndpointAddress = addr
+                self.wMaxPacketSize = 64
+
+        self.bulk_out = _Ep(0x01)
+        self.bulk_in = _Ep(0x82)
+        self.usb_device = ReplayUsbDevice(self._usb_capture_replay)
+
     def _init_usb(self):
         """Initialize USB connection with proper interface claiming and endpoint setup."""
+        if self._usb_capture_replay is not None:
+            self._init_usb_from_replay()
+            return
         if not USB_AVAILABLE:
             raise RuntimeError("USB support not available")
 
