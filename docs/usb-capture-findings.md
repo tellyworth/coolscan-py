@@ -231,6 +231,13 @@ same exposure information that prescan is designed to measure.
 
 **Replay / fixture status:** `test_basic_scan_capture.txt` lines **88–208** are enforced by `tests/test_usb_replay_prescan_sequence.py` against real `prescan()` (only `time.sleep` patched). The post-READY segment orders traffic to match **`prescan()`** (image READs, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the raw chronological order in an unedited pcap export.
 
+### Beyond prescan (`ls40-single-bw`): full-resolution image READs
+
+- After the third prescan-plane `GET_WINDOW` (already in the replay tail), Nikon Scan issues **another** `GET_WINDOW` for window **3** in the trace (duplicate WDB poll; frames ~2391–2398 in the LS-40 single-BW capture) before starting **full-resolution** image `READ(10)` traffic.
+- The first stripe uses CDB payloads such as **`28000000000003f00080`** (**258048** bytes), **`28000000000003690080`** (**223488** bytes), followed by long runs of **`28000000000003f48080`** (**259200** bytes per issue) plus a **`28000000000001950080`** residual (**103680** bytes)—see `scripts/audit_capture_read_batches.py` with `--min-alloc 100000`.
+- **`tshark` framing:** Between repeated identical image READ outs, capture rows usually show **one ~65508-byte IN** (`0x82`) per READ issue, **not** the full allocation in one transfer. **`CoolscanProtocol._issue_usb_command`** still performs a **single** `_usb_read_bulk(allocation)`, so replay fixtures consolidate wire chunks (as with prescan **`refresh_prescan_image_fixtures.py`**). **`scripts/audit_capture_read_batches.py`** compares allocation length vs **single** intra-CDB-transfer IN sum — expect **`no`** for large READs unless you merge sibling URB rows first.
+- **`RELEASE UNIT` (17 00 …)** did not appear in this capture; **`RESERVE`** appears once earlier in the session.
+
 ## Implementation Status
 
 ✅ **ALL FIXED** - Communication barrier resolved!
