@@ -46,7 +46,7 @@ That runs **real `CoolscanProtocol` logic** without hardware and without simulat
 
 **Tests:** `tests/test_usb_replay_transport.py` (first INQUIRY, parser edge cases); `tests/test_usb_replay_init_sequence.py` — **`initialize_scanner()` through MODE_SELECT** matches **`test_basic_scan_capture.txt` lines 1–83** (line 84 is the next host transaction, start of the prescan-era segment).
 
-**Prescan replay:** `tests/test_usb_replay_prescan_sequence.py` — **`prescan()`** bulk I/O matches **lines 88–208** (replay starts at 88 so the first capture TUR before that does not duplicate `prescan`’s opening `test_unit_ready`). The post-**READY** tail is **synthetic** where needed: it follows **`CoolscanProtocol.prescan()` order** (three image `READ`s via `read_prescan_image_data`, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the chronological bus order in a raw export. Large IN payloads use **`@tests/fixtures/...` binary files** resolved from the capture file’s directory (see `coolscan/usb_replay.py`). **LUT OUT rows** must be **full-length** hex (parser checks the length column). **Tooling:** `scripts/export_usb_capture_text.py` writes more text lines from `ls40-single-bw.pcapng` when `tshark` is available. **`scripts/refresh_prescan_image_fixtures.py`** rebuilds `tests/fixtures/prescan_image_block{1,2,3}.bin` from the same pcap. **`scripts/audit_capture_read_batches.py`** prints image `READ` allocation vs single-transfer IN sums for pcap QA before extending full-scan replay.
+**Prescan replay:** `tests/test_usb_replay_prescan_sequence.py` — **`prescan()`** bulk I/O matches **lines 88–208** (replay starts at 88 so the first capture TUR before that does not duplicate `prescan`’s opening `test_unit_ready`). The post-**READY** tail is **synthetic** where needed: it follows **`CoolscanProtocol.prescan()` order** (three image `READ`s via `read_prescan_image_data`, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the chronological bus order in a raw export. Large IN payloads use **`@tests/fixtures/...` binary files** resolved from the capture file’s directory (see `coolscan/usb_replay.py`). **LUT OUT rows** must be **full-length** hex (parser checks the length column). **Tooling:** `scripts/export_usb_capture_text.py` writes more text lines from `ls40-single-bw.pcapng` when `tshark` is available. **`scripts/refresh_prescan_image_fixtures.py`** rebuilds `tests/fixtures/prescan_image_block{1,2,3}.bin` from the same pcap. **`scripts/audit_capture_read_batches.py`** prints image `READ` allocation vs single-transfer IN sums for pcap QA before extending full-scan replay. **`scripts/validate_fixtures.py`** (`make validate-fixtures`) checks fixture consistency: column count, endpoint values, length-vs-hex match, `@path` resolution, file-size match, and timestamp ordering (warnings for splice points). Runs as part of `make check-all`.
 
 **Fallback** (if injection is too invasive for a given area): Keep **targeted mocks** on specific methods but assert **exact bytes** passed in/out, still derived from `test_basic_scan_capture.txt`.
 
@@ -103,6 +103,8 @@ python -m pytest tests/ -v
 ```
 
 Use a narrower path while iterating (e.g. `tests/test_prescan_sequence_verification.py`) when appropriate.
+
+**Fixture validation:** Run `make validate-fixtures` (or `python scripts/validate_fixtures.py`) before committing fixture changes. Included in `make check-all`.
 
 ## Out of scope for this plan
 

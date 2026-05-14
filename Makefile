@@ -1,4 +1,4 @@
-.PHONY: lint lint-fix test test-fast format type-check check-all
+.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures
 
 # Linting and code quality
 lint:
@@ -26,8 +26,13 @@ type-check:
 format:
 	black coolscan tests
 
-# Run all checks (lint + test)
-check-all: lint test
+# Validate capture fixture consistency
+validate-fixtures:
+	@echo "Validating capture fixtures..."
+	python3 scripts/validate_fixtures.py
+
+# Run all checks (lint + validate + test)
+check-all: lint validate-fixtures test
 	@echo "✅ All checks passed!"
 
 # Quick syntax check (catches indentation errors)
