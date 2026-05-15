@@ -229,7 +229,7 @@ same exposure information that prescan is designed to measure.
 - `read_prescan_image_data()` - Reads all image data blocks (273024 bytes total)
 - `read_exposure_data()` - Reads exposure header (6 bytes) and table (3464 bytes)
 
-**Replay / fixture status:** `test_basic_scan_capture.txt` lines **88–208** are enforced by `tests/test_usb_replay_prescan_sequence.py` against real `prescan()` (only `time.sleep` patched). The post-READY segment orders traffic to match **`prescan()`** (image READs, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the raw chronological order in an unedited pcap export.
+**Replay / fixture status:** `test_basic_scan_capture.txt` lines **88–208** are enforced by `tests/test_usb_replay_prescan_sequence.py` against real `prescan()` (only `time.sleep` patched). The post-READY segment orders traffic to match **`prescan()`** (image READs, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the raw chronological order in an unedited pcap export. Lines **210–252** are enforced by `tests/test_usb_replay_full_scan_sequence.py` against real `perform_scan_sequence()` (scanner_ready TUR, reserve_unit, object_position, set_window via MODE_SELECT, send_lut, start_scan with ERROR/ASCQ=6, post-scan polling PROCESSING→READY, release_unit). Fixture command bytes match `CoolscanProtocol` output, not the raw capture (see note below).
 
 ### Beyond prescan (`ls40-single-bw`): full-resolution image READs
 
