@@ -48,6 +48,10 @@ That runs **real `CoolscanProtocol` logic** without hardware and without simulat
 
 **Prescan replay:** `tests/test_usb_replay_prescan_sequence.py` — **`prescan()`** bulk I/O matches **lines 88–208** (replay starts at 88 so the first capture TUR before that does not duplicate `prescan`’s opening `test_unit_ready`). The post-**READY** tail is **synthetic** where needed: it follows **`CoolscanProtocol.prescan()` order** (three image `READ`s via `read_prescan_image_data`, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the chronological bus order in a raw export. Large IN payloads use **`@tests/fixtures/...` binary files** resolved from the capture file’s directory (see `coolscan/usb_replay.py`). **LUT OUT rows** must be **full-length** hex (parser checks the length column). **Tooling:** `scripts/export_usb_capture_text.py` writes more text lines from `ls40-single-bw.pcapng` when `tshark` is available. **`scripts/refresh_prescan_image_fixtures.py`** rebuilds `tests/fixtures/prescan_image_block{1,2,3}.bin` from the same pcap. **`scripts/audit_capture_read_batches.py`** prints image `READ` allocation vs single-transfer IN sums for pcap QA before extending full-scan replay. **`scripts/validate_fixtures.py`** (`make validate-fixtures`) checks fixture consistency: column count, endpoint values, length-vs-hex match, `@path` resolution, file-size match, and timestamp ordering (warnings for splice points). Runs as part of `make check-all`.
 
+**Full scan setup replay:** `tests/test_usb_replay_full_scan_sequence.py` — **`perform_scan_sequence()`** bulk I/O matches **lines 210–252** (scanner_ready TUR, reserve_unit, object_position, set_window via MODE_SELECT, send_lut, start_scan, polling PROCESSING→READY, release_unit). Command bytes match `CoolscanProtocol` output, not raw capture (full scan uses SET_WINDOW 0x24 vs MODE_SELECT 0x15, and 3× 8192-byte LUT uploads vs single 768-byte LUT).
+
+**Full scan image data strategy:** Rather than replaying ~25 MiB of byte-for-byte image data, validate at three levels: (A) CDB construction test proves `read_scan_data(259200)` emits correct READ(10) CDB against minimal fixture with synthetic IN; (B) post-READY GET_WINDOW fixture validates WDB responses; (C) integration test covers control flow from setup → scan → data read with synthetic IN data.
+
 **Fallback** (if injection is too invasive for a given area): Keep **targeted mocks** on specific methods but assert **exact bytes** passed in/out, still derived from `test_basic_scan_capture.txt`.
 
 ## Handling non-determinism (retries, extra polls)
@@ -118,4 +122,4 @@ Use a narrower path while iterating (e.g. `tests/test_prescan_sequence_verificat
 
 ---
 
-*Last updated (2026-05): milestone status and “Pcap vs text fixture” maintenance notes; prescan replay through line 208.*
+*Last updated (2026-05): milestone status, full scan setup replay (lines 210-252), revised image data strategy (CDB + GET_WINDOW + integration instead of byte-for-byte replay).*Last updated (2026-05): milestone status and “Pcap vs text fixture” maintenance notes; prescan replay through line 208.*
