@@ -354,6 +354,8 @@ Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The imple
 
 **USB replay test:** `tests/test_usb_replay_full_scan_sequence.py` locks bulk I/O for `perform_scan_sequence()` against `test_basic_scan_capture.txt` **lines 210–252**. The fixture enforces: scanner_ready TUR poll (READY), reserve_unit, object_position, set_window via MODE_SELECT (20-byte params), send_lut (768-byte identity LUT, dt=0xc0), start_scan (ERROR/ASCQ=6 treated as success), post-START_SCAN polling (2× PROCESSING → READY), and release_unit in the finally block. Command bytes match `CoolscanProtocol` output, not the raw capture, where the full scan uses SET_WINDOW (0x24) instead of MODE_SELECT (0x15) and 3× 8192-byte LUT uploads (dt=0x03) instead of a single 768-byte LUT (dt=0xc0).
 
+**Full scan image data validation:** Rather than byte-for-byte replay of ~25 MiB of image data, correctness is enforced at three levels: (A) `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes; (B) `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs and WDB exposure extraction; (C) `tests/test_scan_read_integration.py` covers full control flow from setup through `read_scan_data(64)` to release_unit with synthetic IN data.
+
 ## Key Differences: SANE vs USB Capture
 
 | Aspect | SANE Backend Shows | USB Capture Shows | Our Implementation |
