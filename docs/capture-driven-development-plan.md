@@ -79,10 +79,10 @@ Work in **order along the real single-bw session**, extending only as far as nee
 3. **Post-START_SCAN** — **Done (replay slice).** Status reads (`0x87`), `poll_until_ready()` pattern, READY transition through line **168** of the text file; covered by `tests/test_usb_replay_prescan_sequence.py` from line **88**.
 4. **Full prescan image path** — **Done (replay harness).** `tests/test_usb_replay_prescan_sequence.py` matches **lines 88–208** including three image `READ`s (`@` fixture blobs), exposure `0x8e`, three `GET_WINDOW`s. Image fixture binaries are regenerated from **`ls40-single-bw.pcapng`** using **`scripts/refresh_prescan_image_fixtures.py`** (see **Pcap vs text fixture**).
 5. **Full scan setup + polling** — **Done (replay).** `tests/test_usb_replay_full_scan_sequence.py` locks **lines 210–252** against `perform_scan_sequence()` (scanner_ready TUR, reserve_unit, object_position, set_window via MODE_SELECT, send_lut, start_scan with ERROR/ASCQ=6, post-scan polling PROCESSING→READY, release_unit). Command bytes match `CoolscanProtocol` output, not raw capture (full scan uses SET_WINDOW 0x24 vs MODE_SELECT 0x15, and 3× 8192-byte LUT uploads vs single 768-byte LUT).
-6. **Full scan image data** — **Revised strategy.** Rather than replaying ~25 MiB of byte-for-byte image data (which requires consolidating ~65508-byte wire chunks into single bulk reads), we validate correctness at three levels:
-   - **Piece A: CDB construction** — Unit test `read_scan_data(259200)` emits the correct READ(10) CDB (`28000000000003f48080`) against a minimal fixture with synthetic IN data (zeros).
-   - **Piece B: Post-READY GET_WINDOW** — Fixture slice validates the GET_WINDOW CDBs and WDB responses after full scan READY, matching what `get_exposure_values()` expects.
-   - **Piece C: Integration** — Extend replay test to cover `perform_scan_sequence()` → first `read_scan_data()` call with synthetic IN data, proving control flow transitions correctly.
+6. **Full scan image data** — **Done (three-level validation).** Rather than replaying ~25 MiB of byte-for-byte image data (which requires consolidating ~65508-byte wire chunks into single bulk reads), we validate correctness at three levels:
+   - **Piece A: CDB construction** — `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes.
+   - **Piece B: Post-READY GET_WINDOW** — `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs for windows 1/2/3/9 and WDB exposure extraction (SANE formula, bytes 54-57).
+   - **Piece C: Integration** — `tests/test_scan_read_integration.py` covers full control flow (scanner_ready → reserve_unit → object_position → set_window → send_lut → start_scan → poll_until_ready → read_scan_data(64) → release_unit) with synthetic IN data.
 
 After each milestone: **`pytest` green**, **docs updated** (what is now guaranteed vs capture), **git commit** (see below).
 
@@ -122,4 +122,4 @@ Use a narrower path while iterating (e.g. `tests/test_prescan_sequence_verificat
 
 ---
 
-*Last updated (2026-05): milestone status, full scan setup replay (lines 210-252), revised image data strategy (CDB + GET_WINDOW + integration instead of byte-for-byte replay).*Last updated (2026-05): milestone status and “Pcap vs text fixture” maintenance notes; prescan replay through line 208.*
+*Last updated (2026-05): milestone 6 complete — full scan image data validated via CDB construction (7 tests), GET_WINDOW/WDB parsing (8 tests), and integration test with synthetic IN data (1 test). Total: 141 tests.*Last updated (2026-05): milestone status, full scan setup replay (lines 210-252), revised image data strategy (CDB + GET_WINDOW + integration instead of byte-for-byte replay).*Last updated (2026-05): milestone status and “Pcap vs text fixture” maintenance notes; prescan replay through line 208.*
