@@ -15,6 +15,7 @@ from enum import Enum
 try:
     import usb.core
     import usb.util
+
     USB_AVAILABLE = True
 except ImportError:
     USB_AVAILABLE = False
@@ -22,6 +23,7 @@ except ImportError:
 
 class InterfaceType(Enum):
     """Scanner interface types."""
+
     USB = "usb"
     SCSI = "scsi"  # Includes Firewire via SBP2
 
@@ -29,6 +31,7 @@ class InterfaceType(Enum):
 @dataclass
 class ScannerDevice:
     """Represents a detected Coolscan scanner."""
+
     name: str
     interface: InterfaceType
     vendor: str
@@ -37,16 +40,16 @@ class ScannerDevice:
     device_path: str
     vendor_id: Optional[int] = None
     product_id: Optional[int] = None
-    
+
     def __str__(self):
         return f"{self.model} ({self.interface.value}:{self.device_path})"
 
 
 # Known Coolscan USB device IDs
 COOLSCAN_USB_DEVICES = {
-    (0x04b0, 0x4000): "LS-40 ED",
-    (0x04b0, 0x4001): "LS-50 ED", 
-    (0x04b0, 0x4002): "LS-5000 ED",
+    (0x04B0, 0x4000): "LS-40 ED",
+    (0x04B0, 0x4001): "LS-50 ED",
+    (0x04B0, 0x4002): "LS-5000 ED",
 }
 
 # Known Coolscan SCSI/Firewire device patterns
@@ -64,10 +67,10 @@ def find_usb_scanners() -> List[ScannerDevice]:
     if not USB_AVAILABLE:
         print("USB support not available (pyusb not installed)")
         return []
-    
+
     scanners = []
     print(f"Searching for USB Coolscan devices...")
-    
+
     for (vendor_id, product_id), model_name in COOLSCAN_USB_DEVICES.items():
         print(f"  Checking for {model_name} (0x{vendor_id:04x}:0x{product_id:04x})...")
         try:
@@ -79,17 +82,17 @@ def find_usb_scanners() -> List[ScannerDevice]:
                     vendor = usb.util.get_string(device, device.iManufacturer)
                 except:
                     vendor = "Nikon"
-                
+
                 try:
                     product = usb.util.get_string(device, device.iProduct)
                 except:
                     product = model_name
-                
+
                 try:
                     revision = usb.util.get_string(device, device.iSerialNumber)
                 except:
                     revision = "Unknown"
-                
+
                 scanner = ScannerDevice(
                     name=f"usb:{vendor_id:04x}:{product_id:04x}",
                     interface=InterfaceType.USB,
@@ -98,15 +101,15 @@ def find_usb_scanners() -> List[ScannerDevice]:
                     revision=revision,
                     device_path=f"{vendor_id:04x}:{product_id:04x}",
                     vendor_id=vendor_id,
-                    product_id=product_id
+                    product_id=product_id,
                 )
                 scanners.append(scanner)
             else:
                 print(f"    Not found")
-                
+
         except Exception as e:
             print(f"    Error accessing USB device {vendor_id:04x}:{product_id:04x}: {e}")
-    
+
     return scanners
 
 
@@ -114,20 +117,16 @@ def find_scsi_scanners() -> List[ScannerDevice]:
     """Find SCSI/Firewire Coolscan scanners."""
     scanners = []
     print(f"Searching for SCSI/Firewire Coolscan devices...")
-    
+
     # Common SCSI device paths on macOS
-    scsi_paths = [
-        "/dev/sg*",
-        "/dev/scsi*", 
-        "/dev/disk*"
-    ]
-    
+    scsi_paths = ["/dev/sg*", "/dev/scsi*", "/dev/disk*"]
+
     print(f"  Checking device paths: {scsi_paths}")
-    
+
     for pattern in scsi_paths:
         devices = glob.glob(pattern)
         print(f"  Found {len(devices)} devices matching {pattern}")
-        
+
         for device_path in devices:
             if os.access(device_path, os.R_OK | os.W_OK):
                 try:
@@ -138,7 +137,7 @@ def find_scsi_scanners() -> List[ScannerDevice]:
                 except Exception as e:
                     # Silently continue if we can't access this device
                     pass
-    
+
     return scanners
 
 
@@ -148,12 +147,14 @@ def _probe_scsi_device(device_path: str) -> Optional[ScannerDevice]:
         # Use system_profiler on macOS to get device info
         result = subprocess.run(
             ["system_profiler", "SPFireWireDataType", "SPUSBDataType"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        
+
         if result.returncode == 0:
             output = result.stdout
-            
+
             # Look for Nikon devices
             if "Nikon" in output:
                 # Parse the output to find device details
@@ -166,45 +167,45 @@ def _probe_scsi_device(device_path: str) -> Optional[ScannerDevice]:
                             vendor="Nikon",
                             model=pattern,
                             revision="Unknown",
-                            device_path=device_path
+                            device_path=device_path,
                         )
-        
+
         # Alternative: try to read device directly
         # This would require implementing SCSI INQUIRY command
         # For now, we'll skip this approach
-        
+
     except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
         pass
-    
+
     return None
 
 
 def find_scanners() -> List[ScannerDevice]:
     """Find all available Coolscan scanners (USB and SCSI/Firewire)."""
     scanners = []
-    
+
     # Find USB scanners
     usb_scanners = find_usb_scanners()
     scanners.extend(usb_scanners)
-    
+
     # Find SCSI/Firewire scanners
     scsi_scanners = find_scsi_scanners()
     scanners.extend(scsi_scanners)
-    
+
     return scanners
 
 
 def list_scanners():
     """List all detected scanners."""
     scanners = find_scanners()
-    
+
     if not scanners:
         print("No Coolscan scanners found.")
         return
-    
+
     print(f"Found {len(scanners)} Coolscan scanner(s):")
     print()
-    
+
     for i, scanner in enumerate(scanners, 1):
         print(f"{i}. {scanner}")
         print(f"   Interface: {scanner.interface.value}")
@@ -219,5 +220,3 @@ def list_scanners():
 
 if __name__ == "__main__":
     list_scanners()
-
-

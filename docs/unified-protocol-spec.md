@@ -57,6 +57,108 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
   - Byte 4: Action (0x03 = start, 0x04 = stop)
   - Control byte is 0x00
 
+#### SET_WINDOW (0x24) - Send Window Descriptor Block
+- **USB format**: `24 00 00 00 00 00 00 00 3a 80` (10 bytes)
+  - Byte 0: 0x24 (SET_WINDOW)
+  - Byte 1-7: 0x00 (reserved)
+  - Byte 8: 0x3a = 58 (transfer length)
+  - Byte 9: 0x80 (control)
+
+**WDB Data Format** (58 bytes):
+- Bytes 0-6: Header (zeros)
+- Byte 7: 0x32 = 50 (length of WDB data)
+- Byte 8: Window ID (0x01=R, 0x02=G, 0x03=B, 0x09=IR)
+- Byte 9: Reserved (0x00)
+- Bytes 10-11: X resolution (big-endian)
+- Bytes 12-13: Y resolution (big-endian)
+- Bytes 14-17: X offset (4 bytes, big-endian)
+- Bytes 18-21: Y offset (4 bytes, big-endian)
+- Bytes 22-25: Width (4 bytes, big-endian)
+- Bytes 26-29: Height (4 bytes, big-endian)
+- Byte 30: Brightness
+- Byte 31: Threshold
+- Byte 32: Contrast
+- Byte 33: Image composition (0x05 for prescan, 0x02 for normal)
+- Byte 34: Pixel composition/depth (0x0c=12-bit prescan, 0x08=8-bit normal)
+- Bytes 35-47: Reserved zeros (13 bytes)
+- Byte 48: Multiread/ordering
+- Byte 49: Averaging (0x80) | Positive/Negative (0x01=positive)
+- Byte 50: Scan kind (0x01=normal, 0x02=prescan/AE, 0x20=AE, 0x40=AE_WB)
+- Byte 51: Scan mode (0x02=single, 0x10=multi)
+- Byte 52: Color interleave (0x02)
+- Byte 53: AE byte (0xff)
+- Bytes 54-57: **Exposure value** (4 bytes, big-endian, in 10ns units) - NOT a checksum!
+
+**Prescan vs Normal Scan WDBs:**
+| Parameter | Prescan (AE) | Normal (Full) |
+|-----------|-------------|---------------|
+| Resolution | 0x0060 (96 DPI) | 0x0b54 (2900 DPI) |
+| Scan kind (byte 50) | 0x02 | 0x01 |
+| Image comp (byte 33) | 0x05 | 0x02 |
+| Depth (byte 34) | 0x0c (12-bit) | 0x08 (8-bit) |
+| Windows | 1, 2, 3 only | 1, 2, 3 (+ 9 for IR) |
+
+**Example Prescan WDB (from USB capture):**
+```
+0000000000000032 01 0060 0060 00000000 00000000 00000b36 00008760
+00 00 00 05 0c 00000000000000000000000000 00 81 02 02 02 ff 0000a381
+```
+
+**Example Normal WDB:**
+```
+0000000000000032 01 0b54 0b54 00000000 00000000 00000b36 000010ec
+00 00 00 02 08 00000000000000000000000000 00 81 01 02 02 ff 00009ce6
+```
+
+#### WRITE (0x2a) - Send LUT (Look-Up Table) Data
+- **USB format**: `2a 00 03 00 [channel] 01 00 [len_hi] [len_lo] 00` (10 bytes)
+  - Byte 0: 0x2a (WRITE)
+  - Byte 1: 0x00 (LUN)
+  - Byte 2: 0x03 (datatype = LUT)
+  - Byte 3: 0x00 (reserved)
+  - Byte 4: Channel index (0x01=R, 0x02=G, 0x03=B)
+  - Byte 5: 0x01 (fixed)
+  - Byte 6: 0x00 (reserved)
+  - Byte 7-8: Transfer length big-endian (0x20 0x00 = 0x2000 = 8192 bytes)
+  - Byte 9: 0x00 (control)
+
+**LUT Data Format**:
+- 8192 bytes per channel (4096 entries × 2 bytes each)
+- 16-bit big-endian values
+- Identity LUT: `0000 0001 0002 0003 ... 0fff`
+- Three channels must be uploaded: R, G, B
+
+**Example from USB capture:**
+- R channel: `2a000300010100200000` → send 8192 bytes
+- G channel: `2a000300020100200000` → send 8192 bytes
+- B channel: `2a000300030100200000` → send 8192 bytes
+
+#### READ/WRITE Datatypes (0x28 / 0x2a)
+
+The scanner uses **datatype codes in byte 2** of READ(10) / WRITE(10) commands to
+distinguish what is being transferred:
+
+- `0x00` (READ): Image data blocks (prescan / full scan pixels)
+- `0x87` (READ): Internal status / progress blocks (6–33 byte payloads)
+- `0x8e` (READ): Exposure / calibration tables (prescan statistics)
+- `0x8f` (WRITE): Small control blocks (e.g. frame / exposure program writeback)
+- `0x03` (WRITE): LUT data (as described above)
+
+Examples from `usb_capture_timing.txt`:
+
+- Image data:
+  - `28000000000001fec080` → READ 0x1fec0 bytes of scan data
+  - `280000000000002d0080` → READ 0x2d00 bytes (final tail block)
+- Status / progress:
+  - `28008700000000000680` → READ 6 bytes (datatype 0x87)
+  - `28008700000000002180` → READ 0x21 bytes (datatype 0x87)
+  - `28008700000000001880` → READ 0x18 bytes (datatype 0x87)
+- Exposure / calibration:
+  - `28008e00000000000680` → READ 6 bytes (header)
+  - `28008e000000000d8880` → READ 0x0d88 bytes (3456-byte table)
+- Control / writeback:
+  - `2a008f00000300003400` → WRITE 0x34 bytes (datatype 0x8f)
+
 ## Communication Protocol Pattern
 
 ### Standard Command Sequence (from USB capture)
@@ -65,12 +167,13 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 2. **Send phase check** (0xd0) to endpoint 0x01 (OUT)
 3. **Read phase response** (1 byte) from endpoint 0x82 (IN)
    - `0x01` = Status phase
-   - `0x03` = Data in phase
+   - `0x02` = Data out phase (send data)
+   - `0x03` = Data in phase (read data)
    - `0x04` = Busy phase
-4. **Read data/status** from endpoint 0x82 (IN)
-   - If phase was `0x03`: Read data bytes (allocation length)
-   - Then read 8-byte status
-5. **Read final status** (8 bytes) from endpoint 0x82 (IN)
+4. **Handle phase**:
+   - If phase is `0x02` (Data OUT): Send data, then check phase again (send 0xd0, read phase)
+   - If phase is `0x03` (Data IN): Read data bytes (allocation length)
+5. **Read status** (8 bytes) from endpoint 0x82 (IN)
    - Status byte, sense key, ASC, ASCQ, etc.
 
 ### Phase Checking (from both sources)
@@ -79,6 +182,7 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 - **USB capture**: Shows 572 phase checks in a single scan session
 - **Frequency**: Phase check (0xd0) is sent **after every command**
 - **Critical**: This is mandatory for proper communication
+- **After data transfer**: When phase is 0x02 (Data OUT) and data is sent, check phase again before reading status
 
 ## Initialization Sequence
 
@@ -129,7 +233,7 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 ### From SANE Backend
 
 - **wait_scanner()**: Up to 40 attempts with 0.5 second delays (20 seconds max)
-- **Prescan timing**: 8 second sleep after starting prescan
+- **Prescan timing**: Originally used 8 second sleep, now uses dynamic polling (`poll_until_ready()`)
 - **Handles DEVICE_BUSY**: Retries on busy status
 
 ### From USB Capture
@@ -165,24 +269,92 @@ Bytes 4-7: Additional sense information
 
 ## Scan Operations
 
-### Prescan Sequence (from SANE)
+### Setting Scan Parameters and LUT
 
-1. Set window with WDB (scan_mode = 0x01 for prescan)
-2. Start scan (`1b 00 00 00 03 00`)
-3. Wait 8 seconds
-4. Wait for scanner ready
+The scan is prepared using a multi-step process:
 
-### Scan Sequence (from USB capture)
+1. **MODE_SELECT (0x15)** - Set mode parameters
+   - Command: `15 10 00 00 14 00` (6 bytes)
+   - Phase check returns 0x02 (Data OUT)
+   - Send 20 bytes of mode parameters: `000000080000000000000001030600000b540000`
+   - Read status
 
-1. **WRITE commands** (`2a 00 92 00 00 03 00 00 04 00`) - Send window/parameters
-   - Note: WRITE has multiple formats for different purposes
-2. **START_STOP_UNIT** (`1b 00 00 00 03 00`) - Start scan
-3. **READ(10) commands** (`28 [datatype] [params...] [len] 80`) - Read scan data with datatype codes
-   - Format: 10 bytes, byte 1 contains datatype code (0x8e, 0x8f, 0x8c, 0x87, etc.)
-4. **READ commands** (`24 00 00 00 00 00 00 00 [len_high] [len_low|0x80]`) - Simple read (10 bytes)
-   - Format: 10 bytes, allocation length in bytes 8-9
-5. **TEST_UNIT_READY** - Poll for completion
-6. **START_STOP_UNIT** (`1b 00 00 00 04 00`) - Stop scan
+2. **WRITE LUT (0x2a)** - Upload Look-Up Tables for R, G, B channels
+   - **CRITICAL**: Scanner requires LUT data before scanning!
+   - Command format: `2a 00 03 00 [channel] 01 00 20 00 00` (10 bytes)
+     - Byte 2: 0x03 = datatype (LUT)
+     - Byte 4: channel (0x01=R, 0x02=G, 0x03=B)
+     - Byte 7-8: length big-endian (0x20 0x00 = 0x2000 = 8192 bytes)
+   - Phase check returns 0x02 (Data OUT)
+   - Send 8192 bytes of LUT data (identity LUT: 0000-0fff in 16-bit big-endian)
+   - Read status
+   - Repeat for each channel (R, G, B)
+
+**LUT Commands from USB capture:**
+- R channel: `2a000300010100200000` + 8192 bytes
+- G channel: `2a000300020100200000` + 8192 bytes
+- B channel: `2a000300030100200000` + 8192 bytes
+
+**Identity LUT Data**:
+```
+0000 0001 0002 0003 0004 0005 ... 0ffe 0fff
+```
+(4096 entries × 2 bytes = 8192 bytes per channel)
+
+### Prescan Sequence (Verified Working - January 2026)
+
+The prescan performs auto-exposure (AE) at low resolution to determine optimal exposure values.
+
+**Command Sequence:**
+1. **MODE_SELECT** (`15 10 00 00 14 00`) + 20-byte mode params
+2. **Wait** ~150ms for scanner to process
+3. **TEST_UNIT_READY** - Ensure scanner is ready
+4. **SET_WINDOW** × 3 (windows 1, 2, 3 for RGB, NOT window 9)
+   - Uses prescan WDBs: 96 DPI, scan_kind=0x02
+5. **TEST_UNIT_READY** - Required before LUT upload
+6. **WRITE LUT R/G/B** × 3 - Upload identity LUTs
+7. **START_SCAN** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
+8. **Polling Loop** - `poll_until_ready()` polls with TEST_UNIT_READY every ~100ms
+   - Status `0202040100000000` = PROCESSING (scanner is scanning)
+   - Status `0000000000000000` = READY (scan pass complete)
+9. **Read Image Data** - `read_prescan_image_data()` reads:
+   - Two 130752-byte blocks (`28000000000001fec080`)
+   - One 11520-byte residual block (`280000000000002d0080`)
+   - Total: 273024 bytes of prescan image data
+10. **Read Exposure Data** - `read_exposure_data()` reads:
+    - 6-byte header (`28008e00000000000680`)
+    - 3464-byte exposure/calibration table (`28008e000000000d8880`)
+11. Process may repeat for multiple passes
+
+**Timing (from USB capture):**
+- START_SCAN to first READY: ~13 seconds (dynamic polling, not fixed sleep)
+- Full prescan cycle: ~25+ seconds with data reading
+
+**Key Insight:** The scanner returns status with sense_key=0x02 (PROCESSING) while scanning.
+Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The implementation uses
+`poll_until_ready()` for dynamic polling instead of a fixed 8-second sleep.
+
+**USB replay tests:** `tests/test_usb_replay_prescan_sequence.py` locks bulk I/O for `prescan()` against `test_basic_scan_capture.txt` **lines 88–208** (`CoolscanProtocol(..., usb_capture_replay=...)`). The checked-in text tail follows **code call order** (image data, then exposure, then `GET_WINDOW`), and large IN rows use **`@tests/fixtures/prescan_image_block*.bin`** (rebuilt from `ls40-single-bw.pcapng` via **`scripts/refresh_prescan_image_fixtures.py`**). A raw `tshark` export can split the same logical READ into multiple IN rows (see `docs/capture-driven-development-plan.md`, **Pcap vs text fixture**).
+
+### Full Scan Sequence (from USB capture)
+
+1. **MODE_SELECT** (`15 10 00 00 14 00`) + 20-byte mode params
+2. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 1)
+3. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 2)
+4. **SET_WINDOW** (`24 00 00 00 00 00 00 00 3a 80`) + 58-byte WDB (window 3)
+5. **(Optional) SET_WINDOW** for window 9 (infrared channel)
+6. **TEST_UNIT_READY** - Required before LUT upload
+7. **WRITE LUT R** (`2a 00 03 00 01 01 00 20 00 00`) + 8192-byte identity LUT
+8. **WRITE LUT G** (`2a 00 03 00 02 01 00 20 00 00`) + 8192-byte identity LUT
+9. **WRITE LUT B** (`2a 00 03 00 03 01 00 20 00 00`) + 8192-byte identity LUT
+10. **START_SCAN** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03` for RGB)
+11. **Polling Loop** - TEST_UNIT_READY until scanner is ready
+12. **READ** commands to get scan data
+13. **STOP_SCAN** (`1b 00 00 00 04 00`) when complete
+
+**USB replay test:** `tests/test_usb_replay_full_scan_sequence.py` locks bulk I/O for `perform_scan_sequence()` against `test_basic_scan_capture.txt` **lines 210–252**. The fixture enforces: scanner_ready TUR poll (READY), reserve_unit, object_position, set_window via MODE_SELECT (20-byte params), send_lut (768-byte identity LUT, dt=0xc0), start_scan (ERROR/ASCQ=6 treated as success), post-START_SCAN polling (2× PROCESSING → READY), and release_unit in the finally block. Command bytes match `CoolscanProtocol` output, not the raw capture, where the full scan uses SET_WINDOW (0x24) instead of MODE_SELECT (0x15) and 3× 8192-byte LUT uploads (dt=0x03) instead of a single 768-byte LUT (dt=0xc0).
+
+**Full scan image data validation:** Rather than byte-for-byte replay of ~25 MiB of image data, correctness is enforced at three levels: (A) `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes; (B) `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs and WDB exposure extraction; (C) `tests/test_scan_read_integration.py` covers full control flow from setup through `read_scan_data(64)` to release_unit with synthetic IN data.
 
 ## Key Differences: SANE vs USB Capture
 

@@ -11,6 +11,4 @@ __author__ = "Coolscan Tool Developer"
 from .device import find_scanners, ScannerDevice
 from .scanner import CoolscanScanner
 
-__all__ = ['find_scanners', 'ScannerDevice', 'CoolscanScanner']
-
-
+__all__ = ["find_scanners", "ScannerDevice", "CoolscanScanner"]

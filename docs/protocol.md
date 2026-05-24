@@ -57,7 +57,7 @@ All commands follow this structure:
 - `0x1b`: START STOP UNIT
 - `0x1c`: RECEIVE DIAGNOSTIC RESULTS
 - `0x1d`: SEND DIAGNOSTIC
-- `0x24`: READ (10-byte format, simple read)
+- `0x24`: SET_WINDOW (10-byte command + 58-byte WDB)
 - `0x25`: READ CAPACITY (10-byte format, has variants with parameters)
 - `0x28`: READ(10) (10-byte format, with datatype codes for scan data)
 - `0x2a`: WRITE(10) (10-byte format, multiple formats for different purposes)
@@ -123,30 +123,29 @@ e0 00 c1 00 00 00 00 00 0d 00 + focus value (4 bytes)
 e0 00 a0 00 00 00 00 00 0d 00 + focus coordinates (8 bytes)
 ```
 
-### Scan Commands
+### Scan / Window Commands
 ```c
-// Normal scan
-24 00 00 00 00 00 00 00 3a 00 + scan parameters
-
-// Auto-exposure scan
-24 00 00 00 00 00 00 00 3a 20 + scan parameters
-
-// Auto-exposure with white balance
-24 00 00 00 00 00 00 00 3a 40 + scan parameters
+// Set window (SET_WINDOW, 10-byte CDB + 58-byte WDB)
+24 00 00 00 00 00 00 00 3a 80 + 58 bytes window descriptor block
 ```
+
+The scan mode (normal vs AE vs AE_WB) is encoded in the WDB itself (e.g. byte 50,
+"scan kind"), not in the opcode or final byte of the CDB.
 
 ## Data Transfer
 
 ### Read Operations
 ```c
-// Read data
-28 00 00 00 [length] 00 00 00 00 00
+// Read data (READ(10), USB-specific CDB with datatype in byte 2)
+// Example: image data
+28 00 00 00 00 00 len_hi len_mid len_lo 80
 ```
 
 ### Write Operations
 ```c
-// Write data
-2a 00 00 00 [length] 00 00 00 00 00 + data
+// Write data (WRITE(10), USB-specific CDB with datatype in byte 2)
+// Example: LUT write
+2a 00 03 00 [channel] 01 00 len_hi len_lo 00 + data
 ```
 
 ## Error Handling
