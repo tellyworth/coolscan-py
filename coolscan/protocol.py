@@ -569,6 +569,20 @@ class CoolscanProtocol:
     def _usb_write_bulk(self, data: bytes) -> int:
         """Write data to USB bulk endpoint."""
         try:
+            # Convert to bytes for consistent handling
+            if hasattr(data, "tobytes"):
+                data_bytes = data.tobytes()
+            elif hasattr(data, "__iter__") and not isinstance(data, (bytes, str)):
+                data_bytes = bytes(data)
+            else:
+                data_bytes = data
+
+            # Verbose hex dump for debugging
+            if self.verbose:
+                hex_preview = data_bytes.hex()[:120]
+                suffix = "..." if len(data_bytes) > 60 else ""
+                print(f"  USB OUT: [{len(data_bytes)}B] {hex_preview}{suffix}")
+
             # Perform the actual USB write first
             result = self.usb_device.write(
                 self.bulk_out.bEndpointAddress, data, timeout=self.usb_device.default_timeout
@@ -600,6 +614,20 @@ class CoolscanProtocol:
             return result
         except Exception as e:
             self._replay_reraise_if_needed(e)
+            # Log failed writes for debugging
+            if self._usb_capture_log and self._usb_capture_start_time is not None:
+                try:
+                    timestamp = time.time() - self._usb_capture_start_time
+                    endpoint = f"0x{self.bulk_out.bEndpointAddress:02x}"
+                    data_bytes = data if isinstance(data, bytes) else bytes(data)
+                    length = len(data_bytes)
+                    hex_data = data_bytes.hex()[:200] if length > 100 else data_bytes.hex()
+                    self._usb_capture_log.write(
+                        f"{timestamp:.9f}\t{endpoint}\t{length}\t{hex_data}\t#ERROR:{e}\n"
+                    )
+                    self._usb_capture_log.flush()
+                except Exception:
+                    pass
             print(f"    ❌ Write error: {e}")
             raise
 
@@ -618,6 +646,12 @@ class CoolscanProtocol:
                 data_bytes = bytes(data)
             else:
                 data_bytes = data
+
+            # Verbose hex dump for debugging
+            if self.verbose:
+                hex_preview = data_bytes.hex()[:120]
+                suffix = "..." if len(data_bytes) > 60 else ""
+                print(f"  USB IN:  [{len(data_bytes)}B] {hex_preview}{suffix}")
 
             # Log after successful read (don't let logging interfere with USB operations)
             if self._usb_capture_log and self._usb_capture_start_time is not None:
@@ -638,6 +672,17 @@ class CoolscanProtocol:
             return data_bytes
         except Exception as e:
             self._replay_reraise_if_needed(e)
+            # Log failed reads for debugging
+            if self._usb_capture_log and self._usb_capture_start_time is not None:
+                try:
+                    timestamp = time.time() - self._usb_capture_start_time
+                    endpoint = f"0x{self.bulk_in.bEndpointAddress:02x}"
+                    self._usb_capture_log.write(
+                        f"{timestamp:.9f}\t{endpoint}\t0\t#READ_ERROR:{e}\n"
+                    )
+                    self._usb_capture_log.flush()
+                except Exception:
+                    pass
             print(f"    ❌ Read error: {e}")
             raise
 
@@ -869,6 +914,8 @@ class CoolscanProtocol:
                 for retry in range(5):
                     time.sleep(0.5)
                     try:
+                        # Re-send the original command, then check phase again
+                        self._usb_write_bulk(command)
                         self._usb_write_bulk(self._pack_byte(0xD0))
                         phase_response = self._usb_read_bulk(1)
                         if hasattr(phase_response, "tobytes"):
@@ -1587,9 +1634,10 @@ class CoolscanProtocol:
         if self.verbose:
             print(f"Reading scan data (datatype: {datatype.name}, length: {length})...")
 
-        # Use shorter timeout for read operations to fail faster
+        # Use appropriate timeout for read operations
+        # Full scan chunks can take time; use 30s for large reads, 10s for small
         original_timeout = self.usb_device.default_timeout
-        self.usb_device.default_timeout = 5000  # 5 seconds instead of 30
+        self.usb_device.default_timeout = 30000 if length > 65536 else 10000
 
         try:
             # Format: 28 00 [datatype] 00 00 00 [len_hi] [len_mid] [len_lo] 80
@@ -2243,10 +2291,9 @@ class CoolscanProtocol:
                 print("Failed to set window")
                 return False
 
-            # 5. Send LUT (simple linear LUT)
-            lut_data = bytes([i for i in range(256)] * 3)  # R, G, B LUTs
-            if not self.send_lut(lut_data):
-                print("Failed to send LUT")
+            # 5. Send proper 8192-byte identity LUTs per channel (like prescan)
+            if not self.upload_identity_luts():
+                print("Failed to upload LUTs")
                 return False
 
             # 6. Start scan
@@ -2254,9 +2301,11 @@ class CoolscanProtocol:
                 print("Failed to start scan")
                 return False
 
-            # 7. Wait for scanner
-            if not self.scanner_ready(timeout=30):
-                print("Scanner not ready after scan start")
+            # 7. Poll until scanner is ready (no TEST_UNIT_READY after start_scan!)
+            # USB capture shows direct PROCESSING->READY polling, not TUR.
+            # Sending TUR after START_SCAN causes scanner to reject with ASCQ=1.
+            if not self.poll_until_ready(timeout=120, poll_interval=0.5):
+                print("Scanner did not become ready after scan start")
                 return False
 
             print("Scan sequence completed successfully")
@@ -2265,9 +2314,6 @@ class CoolscanProtocol:
         except Exception as e:
             print(f"Scan sequence failed: {e}")
             return False
-        finally:
-            # Always release unit
-            self.release_unit()
 
     def close(self):
         """Close the connection to the scanner."""

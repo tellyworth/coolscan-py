@@ -324,12 +324,16 @@ class CoolscanScanner:
 
             print(f"Scan completed and saved to {output_path}")
             self.scan_in_progress = False
+            # Release unit after scan data is fully read
+            self.protocol.release_unit()
             return True
 
         except Exception as e:
             print(f"Scan failed: {e}")
             if self.scan_in_progress:
                 self.cancel_scan()
+            # Release unit on failure too
+            self.protocol.release_unit()
             return False
 
     def cancel_scan(self) -> bool:
