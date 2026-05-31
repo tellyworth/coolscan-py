@@ -2326,12 +2326,7 @@ class CoolscanProtocol:
                 print("Failed to reserve unit")
                 return False
 
-            # 3. Object feed
-            if not self.object_position():
-                print("Failed object position")
-                return False
-
-            # 4. Set window parameters
+            # 3. Set window parameters
             if not self.set_window(params):
                 print("Failed to set window")
                 return False
