@@ -1383,13 +1383,25 @@ class CoolscanProtocol:
             return False
         return True
 
-    def upload_identity_luts(self) -> bool:
-        """Upload identity LUTs for R, G, B channels (required before scan)."""
+    def upload_identity_luts(self, include_ir: bool = False) -> bool:
+        """Upload identity LUTs for R, G, B channels (required before scan).
+
+        Args:
+            include_ir: If True, also upload LUT for IR channel (window 9).
+                       Batch capture shows IR LUT uploaded before full scan.
+        """
         lut_data = self._generate_identity_lut()
-        for channel in [1, 2, 3]:
+
+        channels = [9, 1, 2, 3] if include_ir else [1, 2, 3]
+
+        for channel in channels:
             if not self._upload_lut(channel, lut_data):
                 return False
-        print("  ✅ LUTs uploaded")
+
+        if self.verbose:
+            ch_names = {1: "R", 2: "G", 3: "B", 9: "IR"}
+            ch_list = ", ".join(ch_names.get(c, str(c)) for c in channels)
+            print(f"  ✅ LUTs uploaded ({ch_list})")
         return True
 
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
@@ -1927,6 +1939,39 @@ class CoolscanProtocol:
 
         return exposure_values
 
+    def stop_scan(self) -> bool:
+        """Stop the current scan operation.
+
+        USB capture shows: 1b 00 00 00 04 00 (sf=0x04 = stop)
+        Followed by 4-byte data payload: 09 01 02 03 (IR + RGB channels)
+        Then status read (0x87).
+        """
+        cmd = self._build_6byte_command(0x1B, alloc_length=0x04, control=0x00)
+        scan_data = bytes([0x09, 0x01, 0x02, 0x03])  # IR, R, G, B channels
+
+        if self.verbose:
+            print("Stopping scan...")
+
+        data, status = self._issue_command(cmd, data_out=scan_data)
+
+        if status == StatusType.ERROR:
+            if self._last_status_parsed:
+                sense_key = self._last_status_parsed.get("sense_key", 0)
+                sense_asc = self._last_status_parsed.get("sense_asc", 0)
+                sense_ascq = self._last_status_parsed.get("sense_ascq", 0)
+                print(
+                    f"  STOP_SCAN status: {status}, sense: key=0x{sense_key:02x}, "
+                    f"ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
+                )
+            return False
+        elif status != StatusType.READY:
+            print(f"  ⚠️  STOP_SCAN returned status: {status}")
+            return False
+
+        if self.verbose:
+            print("  ✅ Scan stopped")
+        return True
+
     def cancel_scan(self) -> bool:
         """Cancel the current scan operation."""
         cmd = self._parse_command("c0 00 00 00 00 00")
@@ -2314,6 +2359,107 @@ class CoolscanProtocol:
         except Exception as e:
             print(f"Scan sequence failed: {e}")
             return False
+
+    def batch_scan_setup(self) -> bool:
+        """Perform full scan setup with IR channel support.
+
+        USB capture shows: SET_WINDOW ×4 (RGB + IR window 9),
+        LUT uploads (IR + RGB), then STOP_SCAN.
+        """
+        if self.verbose:
+            print("Performing batch scan setup (with IR channel)...")
+
+        # SET_WINDOW for RGB + IR (window 9)
+        for win_id in [1, 2, 3, 9]:
+            if not self.set_scan_window(win_id, scan_type="normal"):
+                return False
+        if self.verbose:
+            print("  ✅ Windows set (RGB + IR)")
+
+        # TEST_UNIT_READY between SET_WINDOW and LUTs
+        if not self.test_unit_ready():
+            if self.verbose:
+                print("  ⚠️  TUR after SET_WINDOW failed")
+
+        # Upload LUTs for IR + RGB
+        if not self.upload_identity_luts(include_ir=True):
+            return False
+
+        # STOP_SCAN to finalize setup
+        if not self.stop_scan():
+            if self.verbose:
+                print("  ⚠️  STOP_SCAN after setup failed")
+
+        if self.verbose:
+            print("  ✅ Batch scan setup complete")
+        return True
+
+    def batch_scan_teardown(self) -> bool:
+        """Perform teardown after full scan.
+
+        USB capture shows: SET_WINDOW ×4, LUT uploads, STOP_SCAN.
+        """
+        if self.verbose:
+            print("Performing batch scan teardown...")
+
+        # SET_WINDOW for RGB + IR
+        for win_id in [1, 2, 3, 9]:
+            if not self.set_scan_window(win_id, scan_type="normal"):
+                return False
+
+        # TEST_UNIT_READY
+        if not self.test_unit_ready():
+            if self.verbose:
+                print("  ⚠️  TUR after teardown SET_WINDOW failed")
+
+        # Upload LUTs for IR + RGB
+        if not self.upload_identity_luts(include_ir=True):
+            return False
+
+        # STOP_SCAN
+        if not self.stop_scan():
+            if self.verbose:
+                print("  ⚠️  STOP_SCAN after teardown failed")
+
+        if self.verbose:
+            print("  ✅ Teardown complete")
+        return True
+
+    def batch_between_scan_setup(self) -> bool:
+        """Setup between scans in a batch.
+
+        USB capture shows: polling until READY, READ_CAPACITY for RGB windows,
+        SET_WINDOW for RGB only, TUR, LUT uploads for RGB, then START_SCAN.
+        """
+        if self.verbose:
+            print("Performing between-scan setup...")
+
+        # Poll until ready
+        if not self.poll_until_ready(timeout=60, poll_interval=0.5):
+            print("  ❌ Scanner did not become ready")
+            return False
+
+        # READ_CAPACITY for RGB windows
+        for win_id in [1, 2, 3]:
+            self.read_capacity(window_id=win_id)
+
+        # SET_WINDOW for RGB only
+        for win_id in [1, 2, 3]:
+            if not self.set_scan_window(win_id, scan_type="normal"):
+                return False
+
+        # TUR
+        if not self.test_unit_ready():
+            if self.verbose:
+                print("  ⚠️  TUR failed")
+
+        # Upload LUTs for RGB only
+        if not self.upload_identity_luts(include_ir=False):
+            return False
+
+        if self.verbose:
+            print("  ✅ Between-scan setup complete")
+        return True
 
     def close(self):
         """Close the connection to the scanner."""
