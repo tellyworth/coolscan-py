@@ -2167,20 +2167,22 @@ class CoolscanProtocol:
         print("✅ Prescan completed")
         return True
 
-    def read_capacity(self) -> Optional[dict]:
+    def read_capacity(self, window_id: int = 0) -> Optional[dict]:
         """
         Read capacity information (READ_CAPACITY command).
 
-        Format from USB capture: 25 00 00 00 00 00 00 00 3a 80 (10 bytes)
+        Format from USB capture: 25 01 00 00 00 {win} 00 00 3a 80 (10 bytes)
+        Batch capture uses window-specific READ_CAPACITY for each RGB window.
         """
         print("Reading capacity...")
         try:
-            # READ_CAPACITY is 10 bytes: 25 00 00 00 00 00 00 00 3a 80
+            # READ_CAPACITY is 10 bytes: 25 01 00 00 00 {win} 00 00 3a 80
             # Byte 0: 0x25 = READ_CAPACITY
-            # Bytes 1-8: Parameters
-            # Byte 9: 0x80 = Control byte
+            # Byte 1: 0x01 (flags)
+            # Byte 4: window_id (1=R, 2=G, 3=B, 0=default)
+            # Byte 8-9: 3a 80 (length + control)
             cmd = struct.pack(
-                "BBBBBBBBBB", 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3A, 0x80
+                "BBBBBBBBBB", 0x25, 0x01, 0x00, 0x00, 0x00, window_id, 0x00, 0x00, 0x3A, 0x80
             )
             data, status = self._issue_command(cmd, data_in_length=58)  # 58 bytes response
 
