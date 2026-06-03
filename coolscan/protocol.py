@@ -2328,7 +2328,10 @@ class CoolscanProtocol:
                 print("Failed to reserve unit")
                 return False
 
-            # 3. Set window parameters
+            # 3. Read capacity (required after reserve_unit before set_window)
+            self.read_capacity()
+
+            # 4. Set window parameters
             if not self.set_window(params):
                 print("Failed to set window")
                 return False
