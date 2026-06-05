@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Rebuild ``tests/fixtures/scan_image_block*.bin`` from ``ls40-single-bw.pcapng``.
+Rebuild ``tests/fixtures/scan_image_block{1,2,3,4}.bin`` from ``ls40-single-bw.pcapng``.
 
-Full-scan image READ(10) commands use 258048, 223488, 259200, or 103680 byte
-allocations.  Each logical READ is split across multiple 65508-byte IN URBs
-on the wire.  This script concatenates the wire-order IN payloads per
-logical READ, then writes one binary blob per unique allocation size so
-the replay fixture can reference a representative block.
+The full-scan image READs start at frame ~2399.  Each logical READ(10) CDB issue
+returns a single **65508**-byte bulk IN URB (the scanner's max packet size).
+The CDB allocation length (258048, 223488, etc.) is the *requested* size, but
+the scanner streams data in 65508-byte chunks, with the host re-issuing the
+same CDB for each chunk.
+
+This script extracts the first 4 image IN transfers from the first stripe
+(frames 2399-2438), producing one ``.bin`` file per 65508-byte IN.
 
 Requires: ``ls40-single-bw.pcapng`` at the repo root, ``tshark`` on PATH.
 
@@ -28,77 +31,63 @@ if str(_REPO) not in sys.path:
 from parse_pcapng import extract_usb_traffic  # noqa: E402
 
 BULK_IN = 0x82
-READ_258048 = bytes.fromhex("28000000000003f00080")
-READ_223488 = bytes.fromhex("28000000000003690080")
-READ_259200 = bytes.fromhex("28000000000003f48080")
-READ_103680 = bytes.fromhex("28000000000001950080")
-
-# Allocation sizes in order of appearance in capture
-FULL_SCAN_ALLOCS = [258048, 223488, 259200, 103680]
-FULL_SCAN_CDBS = [READ_258048, READ_223488, READ_259200, READ_103680]
+BULK_OUT = 0x01
 
 
-def find_full_scan_read_range(packets: list) -> tuple:
-    """Find the packet indices bounding the full-scan image data section."""
-    full_scan_cdb_set = set(FULL_SCAN_CDBS)
-
-    start_idx = None
-    for idx, (_fn, d, ep, data) in enumerate(packets):
-        if d == "OUT" and (ep & 0xFF) == 0x01 and data in full_scan_cdb_set:
-            start_idx = idx
-            break
-
-    if start_idx is None:
-        return None, None
-
-    last_read_idx = start_idx
-    for idx, (_fn, d, ep, data) in enumerate(packets):
-        if d == "OUT" and (ep & 0xFF) == 0x01 and data in full_scan_cdb_set:
-            last_read_idx = idx
-
-    end_idx = last_read_idx + 1
-    large_in_count = 0
-    while end_idx < len(packets):
-        _fn, d, ep, payload = packets[end_idx]
-        if d == "IN" and (ep & 0xFF) == BULK_IN and len(payload) > 8:
-            large_in_count += 1
-        end_idx += 1
-        if large_in_count >= 2:
-            break
-
-    return start_idx, end_idx
+def _is_image_read_cdb(data: bytes) -> bool:
+    """Check if data is a 10-byte image READ(10) CDB (datatype 0x00)."""
+    return (
+        len(data) == 10
+        and data[0] == 0x28
+        and data[1] == 0x00
+        and data[2] == 0x00
+    )
 
 
-def extract_full_scan_image_blocks(packets: list) -> dict:
-    """Extract one representative image block per unique allocation size.
+def extract_first_stripe_ins(packets: list) -> list[bytes]:
+    """Extract the first 4 image IN transfers from the full-scan first stripe.
 
-    Collects all bulk IN payloads between the first and last full-scan READ,
-    then slices into blocks matching each allocation size.
+    The first stripe (frames 2399-2438) has 4 READ CDBs, each producing one
+    65508-byte IN transfer.  We collect those 4 INs and return them as a list.
     """
-    start_idx, end_idx = find_full_scan_read_range(packets)
-    if start_idx is None:
-        return {}
+    # Find the first full-scan image READ CDB
+    start = None
+    for i, (_fn, d, ep, data) in enumerate(packets):
+        if d == "OUT" and (ep & 0xFF) == BULK_OUT and _is_image_read_cdb(data):
+            # Full-scan reads have large allocation lengths (>200KB)
+            alloc = int.from_bytes(data[6:9], "big")
+            if alloc >= 200_000:
+                start = i
+                break
 
-    stream = bytearray()
-    for pkt in packets[start_idx:end_idx]:
-        _fn, d, ep, payload = pkt
-        if d != "IN" or (ep & 0xFF) != BULK_IN:
-            continue
-        if len(payload) in (1, 8):
-            continue
-        stream.extend(payload)
+    if start is None:
+        raise ValueError("No full-scan image READ(10) found in capture.")
 
-    blocks: dict[int, bytes] = {}
-    offset = 0
-    for alloc in FULL_SCAN_ALLOCS:
-        if offset + alloc <= len(stream):
-            blocks[alloc] = bytes(stream[offset:offset + alloc])
-            print(f"  Extracted {alloc} bytes from stream offset {offset}")
-            offset += alloc
-        else:
-            print(f"  Warning: stream too short for {alloc}-byte block")
+    ins: list[bytes] = []
+    idx = start + 1
 
-    return blocks
+    while idx < len(packets) and len(ins) < 4:
+        _fn, d, ep, data = packets[idx]
+
+        if d == "IN" and (ep & 0xFF) == BULK_IN and len(data) > 8:
+            # Large IN transfer — this is image data
+            ins.append(bytes(data))
+        elif d == "OUT" and (ep & 0xFF) == BULK_OUT:
+            # Non-phase OUT after we've seen some INs — might be end of stripe
+            if len(data) != 1 or data != b"\xd0":
+                if _is_image_read_cdb(data):
+                    # Different CDB (e.g., 223488-alloc tail read) — still collect
+                    pass
+                else:
+                    # Non-image command (TUR, SET_WINDOW, etc.) — end of stripe
+                    break
+
+        idx += 1
+
+    if len(ins) < 4:
+        raise ValueError(f"Expected 4 IN transfers, got {len(ins)}.")
+
+    return ins
 
 
 def main() -> int:
@@ -126,22 +115,17 @@ def main() -> int:
         print("No USB bulk rows (tshark missing or empty).", file=sys.stderr)
         return 1
 
-    blocks = extract_full_scan_image_blocks(packets)
-    if not blocks:
-        print("No full-scan image blocks found.", file=sys.stderr)
-        return 1
+    ins = extract_first_stripe_ins(packets)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     total = 0
-    for idx, alloc in enumerate(FULL_SCAN_ALLOCS, start=1):
-        if alloc in blocks:
-            fname = f"scan_image_block{idx}.bin"
-            path = args.out_dir / fname
-            path.write_bytes(blocks[alloc])
-            total += len(blocks[alloc])
-            print(f"Wrote {path.name}: {len(blocks[alloc])} bytes")
+    for i, chunk in enumerate(ins, start=1):
+        path = args.out_dir / f"scan_image_block{i}.bin"
+        path.write_bytes(chunk)
+        total += len(chunk)
+        print(f"  block{i}: {len(chunk)} bytes -> {path.name}")
 
-    print(f"Total: {total} bytes under {args.out_dir}")
+    print(f"Wrote {len(ins)} blocks, {total} total bytes under {args.out_dir}")
     return 0
 
 
