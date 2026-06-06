@@ -91,6 +91,46 @@ Work in **order along the real single-bw session**, extending only as far as nee
 
 After each milestone: **`pytest` green**, **docs updated** (what is now guaranteed vs capture), **git commit** (see below).
 
+## SANE backend audit findings
+
+A full comparison of `coolscan/protocol.py` against the SANE `coolscan3` backend (`sane-comparison.md`) identified the following discrepancies. **Wire format still defers to USB capture** when SANE and capture disagree.
+
+### P0 (blocker): Must fix before reliable hardware scan
+
+| ID | Issue | SANE source | Our source |
+|----|-------|------------|------------|
+| P0-2 | Missing `set_boundary()` before scan | `coolscan3.c:3106` / `:2898-2936` | Nowhere |
+
+`set_boundary()` sends SEND(0x2a) with datatype 0x88 (IMAGE_POSITIONS), frame count, and boundary coordinates. Without it, the scanner may not know the scan area or frame count. **Must be added to `perform_scan_sequence()` between `set_window()` and `start_scan()`.** Verify against capture: check if `ls40-single-bw.pcapng` shows a 0x88 SEND before START_SCAN.
+
+### P1 (bug): Incorrect behavior on some hardware
+
+| ID | Issue | SANE source | Our source |
+|----|-------|------------|------------|
+| P1-1 | Missing REISSUE status after START_SCAN | `coolscan3.c:3147-3151` | `protocol.py:1535-1631` |
+| P1-2 | LUT size hardcoded 8192, should use maxbits from page 0xc1 | `coolscan3.c:2972-2980` / `:2443` | `protocol.py:1375` |
+| P1-3 | Missing `get_exposure()` after `set_window()` | `coolscan3.c:3121-3123` | `protocol.py:2316-2361` |
+| P1-4 | WDB `negative_dropout` writes full byte, should use bit 4 | `coolscan-scsidef.h:349-358` | `protocol.py:135-136` |
+| P1-5 | WDB `scan_mode` writes to bits 0-1, should be bits 4-5 | `coolscan-scsidef.h:362-367` | `protocol.py:136-137` |
+
+**P1-4 / P1-5 are WDB construction bugs** that affect negative film handling and prescan mode. Verify against capture WDB bytes to confirm our hardcoded WDBs are correct (they may have been captured from working traffic, so the bytes could be right despite wrong construction logic).
+
+### P2 (gap): Missing features
+
+12 items including: `set_focus()` before scan, resolution pitch calculation, exposure clamping, multi-frame support, LOAD/EJECT/RESET commands, `cs3_execute()`, data reassembly (interleaved→planar→RGB), independent X/Y resolution. **None block a basic scan** but will be needed for full feature parity.
+
+### P3 (cosmetic): Different but both work
+
+8 items including: timeout values, polling intervals, INQUIRY page order, WDB construction approach, LUT upload timing, chunk sizes. **No action needed.**
+
+### Resolution order
+
+1. **P0-2:** Audit capture for 0x88 SEND before START_SCAN. If present, add `set_boundary()` and extend fixture. If absent on LS-40 ED, note model-specific behavior.
+2. **P1-4 / P1-5:** Verify WDB bytes against capture. If our hardcoded WDBs match capture, the construction logic bug is latent but not active.
+3. **P1-1:** Add REISSUE mapping to `_parse_status()` and handle in `start_scan()`.
+4. **P1-2:** Read maxbits from page 0xc1, parameterize LUT size.
+5. **P1-3:** Add `get_exposure()` call after `set_window()` in scan sequence.
+
 ## Documentation and commits
 
 - After each **passing milestone**, update **`docs/unified-protocol-spec.md`** and/or **`docs/usb-capture-findings.md`** with a short note: what sequence is now test-locked and any caveats (normalization, optional retries).
@@ -122,10 +162,11 @@ Use a narrower path while iterating (e.g. `tests/test_prescan_sequence_verificat
 
 ## Out of scope for this plan
 
-- **Batch / ADF** capture (`ls40-batch.pcapng`) until single-bw path is done.
+- **Batch / ADF** capture (`ls40-batch.pcapng`) — partially done via `test_usb_replay_batch_scan.py`. Full multi-image ADF workflow is next after P0/P1 fixes land.
 - **CI setup** (optional later).
 - **Bit-identical timing** to the pcap unless a specific bug is proven to be timing-related; then add **tolerant** timing or ordering checks only for that phase.
+- **SANE feature parity** — We implement the minimal scan path. SANE-specific features (multi-frame, LOAD/EJECT, 16-bit depth, independent X/Y resolution) are P2 gaps, tracked in SANE audit section above.
 
 ---
 
-*Last updated (2026-05): milestone 6 complete — full scan image data validated via CDB construction (7 tests), GET_WINDOW/WDB parsing (8 tests), and integration test with synthetic IN data (1 test). Total: 141 tests.*Last updated (2026-05): milestone status, full scan setup replay (lines 210-252), revised image data strategy (CDB + GET_WINDOW + integration instead of byte-for-byte replay).*Last updated (2026-05): milestone status and “Pcap vs text fixture” maintenance notes; prescan replay through line 208.*
+*Last updated (2026-06): SANE backend audit complete (sane-comparison.md). 1 P0 (set_boundary), 5 P1 (REISSUE, LUT size, get_exposure, WDB bits), 12 P2, 8 P3. Milestone 5/6 extended — full scan image replay (lines 210-303), batch scan replay (4 tests), hardware scan script. Total: 157 tests.*
