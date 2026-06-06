@@ -131,9 +131,13 @@ class WindowDescriptorBlock:
         data[0x28:0x2C] = struct.pack(">L", self.width)
         data[0x2C:0x30] = struct.pack(">L", self.length)
 
-        # Scan parameters
-        data[0x30] = self.negative_dropout
-        data[0x31] = self.scan_mode
+        # Scan parameters (SANE coolscan-scsidef.h:349-367)
+        # byte 0x30: bit 4 = negative flag, bits 0-1 = dropout color
+        neg_flag = 0x10 if self.negative_dropout else 0x00
+        dropout_color = self.negative_dropout & 0x03 if self.negative_dropout else 0x00
+        data[0x30] = neg_flag | dropout_color
+        # byte 0x31: bits 4-5 = scan mode (0x00=normal, 0x01=prescan)
+        data[0x31] = (self.scan_mode & 0x03) << 4
         data[0x32] = self.transfer_mode
         data[0x33] = self.gamma_selection
 
@@ -190,9 +194,9 @@ class WindowDescriptorBlock:
         wdb.composition = data[0x19]
         wdb.bits_per_pixel = data[0x1A]
 
-        # Scan parameters
-        wdb.negative_dropout = data[0x30]
-        wdb.scan_mode = data[0x31]
+        # Scan parameters (SANE coolscan-scsidef.h:349-367)
+        wdb.negative_dropout = (data[0x30] >> 4) & 0x01
+        wdb.scan_mode = (data[0x31] >> 4) & 0x03
         wdb.transfer_mode = data[0x32]
         wdb.gamma_selection = data[0x33]
 
@@ -280,6 +284,7 @@ class CoolscanProtocol:
         self._usb_capture_log = None  # File handle for USB capture logging
         self._usb_capture_start_time = None  # Start time for relative timestamps
         self._usb_capture_replay = usb_capture_replay
+        self.maxbits = 12  # LUT bit depth from inquiry page 0xc1 byte 82 (SANE coolscan3.c:2443)
 
         if usb_capture_replay is not None and self.interface.value != "usb":
             raise ValueError("usb_capture_replay is only valid for USB interface devices")
@@ -786,6 +791,17 @@ class CoolscanProtocol:
         elif sense_key == 0x06:
             # Unit attention
             status = StatusType.ERROR
+        elif sense_key == 0x09:
+            # Scanner-specific extended sense key
+            # On LS-40 ED: ASC=0x80, ASCQ=0x06 means scan started successfully
+            # On LS-50/5000: sense_code 0x09800600/0x09800601 => REISSUE
+            # For now, treat 0x09/0x80/0x06 as READY (matches LS-40 ED capture)
+            if sense_asc == 0x80 and sense_ascq == 0x06:
+                status = StatusType.READY
+            elif sense_asc == 0x80 and sense_ascq == 0x01:
+                status = StatusType.ERROR
+            else:
+                status = StatusType.ERROR
         elif sense_key == 0x0B:
             # Aborted command
             status = StatusType.ERROR
@@ -1355,21 +1371,25 @@ class CoolscanProtocol:
 
     def _generate_identity_lut(self) -> bytes:
         """
-        Generate an identity LUT (8192 bytes).
+        Generate an identity LUT sized according to scanner maxbits.
 
-        The LUT maps each input value (0-4095) to itself.
-        Format: 4096 × 16-bit big-endian values = 8192 bytes
+        LUT size = 2 * (1 << maxbits) bytes. For 12-bit scanner: 8192 bytes.
+        SANE: coolscan3.c:2972-2980, n_lut = 1 << maxbits, length = 2 * n_lut.
         """
-        lut = bytearray(8192)
-        for i in range(4096):
-            lut[i * 2] = (i >> 8) & 0xFF  # High byte
-            lut[i * 2 + 1] = i & 0xFF  # Low byte
+        maxbits = getattr(self, 'maxbits', 12)
+        n_entries = 1 << maxbits
+        lut_size = 2 * n_entries
+        lut = bytearray(lut_size)
+        for i in range(n_entries):
+            lut[i * 2] = (i >> 8) & 0xFF
+            lut[i * 2 + 1] = i & 0xFF
         return bytes(lut)
 
     def _upload_lut(self, channel: int, lut_data: bytes) -> bool:
-        """Upload LUT data for a specific channel (1=R, 2=G, 3=B)."""
-        if len(lut_data) != 8192:
-            print(f"  ⚠️  LUT data must be 8192 bytes, got {len(lut_data)}")
+        """Upload LUT data for a specific channel (1=R, 2=G, 3=B, 9=IR)."""
+        expected_size = 2 * (1 << self.maxbits)
+        if len(lut_data) != expected_size:
+            print(f"  ⚠️  LUT data must be {expected_size} bytes, got {len(lut_data)}")
             return False
 
         cmd = struct.pack(
@@ -1378,7 +1398,7 @@ class CoolscanProtocol:
 
         _, status = self._issue_command(cmd, data_out=lut_data)
         if status != StatusType.READY:
-            channel_names = {1: "R", 2: "G", 3: "B"}
+            channel_names = {1: "R", 2: "G", 3: "B", 9: "IR"}
             print(f"  ⚠️  LUT {channel_names.get(channel, channel)} upload failed")
             return False
         return True
@@ -1537,98 +1557,38 @@ class CoolscanProtocol:
         cmd = self._build_6byte_command(0x1B, alloc_length=0x03, control=0x00)
         scan_data = bytes([0x01, 0x02, 0x03])  # R, G, B channels
 
-        # Issue command and capture the raw status response
-        # We need to get the actual 8-byte status to check ASCQ
         data, status = self._issue_command(cmd, data_out=scan_data)
 
-        # Check the actual sense codes from the status response
-        # USB capture shows START_SCAN returns: 0209800601000000
-        # sense_key=9 (0x09), ASC=128 (0x80), ASCQ=6 (0x06)
-        # This is expected and scanner continues to work
-        # However, our status parser might classify this as ERROR or READY
-        # We need to check the actual sense codes regardless of status type
-
-        # Always log the sense codes for START_SCAN to diagnose issues
         if self._last_status_parsed:
             sense_key = self._last_status_parsed.get("sense_key", 0)
             sense_asc = self._last_status_parsed.get("sense_asc", 0)
             sense_ascq = self._last_status_parsed.get("sense_ascq", 0)
             if self._last_status_raw:
                 print(
-                    f"  START_SCAN status: {status}, sense: key=0x{sense_key:02x}, ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
+                    f"  START_SCAN status: {status}, sense: key=0x{sense_key:02x}, "
+                    f"ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
                 )
                 print(f"  Raw status: {self._last_status_raw.hex()}")
 
-            # USB capture shows ASCQ=6 is expected (scan starts)
-            if sense_key == 0x09 and sense_asc == 0x80:
-                if sense_ascq == 0x06:
-                    print(f"  ✅ ASCQ=6 (expected) - scan should start")
-                elif sense_ascq == 0x01:
-                    print(f"  ⚠️  ASCQ=1 (unexpected) - scan may not start")
-                else:
-                    print(f"  ⚠️  ASCQ=0x{sense_ascq:02x} (unexpected)")
-        else:
-            if self._last_status_raw:
-                print(f"  ⚠️  No status parsed, raw: {self._last_status_raw.hex()}")
-
-        if status == StatusType.ERROR:
-            # Log the actual sense codes for debugging
+        if status == StatusType.READY:
+            print("  ✅ Scan started")
+            return True
+        elif status == StatusType.ERROR:
             if self._last_status_parsed:
                 sense_key = self._last_status_parsed.get("sense_key", 0)
                 sense_asc = self._last_status_parsed.get("sense_asc", 0)
                 sense_ascq = self._last_status_parsed.get("sense_ascq", 0)
-                print(f"  ⚠️  START_SCAN returned error status")
-                print(
-                    f"     Sense: key=0x{sense_key:02x}, ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
-                )
-                if self._last_status_raw:
-                    print(f"     Raw status: {self._last_status_raw.hex()}")
 
-                # USB capture shows ASCQ=6 is expected (scan starts)
-                # ASCQ=1 indicates scan command was rejected - this is a real error
-                if sense_key == 0x09 and sense_asc == 0x80:
-                    if sense_ascq == 0x06:
-                        print(f"     ✅ ASCQ=6 (expected) - scan should start")
-                        # Continue - this is expected
-                        return True
-                    elif sense_ascq == 0x01:
-                        print(f"     ❌ ASCQ=1 (error) - scan command rejected")
-                        print(f"     Scanner did not start the scan. Possible causes:")
-                        print(f"       - Scanner not in correct state (needs reset?)")
-                        print(f"       - Missing prerequisite commands")
-                        print(f"       - WDB configuration issue")
-                        print(f"       - Scanner hardware issue or no film inserted")
-                        # Fail immediately - this is a real error
-                        return False
-                    else:
-                        print(f"     ⚠️  ASCQ=0x{sense_ascq:02x} (unexpected)")
-                        # Unknown ASCQ - be conservative and fail
-                        return False
-            else:
-                print(f"  ⚠️  START_SCAN returned error status (no sense details)")
-
-            # Unknown error - fail to be safe
+                if sense_ascq == 0x01:
+                    print(f"  ❌ ASCQ=1 (error) - scan command rejected")
+                    return False
+                else:
+                    print(f"  ⚠️  Unexpected ASCQ=0x{sense_ascq:02x}")
+                    return False
             return False
-        elif status != StatusType.READY:
+        else:
             print(f"  ⚠️  START_SCAN failed with status: {status}")
             return False
-
-        # If we get here, status is READY
-        # But USB capture shows START_SCAN should return ERROR with sense_key=9, ASC=128, ASCQ=6
-        # Log this for debugging
-        if self._last_status_parsed:
-            sense_key = self._last_status_parsed.get("sense_key", 0)
-            sense_asc = self._last_status_parsed.get("sense_asc", 0)
-            sense_ascq = self._last_status_parsed.get("sense_ascq", 0)
-            if sense_key != 0x00:  # If sense_key is not 0, it's unusual for READY status
-                print(
-                    f"  ⚠️  START_SCAN returned READY but sense_key=0x{sense_key:02x}, ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
-                )
-                if self._last_status_raw:
-                    print(f"     Raw status: {self._last_status_raw.hex()}")
-
-        print("  ✅ Scan started")
-        return True
 
     def read_scan_data(self, length: int, datatype: DataType = DataType.IMAGE_DATA) -> bytes:
         """
@@ -2262,6 +2222,10 @@ class CoolscanProtocol:
                     data = self.inquiry(page=page)
                     if data:
                         print(f"    ✅ Got {len(data)} bytes")
+                        # Extract maxbits from page 0xc1 byte 82 (SANE coolscan3.c:2443)
+                        if page == 0xC1 and len(data) >= 83:
+                            self.maxbits = data[82]
+                            print(f"    maxbits = {self.maxbits} (LUT size = {2 * (1 << self.maxbits)} bytes)")
                         # Store MUD if this is page 0xd1
                         if page == 0xD1 and len(data) >= 28:
                             # Extract MUD from page 0xd1 data
@@ -2336,7 +2300,17 @@ class CoolscanProtocol:
                 print("Failed to set window")
                 return False
 
-            # 5. Send proper 8192-byte identity LUTs per channel (like prescan)
+            # 4b. Get exposure values after set_window (SANE coolscan3.c:3121-3123)
+            # Validates scanner accepted exposure settings. Non-disruptive: skip on failure.
+            try:
+                exposure = self.get_exposure_values(colors=[1, 2, 3])
+                if exposure is None and self.verbose:
+                    print("  ⚠️  Could not read exposure values after set_window")
+            except Exception:
+                if self.verbose:
+                    print("  ⚠️  Exposure read skipped (not available in this context)")
+
+            # 5. Send proper identity LUTs per channel (size from maxbits)
             if not self.upload_identity_luts():
                 print("Failed to upload LUTs")
                 return False
