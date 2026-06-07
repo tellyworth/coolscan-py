@@ -1424,6 +1424,74 @@ class CoolscanProtocol:
             print(f"  ✅ LUTs uploaded ({ch_list})")
         return True
 
+    def set_boundary(self, params: ScanParameters) -> bool:
+        """Set scan boundary (frame count + area) before scan.
+
+        SANE: coolscan3.c:2898-2936 (cs3_set_boundary).
+        Sends SEND(0x2a) with datatype 0x88 (IMAGE_POSITIONS) containing
+        frame count and per-frame boundary coordinates.
+        Without this the scanner may not know the scan area and stays
+        in PROCESSING indefinitely.
+
+        Args:
+            params: Scan parameters defining the scan area.
+
+        Returns:
+            True if scanner accepted the boundary command.
+        """
+        if self.verbose:
+            print("  Setting scan boundary...")
+
+        width = params.x_max if params.x_max > 0 else (self.scanner_info.x_max_pixels if self.scanner_info else 2592)
+        height = params.y_max if params.y_max > 0 else (self.scanner_info.y_max_pixels if self.scanner_info else 3888)
+
+        boundary_payload = self._build_boundary_payload(
+            frame_count=1,
+            ulx=params.x_min,
+            uly=params.y_min,
+            width=width,
+            height=height,
+        )
+
+        cmd = struct.pack(
+            "BBBBBBBBBB",
+            0x2A,                          # SEND
+            0x00,                          # LUN
+            DataType.IMAGE_POSITIONS.value, # datatype 0x88
+            0x00,                          # reserved
+            0x00,                          # channel (not used)
+            0x03,                          # bytes_per_point - 1  (4 bytes/point)
+            (len(boundary_payload) >> 16) & 0xFF,
+            (len(boundary_payload) >> 8) & 0xFF,
+            len(boundary_payload) & 0xFF,
+            0x00,                          # control
+        )
+
+        _, status = self._issue_command(cmd, data_out=boundary_payload)
+        ok = status == StatusType.READY
+        if self.verbose:
+            print(f"    set_boundary: {'OK' if ok else 'FAILED'}")
+        return ok
+
+    @staticmethod
+    def _build_boundary_payload(frame_count: int, ulx: int, uly: int, width: int, height: int) -> bytes:
+        """Build the IMAGE_POSITIONS payload for set_boundary.
+
+        SANE: coolscan3.c:2898-2936.
+        Layout (all big-endian):
+          - 4 bytes: frame count
+          - Per frame (4 bytes each):
+              ulx, uly, width, height
+        """
+        buf = bytearray()
+        buf.extend(struct.pack(">I", frame_count))
+        for _ in range(frame_count):
+            buf.extend(struct.pack(">I", ulx))
+            buf.extend(struct.pack(">I", uly))
+            buf.extend(struct.pack(">I", width))
+            buf.extend(struct.pack(">I", height))
+        return bytes(buf)
+
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
         """Set the scan window parameters using MODE_SELECT."""
         mode_select_cmd = self._build_6byte_command(
@@ -2309,6 +2377,13 @@ class CoolscanProtocol:
             except Exception:
                 if self.verbose:
                     print("  ⚠️  Exposure read skipped (not available in this context)")
+
+            # 4c. Set scan boundary (SANE coolscan3.c:2898-2936, cs3_set_boundary)
+            # Tells scanner the scan area and frame count.
+            # Without this the scanner may stay in PROCESSING indefinitely.
+            if not self.set_boundary(params):
+                print("Failed to set scan boundary")
+                return False
 
             # 5. Send proper identity LUTs per channel (size from maxbits)
             if not self.upload_identity_luts():
