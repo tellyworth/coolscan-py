@@ -793,13 +793,12 @@ class CoolscanProtocol:
             status = StatusType.ERROR
         elif sense_key == 0x09:
             # Scanner-specific extended sense key
-            # On LS-40 ED: ASC=0x80, ASCQ=0x06 means scan started successfully
-            # On LS-50/5000: sense_code 0x09800600/0x09800601 => REISSUE
-            # For now, treat 0x09/0x80/0x06 as READY (matches LS-40 ED capture)
+            # SANE: coolscan3.c:2081-2083, sense_code 0x09800600/0x09800601 => REISSUE
+            # LS-40 ED: ASC=0x80, ASCQ=0x06 means scan started successfully
             if sense_asc == 0x80 and sense_ascq == 0x06:
                 status = StatusType.READY
-            elif sense_asc == 0x80 and sense_ascq == 0x01:
-                status = StatusType.ERROR
+            elif sense_asc == 0x80 and sense_ascq in (0x00, 0x01):
+                status = StatusType.REISSUE
             else:
                 status = StatusType.ERROR
         elif sense_key == 0x0B:
@@ -1621,42 +1620,44 @@ class CoolscanProtocol:
         return self.set_window_wdb(wdb)
 
     def start_scan(self, scan_type: ScanType = ScanType.NORMAL) -> bool:
-        """Start a scan operation."""
+        """Start a scan operation.
+
+        SANE: coolscan3.c:3137-3151 — re-issues command on REISSUE status.
+        """
         cmd = self._build_6byte_command(0x1B, alloc_length=0x03, control=0x00)
         scan_data = bytes([0x01, 0x02, 0x03])  # R, G, B channels
 
-        data, status = self._issue_command(cmd, data_out=scan_data)
+        max_attempts = 2 if scan_type == ScanType.NORMAL else 1
+        for attempt in range(max_attempts):
+            data, status = self._issue_command(cmd, data_out=scan_data)
 
-        if self._last_status_parsed:
-            sense_key = self._last_status_parsed.get("sense_key", 0)
-            sense_asc = self._last_status_parsed.get("sense_asc", 0)
-            sense_ascq = self._last_status_parsed.get("sense_ascq", 0)
-            if self._last_status_raw:
-                print(
-                    f"  START_SCAN status: {status}, sense: key=0x{sense_key:02x}, "
-                    f"ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
-                )
-                print(f"  Raw status: {self._last_status_raw.hex()}")
-
-        if status == StatusType.READY:
-            print("  ✅ Scan started")
-            return True
-        elif status == StatusType.ERROR:
             if self._last_status_parsed:
                 sense_key = self._last_status_parsed.get("sense_key", 0)
                 sense_asc = self._last_status_parsed.get("sense_asc", 0)
                 sense_ascq = self._last_status_parsed.get("sense_ascq", 0)
+                if self._last_status_raw:
+                    print(
+                        f"  START_SCAN status: {status}, sense: key=0x{sense_key:02x}, "
+                        f"ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
+                    )
+                    print(f"  Raw status: {self._last_status_raw.hex()}")
 
-                if sense_ascq == 0x01:
-                    print(f"  ❌ ASCQ=1 (error) - scan command rejected")
-                    return False
-                else:
-                    print(f"  ⚠️  Unexpected ASCQ=0x{sense_ascq:02x}")
-                    return False
-            return False
-        else:
-            print(f"  ⚠️  START_SCAN failed with status: {status}")
-            return False
+            if status == StatusType.READY:
+                print("  ✅ Scan started")
+                return True
+            elif status == StatusType.REISSUE:
+                if attempt < max_attempts - 1:
+                    print(f"  ⚠️  REISSUE — re-issuing START_SCAN (attempt {attempt + 2})")
+                    continue
+                print(f"  ❌ REISSUE after {max_attempts} attempts")
+                return False
+            elif status == StatusType.ERROR:
+                return False
+            else:
+                print(f"  ⚠️  START_SCAN failed with status: {status}")
+                return False
+
+        return False
 
     def read_scan_data(self, length: int, datatype: DataType = DataType.IMAGE_DATA) -> bytes:
         """
@@ -2363,10 +2364,15 @@ class CoolscanProtocol:
             # 3. Read capacity (required after reserve_unit before set_window)
             self.read_capacity()
 
-            # 4. Set window parameters
-            if not self.set_window(params):
-                print("Failed to set window")
-                return False
+            # 4. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
+            # SET_WINDOW(0x24) + 58-byte WDB for each color channel.
+            # MODE_SELECT was already sent during initialization.
+            for win_id in [1, 2, 3]:
+                if not self.set_scan_window(win_id, scan_type="normal"):
+                    print(f"Failed to set scan window {win_id}")
+                    return False
+            if self.verbose:
+                print("  ✅ Scan windows set (RGB)")
 
             # 4b. Get exposure values after set_window (SANE coolscan3.c:3121-3123)
             # Validates scanner accepted exposure settings. Non-disruptive: skip on failure.
