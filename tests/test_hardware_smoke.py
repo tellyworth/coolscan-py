@@ -12,10 +12,6 @@ Markers: ``@pytest.mark.hardware``, ``@pytest.mark.hardware_correctness``
 
 from __future__ import annotations
 
-import hashlib
-import shutil
-import struct
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +19,6 @@ import pytest
 
 try:
     import usb.core
-    import usb.util
     USB_AVAILABLE = True
 except ImportError:
     USB_AVAILABLE = False
@@ -31,8 +26,6 @@ except ImportError:
 
 VENDOR_ID = 0x04B0
 PRODUCT_ID = 0x4000
-
-PCAPNG_AVAILABLE = shutil.which("tcpdump") is not None or shutil.which("tshark") is not None
 
 
 def _find_scanner() -> Any | None:
@@ -44,6 +37,18 @@ def _find_scanner() -> Any | None:
         return dev
     except Exception:
         return None
+
+
+class _DeviceDescriptor:
+    """Device descriptor for CoolscanProtocol. Supplies vendor/product IDs
+    so _init_usb() discovers the real scanner via pyusb."""
+    vendor = "Nikon"
+    model = "LS-40 ED"
+    revision = "1.20"
+    vendor_id = VENDOR_ID
+    product_id = PRODUCT_ID
+    device_path = None
+    interface = type("IF", (), {"value": "usb"})()
 
 
 @pytest.mark.hardware
@@ -76,16 +81,7 @@ class TestHardwareSmoke:
         if dev is None:
             pytest.skip("scanner disconnected")
 
-        class _MockDevice:
-            vendor = "Nikon"
-            model = "LS-40 ED"
-            revision = "1.20"
-            vendor_id = VENDOR_ID
-            product_id = PRODUCT_ID
-            device_path = None
-            interface = type("IF", (), {"value": "usb"})()
-
-        proto = CoolscanProtocol(_MockDevice(), verbose=False)
+        proto = CoolscanProtocol(_DeviceDescriptor(), verbose=False)
         try:
             ready = proto.test_unit_ready()
             assert ready is True
@@ -100,16 +96,7 @@ class TestHardwareSmoke:
         if dev is None:
             pytest.skip("scanner disconnected")
 
-        class _MockDevice:
-            vendor = "Nikon"
-            model = "LS-40 ED"
-            revision = "1.20"
-            vendor_id = VENDOR_ID
-            product_id = PRODUCT_ID
-            device_path = None
-            interface = type("IF", (), {"value": "usb"})()
-
-        proto = CoolscanProtocol(_MockDevice(), verbose=False)
+        proto = CoolscanProtocol(_DeviceDescriptor(), verbose=False)
         try:
             proto.initialize_scanner()
             result = proto.prescan()
@@ -117,24 +104,48 @@ class TestHardwareSmoke:
         finally:
             proto.close()
 
-    def test_command_order_matches_golden_fixture(self):
-        """Command sequence matches golden fixture order (not byte-exact)."""
-        from coolscan.protocol import CoolscanProtocol, ScanParameters
 
+@pytest.mark.property_test
+class TestGoldenFixtureCommandOrder:
+    """Validate golden fixture command sequence (no hardware required)."""
+
+    def test_golden_fixture_starts_with_inquiry(self):
+        """Golden fixture begins with INQUIRY command (0x12)."""
         golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
         if not golden_path.is_file():
             pytest.skip("golden fixture not generated yet")
 
-        # Extract command codes from golden fixture
-        golden_cmds = _extract_command_codes(golden_path)
-        if not golden_cmds:
-            pytest.skip("no commands in golden fixture")
+        codes = _extract_command_codes(golden_path)
+        assert len(codes) > 0, "golden fixture has no OUT commands"
+        assert codes[0] == 0x12, "golden fixture should start with INQUIRY"
 
-        # The first ~20 commands should follow the same pattern:
-        # INQUIRY, TUR, INQUIRY pages, RESERVE_UNIT, READ_CAPACITY, MODE_SELECT
-        expected_prefix = [0x12, 0x00, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12]
-        # Golden should start with INQUIRY + TUR cycle
-        assert golden_cmds[0] == 0x12, "golden fixture should start with INQUIRY"
+    def test_golden_fixture_has_tur_after_inquiry(self):
+        """Golden fixture has TEST_UNIT_READY following initial INQUIRY sequence."""
+        golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
+        if not golden_path.is_file():
+            pytest.skip("golden fixture not generated yet")
+
+        codes = _extract_command_codes(golden_path)
+        # INQUIRY (0x12) is followed by PHASE_CHECK (0xd0), then TUR (0x00)
+        assert 0x00 in codes[:5], "expected TUR within first 5 OUT commands"
+
+    def test_golden_fixture_has_reserve_unit(self):
+        """Golden fixture contains RESERVE_UNIT (0x16)."""
+        golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
+        if not golden_path.is_file():
+            pytest.skip("golden fixture not generated yet")
+
+        codes = _extract_command_codes(golden_path)
+        assert 0x16 in codes, "golden fixture should contain RESERVE_UNIT"
+
+    def test_golden_fixture_has_read_capacity(self):
+        """Golden fixture contains READ_CAPACITY (0x25)."""
+        golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
+        if not golden_path.is_file():
+            pytest.skip("golden fixture not generated yet")
+
+        codes = _extract_command_codes(golden_path)
+        assert 0x25 in codes, "golden fixture should contain READ_CAPACITY"
 
 
 def _extract_command_codes(fixture_path: Path) -> list[int]:

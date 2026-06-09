@@ -12,22 +12,16 @@ Markers: ``@pytest.mark.replay_consistency`` (internal consistency)
 from __future__ import annotations
 
 import struct
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from coolscan.protocol import (
     CoolscanProtocol,
     DataType,
-    PhaseType,
-    ScanParameters,
     StatusType,
 )
-from coolscan.usb_replay import (
-    ReplayExhaustedError,
-    UsbCaptureReplay,
-)
+from coolscan.usb_replay import UsbCaptureReplay
 
 
 class MockInterface:

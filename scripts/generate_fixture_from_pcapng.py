@@ -34,8 +34,6 @@ BULK_IN_EP = 0x82
 def _pcapng_sha256(path: Path) -> str:
     """Compute SHA-256 of the pcapng file."""
     h = hashlib.sha256()
-    for chunk in iter(lambda: path.read_bytes()[len(h.hexdigest()):len(h.hexdigest())] or path.read_bytes(), b""):
-        break
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)

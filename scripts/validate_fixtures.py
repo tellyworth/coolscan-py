@@ -51,7 +51,6 @@ def validate(path: Path) -> list[str]:
     out_count = 0
     in_count = 0
     warnings: list[str] = []
-    command_codes: set[int] = set()
 
     for lineno, raw in enumerate(lines, start=1):
         line = raw.strip()
@@ -151,10 +150,6 @@ def validate(path: Path) -> list[str]:
                     f"hex payload length {len(decoded)}"
                 )
 
-            # Track command codes from OUT transfers
-            if ep == 0x01 and len(decoded) > 0:
-                command_codes.add(decoded[0])
-
     # Write summary to stderr
     print(f"--- fixture summary: {path.name} ---", file=sys.stderr)
     print(f"  total lines   : {len(lines)}", file=sys.stderr)
@@ -171,10 +166,42 @@ def validate(path: Path) -> list[str]:
     for w in warnings:
         print(f"    ⚠  {w}", file=sys.stderr)
     print(f"  errors        : {len(errors)}", file=sys.stderr)
-    print(f"  cmd codes     : {sorted(command_codes, key=lambda x: f'{x:02x}')}")
     print("---", file=sys.stderr)
 
-    return errors, data_lines, command_codes
+    return errors
+
+
+def _parse_fixture_stats(path: Path) -> tuple[int, set[int]]:
+    """Parse a fixture and return (data_line_count, command_codes)."""
+    text = path.read_text(encoding="utf-8")
+    data_lines = 0
+    command_codes: set[int] = set()
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        data_lines += 1
+        try:
+            ep = int(parts[1], 0)
+        except ValueError:
+            continue
+        if ep != 0x01:
+            continue
+        payload_field = parts[3].strip()
+        if payload_field.startswith("@"):
+            continue
+        try:
+            decoded = bytes.fromhex(payload_field)
+        except ValueError:
+            continue
+        if len(decoded) > 0:
+            command_codes.add(decoded[0])
+
+    return data_lines, command_codes
 
 
 def _pcapng_sha256(path: Path) -> str:
@@ -217,7 +244,14 @@ def _extract_capture_command_codes() -> set[int] | None:
 
 
 def validate_golden_fixture() -> list[str]:
-    """Validate the golden fixture against the raw pcapng capture."""
+    """Validate the golden fixture against the raw pcapng capture.
+
+    Checks:
+    - Basic fixture consistency (column count, endpoints, lengths, @refs)
+    - pcapng SHA-256 checksum matches embedded header value
+    - Fixture event count is within 2x of capture event count
+    - Every command code in fixture appears at least once in raw capture
+    """
     errors: list[str] = []
 
     if not GOLDEN_FIXTURE.is_file():
@@ -225,14 +259,7 @@ def validate_golden_fixture() -> list[str]:
         return errors
 
     # Check 1: Basic fixture consistency
-    result = validate(GOLDEN_FIXTURE)
-    if isinstance(result, tuple):
-        fix_errors, data_lines, golden_codes = result
-    else:
-        fix_errors = result
-        data_lines = 0
-        golden_codes = set()
-    errors.extend(fix_errors)
+    errors.extend(validate(GOLDEN_FIXTURE))
 
     # Check 2: pcapng SHA-256 checksum
     header_text = ""
@@ -256,6 +283,7 @@ def validate_golden_fixture() -> list[str]:
             print(f"  ⚠  pcapng not found, skipping SHA check", file=sys.stderr)
 
     # Check 3: Event count within 2x of capture
+    data_lines, golden_codes = _parse_fixture_stats(GOLDEN_FIXTURE)
     if data_lines > 0:
         lower = CAPTURE_EVENT_COUNT // 2
         upper = CAPTURE_EVENT_COUNT * 2
@@ -304,15 +332,10 @@ def main() -> int:
         return 1
 
     # Validate main fixture
-    result = validate(target)
-    if isinstance(result, tuple):
-        errors = result[0]
-    else:
-        errors = result
+    errors = validate(target)
 
     # Validate golden fixture
-    golden_errors = validate_golden_fixture()
-    errors.extend(golden_errors)
+    errors.extend(validate_golden_fixture())
 
     if errors:
         print("FAILED — fixture errors:", file=sys.stderr)
