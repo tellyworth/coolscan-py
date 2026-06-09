@@ -285,6 +285,8 @@ class CoolscanProtocol:
         self._usb_capture_start_time = None  # Start time for relative timestamps
         self._usb_capture_replay = usb_capture_replay
         self.maxbits = 12  # LUT bit depth from inquiry page 0xc1 byte 82 (SANE coolscan3.c:2443)
+        self._scanner_alive = True  # Session-level scanner health flag
+        self._usb_error_count = 0  # Consecutive USB error counter
 
         if usb_capture_replay is not None and self.interface.value != "usb":
             raise ValueError("usb_capture_replay is only valid for USB interface devices")
@@ -298,6 +300,28 @@ class CoolscanProtocol:
         """When driving I/O from a capture replay, do not swallow replay mismatch errors."""
         if self._usb_capture_replay is not None and isinstance(exc, ReplayError):
             raise exc
+
+    def _on_usb_error(self, exc: BaseException) -> None:
+        """Track USB errors for fail-fast detection.
+
+        After 3 consecutive USB errors, mark scanner as dead to avoid
+        spending minutes retrying dead operations.
+        """
+        self._usb_error_count += 1
+        if self._usb_error_count >= 3:
+            self._scanner_alive = False
+            if self.verbose:
+                print(f"  ❌ Scanner unresponsive after {self._usb_error_count} USB errors — aborting")
+
+    def _on_usb_success(self) -> None:
+        """Reset USB error counter on successful operation."""
+        self._usb_error_count = 0
+
+    def _check_scanner_alive(self) -> bool:
+        """Check session-level scanner health. Returns False if scanner is dead."""
+        if not self._scanner_alive:
+            return False
+        return True
 
     def _init_usb_from_replay(self):
         """Bind bulk endpoints to capture replay traffic (no libusb)."""
@@ -616,9 +640,11 @@ class CoolscanProtocol:
                     # Don't let logging errors break USB communication
                     pass
 
+            self._on_usb_success()
             return result
         except Exception as e:
             self._replay_reraise_if_needed(e)
+            self._on_usb_error(e)
             # Log failed writes for debugging
             if self._usb_capture_log and self._usb_capture_start_time is not None:
                 try:
@@ -674,9 +700,11 @@ class CoolscanProtocol:
                     # Don't let logging errors break USB communication
                     pass
 
+            self._on_usb_success()
             return data_bytes
         except Exception as e:
             self._replay_reraise_if_needed(e)
+            self._on_usb_error(e)
             # Log failed reads for debugging
             if self._usb_capture_log and self._usb_capture_start_time is not None:
                 try:
@@ -793,12 +821,16 @@ class CoolscanProtocol:
             status = StatusType.ERROR
         elif sense_key == 0x09:
             # Scanner-specific extended sense key
-            # SANE: coolscan3.c:2081-2083, sense_code 0x09800600/0x09800601 => REISSUE
-            # LS-40 ED: ASC=0x80, ASCQ=0x06 means scan started successfully
+            # SANE: coolscan3.c:2081-2083
+            # sense_code = (key<<24)|(ASC<<16)|(ASCQ<<8)|buf[4]
+            # REISSUE when sense_code == 0x09800600 or 0x09800601
+            # i.e. key=0x09, ASC=0x80, ASCQ=0x06, buf[4] in (0x00, 0x01)
+            sense_aux = status_data[4] if len(status_data) > 4 else 0
             if sense_asc == 0x80 and sense_ascq == 0x06:
-                status = StatusType.READY
-            elif sense_asc == 0x80 and sense_ascq in (0x00, 0x01):
-                status = StatusType.REISSUE
+                if sense_aux in (0x00, 0x01):
+                    status = StatusType.REISSUE
+                else:
+                    status = StatusType.READY
             else:
                 status = StatusType.ERROR
         elif sense_key == 0x0B:
@@ -1472,6 +1504,46 @@ class CoolscanProtocol:
             print(f"    set_boundary: {'OK' if ok else 'FAILED'}")
         return ok
 
+    def set_boundary_for_prescan(self) -> bool:
+        """Set scan boundary for prescan operation.
+
+        Same as set_boundary() but uses prescan-appropriate dimensions.
+        SANE: coolscan3.c:2898-2936 (cs3_set_boundary).
+        """
+        if self.verbose:
+            print("  Setting prescan boundary...")
+
+        width = 2592
+        height = 3888
+
+        boundary_payload = self._build_boundary_payload(
+            frame_count=1,
+            ulx=0,
+            uly=0,
+            width=width,
+            height=height,
+        )
+
+        cmd = struct.pack(
+            "BBBBBBBBBB",
+            0x2A,
+            0x00,
+            DataType.IMAGE_POSITIONS.value,
+            0x00,
+            0x00,
+            0x03,
+            (len(boundary_payload) >> 16) & 0xFF,
+            (len(boundary_payload) >> 8) & 0xFF,
+            len(boundary_payload) & 0xFF,
+            0x00,
+        )
+
+        _, status = self._issue_command(cmd, data_out=boundary_payload)
+        ok = status == StatusType.READY
+        if self.verbose:
+            print(f"    set_boundary (prescan): {'OK' if ok else 'FAILED'}")
+        return ok
+
     @staticmethod
     def _build_boundary_payload(frame_count: int, ulx: int, uly: int, width: int, height: int) -> bytes:
         """Build the IMAGE_POSITIONS payload for set_boundary.
@@ -2058,6 +2130,13 @@ class CoolscanProtocol:
                 return False
         print("  ✅ Windows set")
 
+        # Step 2: Set scan boundary (SANE coolscan3.c:2898-2936)
+        # Required before LUT upload and START_SCAN for prescan too.
+        # Without this, scanner may not know scan area.
+        if not self.set_boundary_for_prescan():
+            print("  ❌ Failed to set prescan boundary")
+            return False
+
         # Step 2b: TEST_UNIT_READY between SET_WINDOW and LUTs (from capture)
         if not self.test_unit_ready():
             print("  ⚠️  Scanner not ready before LUT upload")
@@ -2126,58 +2205,65 @@ class CoolscanProtocol:
         # This prevents Overflow errors from leftover data from polling
         # USB capture shows GET_WINDOW commands before image data read, which might clear buffer
         # But we'll also explicitly drain any pending data
-        try:
-            # Clear halt on IN endpoint to reset any error state
-            self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
-            time.sleep(0.01)  # Brief delay after clear_halt
-
-            # Try to drain any pending data (non-blocking, short timeout)
-            # This handles leftover data from TEST_UNIT_READY polling
-            # Use pyusb's read with short timeout to fail fast if no data
-            drained = 0
-            original_timeout = self.usb_device.default_timeout
-            self.usb_device.default_timeout = 100  # 100ms timeout for draining
+        if self._usb_capture_replay is None:
             try:
-                for attempt in range(10):  # More attempts
-                    try:
-                        chunk = self.usb_device.read(self.bulk_in.bEndpointAddress, 4096)
-                        if hasattr(chunk, "tobytes"):
-                            chunk = chunk.tobytes()
-                        if len(chunk) > 0:
-                            drained += len(chunk)
-                            if self.verbose:
-                                print(
-                                    f"  Drained {len(chunk)} bytes from buffer (attempt {attempt+1})"
-                                )
-                        else:
-                            break  # No more data
-                    except (usb.core.USBTimeoutError, usb.core.USBError) as e:
-                        # Timeout or other USB error - no more data
-                        if "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                            break  # No more data
-                        # Other USB errors might indicate no data
-                        break
-                    except Exception:
-                        break  # No more data or other error
-            finally:
-                self.usb_device.default_timeout = original_timeout
-            if drained > 0:
-                print(f"  Drained {drained} bytes from USB buffer before data read")
-            elif self.verbose:
-                print("  No data to drain from buffer")
-        except Exception as e:
-            if self.verbose:
-                print(f"  (Buffer clear: {e})")
+                # Clear halt on IN endpoint to reset any error state
+                self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
+                time.sleep(0.01)  # Brief delay after clear_halt
+
+                # Try to drain any pending data (non-blocking, short timeout)
+                # This handles leftover data from TEST_UNIT_READY polling
+                # Use pyusb's read with short timeout to fail fast if no data
+                drained = 0
+                original_timeout = self.usb_device.default_timeout
+                self.usb_device.default_timeout = 100  # 100ms timeout for draining
+                try:
+                    for attempt in range(10):  # More attempts
+                        try:
+                            chunk = self.usb_device.read(self.bulk_in.bEndpointAddress, 4096)
+                            if hasattr(chunk, "tobytes"):
+                                chunk = chunk.tobytes()
+                            if len(chunk) > 0:
+                                drained += len(chunk)
+                                if self.verbose:
+                                    print(
+                                        f"  Drained {len(chunk)} bytes from buffer (attempt {attempt+1})"
+                                    )
+                            else:
+                                break  # No more data
+                        except (usb.core.USBTimeoutError, usb.core.USBError) as e:
+                            # Timeout or other USB error - no more data
+                            if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                                break  # No more data
+                            # Other USB errors might indicate no data
+                            break
+                        except Exception:
+                            break  # No more data or other error
+                finally:
+                    self.usb_device.default_timeout = original_timeout
+                if drained > 0:
+                    print(f"  Drained {drained} bytes from USB buffer before data read")
+                elif self.verbose:
+                    print("  No data to drain from buffer")
+            except Exception as e:
+                if self.verbose:
+                    print(f"  (Buffer clear: {e})")
 
         # Step 6: Read prescan image data
         # From USB capture: Two 130752-byte blocks + one 11520-byte residual
+        if not self._check_scanner_alive():
+            print("  ❌ Scanner dead, aborting prescan data read")
+            return False
         image_data = self.read_prescan_image_data()
         if len(image_data) == 0:
-            print("  ⚠️  No image data read")
-            # Don't fail - exposure data might still be useful
+            print("  ❌ No image data read — prescan failed")
+            return False
 
         # Step 7: Read exposure/calibration data
         # From USB capture: 6-byte header + 3464-byte table (datatype 0x8e)
+        if not self._check_scanner_alive():
+            print("  ❌ Scanner dead, skipping exposure read")
+            return True  # Image data was read, prescan succeeded
         exposure_data = self.read_exposure_data()
         if exposure_data is None:
             print("  ⚠️  Failed to read exposure data")
@@ -2186,6 +2272,8 @@ class CoolscanProtocol:
         # Step 8: Get exposure values from WDBs (optional but recommended)
         # This reads back the WDBs and extracts exposure from bytes 54-57
         # Equivalent to SANE's cs3_get_exposure() function
+        if not self._check_scanner_alive():
+            return True  # Image data was read, prescan succeeded
         exposure_values = self.get_exposure_values(colors=[1, 2, 3])  # R, G, B
         if exposure_values:
             if self.verbose:
@@ -2352,8 +2440,12 @@ class CoolscanProtocol:
 
         try:
             # 1. Wait for scanner ready
-            if not self.scanner_ready(timeout=30):
+            if not self.scanner_ready(timeout=10):
                 print("Scanner not ready")
+                return False
+
+            if not self._check_scanner_alive():
+                print("❌ Scanner became unresponsive")
                 return False
 
             # 2. Reserve unit
@@ -2363,6 +2455,10 @@ class CoolscanProtocol:
 
             # 3. Read capacity (required after reserve_unit before set_window)
             self.read_capacity()
+
+            if not self._check_scanner_alive():
+                print("❌ Scanner became unresponsive")
+                return False
 
             # 4. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
             # SET_WINDOW(0x24) + 58-byte WDB for each color channel.
@@ -2389,6 +2485,10 @@ class CoolscanProtocol:
             # Without this the scanner may stay in PROCESSING indefinitely.
             if not self.set_boundary(params):
                 print("Failed to set scan boundary")
+                return False
+
+            if not self._check_scanner_alive():
+                print("❌ Scanner became unresponsive")
                 return False
 
             # 5. Send proper identity LUTs per channel (size from maxbits)

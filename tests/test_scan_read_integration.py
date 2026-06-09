@@ -94,7 +94,14 @@ def test_full_scan_flow_with_synthetic_data(tmp_path):
         "0.601000000\t0x01\t1\td0",
         "0.602000000\t0x82\t1\t02",
         "0.603000000\t0x01\t3\t010203",
-        "0.604000000\t0x82\t8\t0209800601000000",  # ERROR (ASCQ=6, treated as success)
+        "0.604000000\t0x82\t8\t0209800601000000",  # REISSUE
+
+        # === re-issued start_scan (G2 fix: REISSUE handling) ===
+        "0.610000000\t0x01\t6\t1b0000000300",
+        "0.611000000\t0x01\t1\td0",
+        "0.612000000\t0x82\t1\t02",
+        "0.613000000\t0x01\t3\t010203",
+        "0.614000000\t0x82\t8\t0000000000000000",  # READY
 
         # === post-scan polling: PROCESSING → READY ===
         "0.700000000\t0x01\t6\t000000000000",
