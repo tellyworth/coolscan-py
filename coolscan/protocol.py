@@ -2098,9 +2098,14 @@ class CoolscanProtocol:
         print(f"Auto focus: {'SUCCESS' if success else 'FAILED'}")
         return success
 
-    def prescan(self) -> bool:
-        """Perform prescan operation."""
+    def prescan(self, timeout: int = 120) -> bool:
+        """Perform prescan operation.
+
+        Args:
+            timeout: Total timeout budget in seconds for entire prescan sequence.
+        """
         print("Starting prescan...")
+        deadline = time.time() + timeout
 
         # Step 0: Ensure scanner is ready before starting
         # If scanner is in a bad state, try to reset it
@@ -2113,10 +2118,20 @@ class CoolscanProtocol:
                 print("  ❌ Scanner not responsive after reset")
                 return False
 
+        # Check timeout budget after recovery
+        if time.time() >= deadline:
+            print("  ❌ Prescan timeout: scanner recovery exceeded budget")
+            return False
+
         # Step 0b: Reserve unit (required before scan operations)
         # USB capture shows RESERVE_UNIT (0x16) before prescan sequence
         if not self.reserve_unit():
             print("  ⚠️  Failed to reserve unit - scanner may be in use")
+            return False
+
+        # Check timeout budget after reserve
+        if time.time() >= deadline:
+            print("  ❌ Prescan timeout: reserve/setup exceeded budget")
             return False
 
         # Step 1: SET_WINDOW with 58-byte window descriptors
@@ -2190,8 +2205,13 @@ class CoolscanProtocol:
         # Step 5: Poll until scanner is ready (replaces fixed 8s sleep)
         # From USB capture: Scanner returns PROCESSING status while scanning,
         # then READY when complete (~13 seconds for prescan)
+        # Use remaining timeout budget from deadline
+        remaining = max(1, int(deadline - time.time()))
+        if remaining <= 0:
+            print("  ❌ Prescan timeout: setup exceeded budget")
+            return False
         print("  Waiting for prescan to complete...")
-        ready = self.poll_until_ready(timeout=30, poll_interval=0.1)
+        ready = self.poll_until_ready(timeout=remaining, poll_interval=0.1)
         if not ready:
             print("  ⚠️  Scanner not ready after prescan - aborting data read")
             return False
@@ -2434,18 +2454,28 @@ class CoolscanProtocol:
             traceback.print_exc()
             return False
 
-    def perform_scan_sequence(self, params: ScanParameters) -> bool:
-        """Perform complete scan sequence like SANE backend."""
+    def perform_scan_sequence(self, params: ScanParameters, timeout: int = 300) -> bool:
+        """Perform complete scan sequence like SANE backend.
+
+        Args:
+            params: Scan parameters.
+            timeout: Total timeout budget in seconds for entire scan sequence.
+        """
         print("Performing complete scan sequence...")
+        deadline = time.time() + timeout
 
         try:
             # 1. Wait for scanner ready
-            if not self.scanner_ready(timeout=10):
+            if not self.scanner_ready(timeout=min(10, max(1, timeout - 5))):
                 print("Scanner not ready")
                 return False
 
             if not self._check_scanner_alive():
                 print("❌ Scanner became unresponsive")
+                return False
+
+            if time.time() >= deadline:
+                print("❌ Scan timeout: scanner_ready exceeded budget")
                 return False
 
             # 2. Reserve unit
@@ -2458,6 +2488,10 @@ class CoolscanProtocol:
 
             if not self._check_scanner_alive():
                 print("❌ Scanner became unresponsive")
+                return False
+
+            if time.time() >= deadline:
+                print("❌ Scan timeout: reserve/capacity exceeded budget")
                 return False
 
             # 4. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
@@ -2491,6 +2525,10 @@ class CoolscanProtocol:
                 print("❌ Scanner became unresponsive")
                 return False
 
+            if time.time() >= deadline:
+                print("❌ Scan timeout: setup exceeded budget")
+                return False
+
             # 5. Send proper identity LUTs per channel (size from maxbits)
             if not self.upload_identity_luts():
                 print("Failed to upload LUTs")
@@ -2504,7 +2542,11 @@ class CoolscanProtocol:
             # 7. Poll until scanner is ready (no TEST_UNIT_READY after start_scan!)
             # USB capture shows direct PROCESSING->READY polling, not TUR.
             # Sending TUR after START_SCAN causes scanner to reject with ASCQ=1.
-            if not self.poll_until_ready(timeout=120, poll_interval=0.5):
+            remaining = max(1, int(deadline - time.time()))
+            if remaining <= 0:
+                print("❌ Scan timeout: start_scan exceeded budget")
+                return False
+            if not self.poll_until_ready(timeout=remaining, poll_interval=0.5):
                 print("Scanner did not become ready after scan start")
                 return False
 
