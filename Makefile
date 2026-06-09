@@ -1,4 +1,4 @@
-.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures
+.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures smoke-test-hardware generate-golden-fixture
 
 # Linting and code quality
 lint:
@@ -18,6 +18,14 @@ test:
 test-fast:
 	pytest tests -v --tb=short -x
 
+# Property tests only (fixture-agnostic invariant tests)
+test-properties:
+	pytest tests/test_protocol_properties.py -v -m property_test
+
+# Hardware smoke tests (skip gracefully if no scanner)
+smoke-test-hardware:
+	pytest tests/test_hardware_smoke.py -v -m hardware --tb=short
+
 # Type checking
 type-check:
 	mypy coolscan --ignore-missing-imports
@@ -31,12 +39,17 @@ validate-fixtures:
 	@echo "Validating capture fixtures..."
 	python3 scripts/validate_fixtures.py
 
+# Generate golden fixture from pcapng capture
+generate-golden-fixture:
+	@echo "Generating golden fixture from pcapng..."
+	python3 scripts/generate_fixture_from_pcapng.py
+
 # Run all checks (lint + validate + test)
 check-all: lint validate-fixtures test
-	@echo "✅ All checks passed!"
+	@echo "All checks passed!"
 
 # Quick syntax check (catches indentation errors)
 syntax-check:
 	@echo "Checking Python syntax..."
-	@python3 -m py_compile coolscan/protocol.py coolscan/scanner.py coolscan/device.py coolscan/cli.py 2>&1 || (echo "❌ Syntax errors found!" && exit 1)
-	@echo "✅ Syntax check passed!"
+	@python3 -m py_compile coolscan/protocol.py coolscan/scanner.py coolscan/device.py coolscan/cli.py 2>&1 || (echo "Syntax errors found!" && exit 1)
+	@echo "Syntax check passed!"
