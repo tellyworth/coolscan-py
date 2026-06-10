@@ -190,6 +190,11 @@ Command: 2a 00 88 00 00 03 [length] 00
 Data: Boundary data (variable length)
 Response: Status (8 bytes)
 ```
+**Note:** The SANE coolscan3 backend uses datatype 0x88 (IMAGE_POSITIONS) for set_boundary,
+but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST (sense key 5, ASC=0x26). The golden
+fixture shows the LS-40 ED uses two different commands instead:
+- **Prescan:** `2a009200000300000400` (0x92 BORDER_POSITION, 4-byte payload) — golden fixture line 203
+- **Full scan:** `2a008f00000300003400` (0x8f CONTROL_FRAME, 52-byte payload) — golden fixture line 427
 
 ### Download LUT (0x2a, subcode 0x03)
 **Purpose**: Download lookup table for color correction

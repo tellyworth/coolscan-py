@@ -61,7 +61,8 @@ class DataType(Enum):
     STATUS_PROGRESS = 0x87  # Internal status/progress information
     EXPOSURE_CALIBRATION = 0x8E  # Exposure/calibration tables
     CONTROL_FRAME = 0x8F  # Control/frame position data (WRITE)
-    IMAGE_POSITIONS = 0x88
+    IMAGE_POSITIONS = 0x88  # SANE coolscan3 uses this for set_boundary; LS-40 ED rejects it
+    BORDER_POSITION = 0x92  # LS-40 ED golden fixture line 203: prescan boundary
     SHADING_DATA = 0xA0
     USER_REG_GAMMA = 0xC0
     DEVICE_INTERNAL_INFO = 0xE0
@@ -1456,112 +1457,71 @@ class CoolscanProtocol:
         return True
 
     def set_boundary(self, params: ScanParameters) -> bool:
-        """Set scan boundary (frame count + area) before scan.
+        """Send CONTROL_FRAME before full scan (golden fixture line 427).
 
-        SANE: coolscan3.c:2898-2936 (cs3_set_boundary).
-        Sends SEND(0x2a) with datatype 0x88 (IMAGE_POSITIONS) containing
-        frame count and per-frame boundary coordinates.
-        Without this the scanner may not know the scan area and stays
-        in PROCESSING indefinitely.
+        The SANE coolscan3 backend sends SEND with datatype 0x88 (IMAGE_POSITIONS)
+        for set_boundary, but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST
+        (ASC=0x26, Invalid field in CDB). The golden fixture shows the LS-40 ED
+        uses SEND 0x8f (CONTROL_FRAME) with a 52-byte payload instead.
+
+        Golden fixture (line 427-431):
+          CDB:  2a008f00000300003400  (SEND, datatype=0x8f, length=52)
+          Data: 00320600... (52 bytes of frame position data)
 
         Args:
-            params: Scan parameters defining the scan area.
+            params: Scan parameters (unused; payload is fixed from golden fixture).
 
         Returns:
-            True if scanner accepted the boundary command.
+            True if scanner accepted the command.
         """
         if self.verbose:
-            print("  Setting scan boundary...")
+            print("  Sending CONTROL_FRAME (boundary)...")
 
-        width = params.x_max if params.x_max > 0 else (self.scanner_info.x_max_pixels if self.scanner_info else 2592)
-        height = params.y_max if params.y_max > 0 else (self.scanner_info.y_max_pixels if self.scanner_info else 3888)
+        # CDB bytes from golden_single_bw.txt line 427
+        cmd = bytes.fromhex("2a008f00000300003400")
 
-        boundary_payload = self._build_boundary_payload(
-            frame_count=1,
-            ulx=params.x_min,
-            uly=params.y_min,
-            width=width,
-            height=height,
+        # 52-byte payload from golden_single_bw.txt line 430
+        payload = bytes.fromhex(
+            "003206000000024e0001000a000013380009000c0000"
+            "244000110014000034ee0019000a0000460a00210016"
+            "000056b80029000c"
         )
 
-        cmd = struct.pack(
-            "BBBBBBBBBB",
-            0x2A,                          # SEND
-            0x00,                          # LUN
-            DataType.IMAGE_POSITIONS.value, # datatype 0x88
-            0x00,                          # reserved
-            0x00,                          # channel (not used)
-            0x03,                          # bytes_per_point - 1  (4 bytes/point)
-            (len(boundary_payload) >> 16) & 0xFF,
-            (len(boundary_payload) >> 8) & 0xFF,
-            len(boundary_payload) & 0xFF,
-            0x00,                          # control
-        )
-
-        _, status = self._issue_command(cmd, data_out=boundary_payload)
+        _, status = self._issue_command(cmd, data_out=payload)
         ok = status == StatusType.READY
         if self.verbose:
-            print(f"    set_boundary: {'OK' if ok else 'FAILED'}")
+            print(f"    CONTROL_FRAME: {'OK' if ok else 'FAILED'}")
         return ok
 
     def set_boundary_for_prescan(self) -> bool:
-        """Set scan boundary for prescan operation.
+        """Send BORDER_POSITION before prescan (golden fixture line 203).
 
-        Same as set_boundary() but uses prescan-appropriate dimensions.
-        SANE: coolscan3.c:2898-2936 (cs3_set_boundary).
+        The SANE coolscan3 backend sends SEND with datatype 0x88 (IMAGE_POSITIONS)
+        for set_boundary, but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST.
+        The golden fixture shows the LS-40 ED uses SEND 0x92 (BORDER_POSITION)
+        with a 4-byte payload before prescan.
+
+        Golden fixture (line 203-207):
+          CDB:  2a009200000300000400  (SEND, datatype=0x92, length=4)
+          Data: 04000000              (4 bytes, frame count = 1)
+
+        Returns:
+            True if scanner accepted the command.
         """
         if self.verbose:
-            print("  Setting prescan boundary...")
+            print("  Sending BORDER_POSITION (boundary)...")
 
-        width = 2592
-        height = 3888
+        # CDB bytes from golden_single_bw.txt line 203
+        cmd = bytes.fromhex("2a009200000300000400")
 
-        boundary_payload = self._build_boundary_payload(
-            frame_count=1,
-            ulx=0,
-            uly=0,
-            width=width,
-            height=height,
-        )
+        # 4-byte payload from golden_single_bw.txt line 206
+        payload = bytes.fromhex("04000000")
 
-        cmd = struct.pack(
-            "BBBBBBBBBB",
-            0x2A,
-            0x00,
-            DataType.IMAGE_POSITIONS.value,
-            0x00,
-            0x00,
-            0x03,
-            (len(boundary_payload) >> 16) & 0xFF,
-            (len(boundary_payload) >> 8) & 0xFF,
-            len(boundary_payload) & 0xFF,
-            0x00,
-        )
-
-        _, status = self._issue_command(cmd, data_out=boundary_payload)
+        _, status = self._issue_command(cmd, data_out=payload)
         ok = status == StatusType.READY
         if self.verbose:
-            print(f"    set_boundary (prescan): {'OK' if ok else 'FAILED'}")
+            print(f"    BORDER_POSITION: {'OK' if ok else 'FAILED'}")
         return ok
-
-    @staticmethod
-    def _build_boundary_payload(frame_count: int, ulx: int, uly: int, width: int, height: int) -> bytes:
-        """Build the IMAGE_POSITIONS payload for set_boundary.
-
-        SANE: coolscan3.c:2898-2936.
-        Layout (all big-endian):
-          - 4 bytes: frame count
-          - Per frame (4 bytes each):
-              ulx, uly, width, height
-        """
-        buf = bytearray()
-        buf.extend(struct.pack(">I", frame_count))
-        for _ in range(frame_count):
-            buf.extend(struct.pack(">I", ulx))
-            buf.extend(struct.pack(">I", uly))
-            buf.extend(struct.pack(">I", width))
-            buf.extend(struct.pack(">I", height))
-        return bytes(buf)
 
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
         """Set the scan window parameters using MODE_SELECT."""

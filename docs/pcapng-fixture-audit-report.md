@@ -112,7 +112,7 @@ The fixture was created through a multi-step process:
 
 1. **Initial extraction** from pcapng (lines 1-82 roughly match capture)
 2. **Manual normalization** to skip busy retries and error responses
-3. **Bug fixes** (G1: SET_WINDOW replaces MODE_SELECT; G2: REISSUE handling; P0-2: set_boundary added)
+3. **Bug fixes** (G1: SET_WINDOW replaces MODE_SELECT; G2: REISSUE handling; P0-2: set_boundary added, later corrected to use 0x92 BORDER_POSITION for prescan and 0x8f CONTROL_FRAME for full scan, matching golden fixture — SANE's 0x88 IMAGE_POSITIONS is rejected by LS-40 ED)
 4. **Synthetic extension** for phases not in the original capture slice
 5. **Timestamp fabrication** for post-line-111 content
 
