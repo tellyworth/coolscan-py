@@ -63,6 +63,7 @@ class DataType(Enum):
     CONTROL_FRAME = 0x8F  # Control/frame position data (WRITE)
     IMAGE_POSITIONS = 0x88  # SANE coolscan3 uses this for set_boundary; LS-40 ED rejects it
     BORDER_POSITION = 0x92  # LS-40 ED golden fixture line 203: prescan boundary
+    CHANNEL_STATE = 0x8C  # LS-40 ED golden fixture line 236: per-channel state read
     SHADING_DATA = 0xA0
     USER_REG_GAMMA = 0xC0
     DEVICE_INTERNAL_INFO = 0xE0
@@ -2057,6 +2058,51 @@ class CoolscanProtocol:
 
         return exposure_values
 
+    def read_channel_state(self, channel: int) -> Optional[bytes]:
+        """Read per-channel state (datatype 0x8c).
+
+        Golden fixture lines 236-250: three READ 0x8c commands for RGB channels
+        before SET_WINDOW for full scan. Command format:
+          28008c00[chan]0300000a80  (reads 10 bytes)
+
+        Args:
+            channel: Channel ID (1=R, 2=G, 3=B)
+
+        Returns:
+            10-byte response, or None if failed
+        """
+        if self.verbose:
+            ch_names = {1: "R", 2: "G", 3: "B"}
+            print(f"  Reading channel state for {ch_names.get(channel, str(channel))}...")
+
+        cmd = struct.pack(
+            "BBBBBBBBBB",
+            0x28,       # READ(10)
+            0x00,       # Reserved
+            0x8C,       # Datatype (CHANNEL_STATE)
+            0x00,       # Reserved
+            channel,    # Channel ID
+            0x03,       # Fixed from golden fixture
+            0x00,       # Reserved
+            0x00,       # Reserved
+            0x0A,       # Length (10 bytes)
+            0x80,       # Control byte
+        )
+
+        try:
+            data, status = self._issue_command(cmd, data_in_length=10)
+            if status == StatusType.READY and len(data) == 10:
+                if self.verbose:
+                    print(f"    Channel state OK: {data.hex()}")
+                return data
+            else:
+                print(f"    ⚠️  Channel state read failed: status={status}, len={len(data) if data else 0}")
+                return None
+        except Exception as e:
+            self._replay_reraise_if_needed(e)
+            print(f"    ⚠️  Error reading channel state: {e}")
+            return None
+
     def stop_scan(self) -> bool:
         """Stop the current scan operation.
 
@@ -2511,7 +2557,19 @@ class CoolscanProtocol:
                 print("❌ Scan timeout: reserve/capacity exceeded budget")
                 return False
 
-            # 4. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
+            # 4. Read per-channel state (golden fixture lines 236-250)
+            # READ datatype 0x8c for each RGB channel before SET_WINDOW.
+            # Unknown datatype (not in SANE scsidef.h), but present in golden
+            # fixture and may configure per-channel state needed for full scan.
+            for chan in [1, 2, 3]:
+                self.read_channel_state(chan)
+
+            # 4b. TUR × 3 (golden fixture lines 251-262)
+            # Three consecutive TEST_UNIT_READY polls before SET_WINDOW.
+            for _ in range(3):
+                self.test_unit_ready()
+
+            # 5. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
             # SET_WINDOW(0x24) + 58-byte WDB for each color channel.
             # MODE_SELECT was already sent during initialization.
             for win_id in [1, 2, 3]:
