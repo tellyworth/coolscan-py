@@ -1044,6 +1044,7 @@ class CoolscanProtocol:
                     return b"", StatusType.ERROR
 
             # Read data if phase is Data IN (0x03)
+            short_read = False
             if phase_byte == 0x03 and remaining_data_length > 0:
                 try:
                     # If we already got some data from Overflow handling, prepend it
@@ -1053,6 +1054,14 @@ class CoolscanProtocol:
                         new_data = self._usb_read_bulk(remaining_data_length)
                         if hasattr(new_data, "tobytes"):
                             new_data = new_data.tobytes()
+                        # Check for short read (signals end of scan data)
+                        if len(new_data) < remaining_data_length:
+                            short_read = True
+                            if self.verbose:
+                                print(
+                                    f"    Short read: {len(new_data)} < {remaining_data_length} "
+                                    f"(end of data)"
+                                )
                         data_in = existing_data + new_data
                     else:
                         data_in = existing_data
@@ -1062,6 +1071,22 @@ class CoolscanProtocol:
                     # Keep existing data if we have it
                     if len(data_in) == 0:
                         data_in = b""
+
+            # After short read, scanner stalls endpoints. Clear halt on both
+            # endpoints (like SANE sanei_usb.c) to recover the device.
+            if short_read:
+                try:
+                    self.usb_device.clear_halt(self.bulk_out.bEndpointAddress)
+                except Exception:
+                    pass
+                try:
+                    self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
+                except Exception:
+                    pass
+                time.sleep(0.05)  # Brief settling delay after clear_halt
+                if self.verbose:
+                    print("    Short read completed, returning data")
+                return data_in, StatusType.READY
 
             # Read status (8 bytes) - always read status after command
             try:
@@ -1796,6 +1821,15 @@ class CoolscanProtocol:
             if status == StatusType.READY:
                 if self.verbose:
                     print(f"Read {len(data)} bytes successfully")
+                return data
+            elif len(data) < length:
+                # Short read signals end of scan data. Return what we got
+                # even if status is not READY (scanner may have stalled endpoint).
+                if self.verbose:
+                    print(
+                        f"Short read ({len(data)} < {length}), "
+                        f"status={status.name} — end of scan data"
+                    )
                 return data
             else:
                 raise RuntimeError(f"Read scan data failed with status {status}")
