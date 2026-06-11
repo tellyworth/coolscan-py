@@ -61,7 +61,9 @@ class DataType(Enum):
     STATUS_PROGRESS = 0x87  # Internal status/progress information
     EXPOSURE_CALIBRATION = 0x8E  # Exposure/calibration tables
     CONTROL_FRAME = 0x8F  # Control/frame position data (WRITE)
-    IMAGE_POSITIONS = 0x88
+    IMAGE_POSITIONS = 0x88  # SANE coolscan3 uses this for set_boundary; LS-40 ED rejects it
+    BORDER_POSITION = 0x92  # LS-40 ED golden fixture line 203: prescan boundary
+    CHANNEL_STATE = 0x8C  # LS-40 ED golden fixture line 236: per-channel state read
     SHADING_DATA = 0xA0
     USER_REG_GAMMA = 0xC0
     DEVICE_INTERNAL_INFO = 0xE0
@@ -705,6 +707,18 @@ class CoolscanProtocol:
         except Exception as e:
             self._replay_reraise_if_needed(e)
             self._on_usb_error(e)
+            # Auto clear-halt on bulk-in endpoint after failed read (SANE: sanei_usb.c:3492)
+            # Prevents cascading failures from stalled endpoints
+            try:
+                if (
+                    hasattr(self, "usb_device")
+                    and self.usb_device
+                    and hasattr(self, "bulk_in")
+                    and self.bulk_in
+                ):
+                    self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
+            except Exception:
+                pass
             # Log failed reads for debugging
             if self._usb_capture_log and self._usb_capture_start_time is not None:
                 try:
@@ -719,16 +733,33 @@ class CoolscanProtocol:
             print(f"    ❌ Read error: {e}")
             raise
 
-    def wait_scanner(self, max_attempts: int = 10, delay: float = 0.5) -> bool:
+    def wait_scanner(
+        self,
+        max_hard_errors: int = 3,
+        timeout: float = 60.0,
+        delay: float = 1.0,
+        acceptable_statuses: tuple = (StatusType.READY, StatusType.NO_DOCS),
+    ) -> bool:
         """
-        Wait for scanner to be ready - based on SANE backend wait_scanner().
+        Wait for scanner to be ready - based on SANE backend cs3_scanner_ready().
+
+        SANE uses two-tier retry: 3 hard-error retries + 120s soft timeout with 1s
+        delays. We use 3 hard errors + 60s soft timeout.
+
+        Args:
+            max_hard_errors: Max consecutive USB/IO errors before giving up.
+            timeout: Total timeout budget in seconds for scanner-busy states.
+            delay: Delay between polling attempts (SANE uses 1s).
+            acceptable_statuses: Tuple of status types that count as "ready".
         """
-        # Use shorter timeout for wait_scanner to fail faster
         original_timeout = self.usb_device.default_timeout
-        self.usb_device.default_timeout = 2000  # 2 seconds instead of 30
+        self.usb_device.default_timeout = 2000
 
         try:
-            for attempt in range(max_attempts):
+            hard_errors = 0
+            deadline = time.time() + timeout
+
+            while time.time() < deadline:
                 try:
                     cmd = self._build_6byte_command(0x00, control=0x00)
                     self._usb_write_bulk(cmd)
@@ -740,6 +771,12 @@ class CoolscanProtocol:
                             phase_response = phase_response.tobytes()
                     except Exception as e:
                         self._replay_reraise_if_needed(e)
+                        hard_errors += 1
+                        if hard_errors >= max_hard_errors:
+                            print(
+                                f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
+                            )
+                            return False
                         time.sleep(delay)
                         continue
 
@@ -749,19 +786,24 @@ class CoolscanProtocol:
 
                     if status_data and len(status_data) >= 8:
                         status, _ = self._parse_status(status_data)
-                        if status == StatusType.READY or status == StatusType.NO_DOCS:
+                        hard_errors = 0  # Reset on successful TUR
+                        if status in acceptable_statuses:
                             return True
 
                     time.sleep(delay)
                 except Exception as e:
                     self._replay_reraise_if_needed(e)
+                    hard_errors += 1
+                    if hard_errors >= max_hard_errors:
+                        print(
+                            f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
+                        )
+                        return False
                     time.sleep(delay)
-                    continue
 
-            print(f"  ⚠️  Scanner not ready after {max_attempts} attempts")
+            print(f"  ⚠️  Scanner not ready after {timeout:.0f}s")
             return False
         finally:
-            # Restore original timeout
             self.usb_device.default_timeout = original_timeout
 
     def _check_phase_with_retry(self, max_retries: int = 3) -> PhaseType:
@@ -806,7 +848,9 @@ class CoolscanProtocol:
             elif sense_asc == 0x3A and sense_ascq == 0x00:
                 status = StatusType.NO_DOCS  # No document
             else:
-                status = StatusType.ERROR
+                # SANE coolscan.c:191-195 returns GOOD for unknown NOT-READY ASC/ASCQ
+                # Tolerate firmware quirks: scanner is busy with something unexpected
+                status = StatusType.PROCESSING
         elif sense_key == 0x03:
             # Medium error
             status = StatusType.ERROR
@@ -979,6 +1023,14 @@ class CoolscanProtocol:
 
             # data_in already initialized at start of function
 
+            # SANE cs3_issue_cmd:2298-2304: status_only pattern
+            # When unexpected phase + no data expected, continue to status read
+            if phase_byte not in (0x02, 0x03, 0x04) and data_in_length == 0:
+                pass  # Graceful: skip data phase, proceed to status read
+            elif phase_byte not in (0x02, 0x03, 0x04):
+                print(f"    ⚠️  Unexpected phase 0x{phase_byte:02x} with data expected")
+                return b"", StatusType.ERROR
+
             # Send data if phase is Data OUT (0x02)
             if phase_byte == 0x02 and len(data_out) > 0:
                 try:
@@ -1108,8 +1160,7 @@ class CoolscanProtocol:
 
         This is a simpler wrapper - for proper wake-up sequence, use wait_scanner().
         """
-        max_attempts = int(timeout / 0.5)  # Number of attempts based on timeout
-        return self.wait_scanner(max_attempts=max_attempts, delay=0.5)
+        return self.wait_scanner(timeout=float(timeout), delay=1.0)
 
     def test_unit_ready(self) -> bool:
         """
@@ -1456,112 +1507,71 @@ class CoolscanProtocol:
         return True
 
     def set_boundary(self, params: ScanParameters) -> bool:
-        """Set scan boundary (frame count + area) before scan.
+        """Send CONTROL_FRAME before full scan (golden fixture line 427).
 
-        SANE: coolscan3.c:2898-2936 (cs3_set_boundary).
-        Sends SEND(0x2a) with datatype 0x88 (IMAGE_POSITIONS) containing
-        frame count and per-frame boundary coordinates.
-        Without this the scanner may not know the scan area and stays
-        in PROCESSING indefinitely.
+        The SANE coolscan3 backend sends SEND with datatype 0x88 (IMAGE_POSITIONS)
+        for set_boundary, but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST
+        (ASC=0x26, Invalid field in CDB). The golden fixture shows the LS-40 ED
+        uses SEND 0x8f (CONTROL_FRAME) with a 52-byte payload instead.
+
+        Golden fixture (line 427-431):
+          CDB:  2a008f00000300003400  (SEND, datatype=0x8f, length=52)
+          Data: 00320600... (52 bytes of frame position data)
 
         Args:
-            params: Scan parameters defining the scan area.
+            params: Scan parameters (unused; payload is fixed from golden fixture).
 
         Returns:
-            True if scanner accepted the boundary command.
+            True if scanner accepted the command.
         """
         if self.verbose:
-            print("  Setting scan boundary...")
+            print("  Sending CONTROL_FRAME (boundary)...")
 
-        width = params.x_max if params.x_max > 0 else (self.scanner_info.x_max_pixels if self.scanner_info else 2592)
-        height = params.y_max if params.y_max > 0 else (self.scanner_info.y_max_pixels if self.scanner_info else 3888)
+        # CDB bytes from golden_single_bw.txt line 427
+        cmd = bytes.fromhex("2a008f00000300003400")
 
-        boundary_payload = self._build_boundary_payload(
-            frame_count=1,
-            ulx=params.x_min,
-            uly=params.y_min,
-            width=width,
-            height=height,
+        # 52-byte payload from golden_single_bw.txt line 430
+        payload = bytes.fromhex(
+            "003206000000024e0001000a000013380009000c0000"
+            "244000110014000034ee0019000a0000460a00210016"
+            "000056b80029000c"
         )
 
-        cmd = struct.pack(
-            "BBBBBBBBBB",
-            0x2A,                          # SEND
-            0x00,                          # LUN
-            DataType.IMAGE_POSITIONS.value, # datatype 0x88
-            0x00,                          # reserved
-            0x00,                          # channel (not used)
-            0x03,                          # bytes_per_point - 1  (4 bytes/point)
-            (len(boundary_payload) >> 16) & 0xFF,
-            (len(boundary_payload) >> 8) & 0xFF,
-            len(boundary_payload) & 0xFF,
-            0x00,                          # control
-        )
-
-        _, status = self._issue_command(cmd, data_out=boundary_payload)
+        _, status = self._issue_command(cmd, data_out=payload)
         ok = status == StatusType.READY
         if self.verbose:
-            print(f"    set_boundary: {'OK' if ok else 'FAILED'}")
+            print(f"    CONTROL_FRAME: {'OK' if ok else 'FAILED'}")
         return ok
 
     def set_boundary_for_prescan(self) -> bool:
-        """Set scan boundary for prescan operation.
+        """Send BORDER_POSITION before prescan (golden fixture line 203).
 
-        Same as set_boundary() but uses prescan-appropriate dimensions.
-        SANE: coolscan3.c:2898-2936 (cs3_set_boundary).
+        The SANE coolscan3 backend sends SEND with datatype 0x88 (IMAGE_POSITIONS)
+        for set_boundary, but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST.
+        The golden fixture shows the LS-40 ED uses SEND 0x92 (BORDER_POSITION)
+        with a 4-byte payload before prescan.
+
+        Golden fixture (line 203-207):
+          CDB:  2a009200000300000400  (SEND, datatype=0x92, length=4)
+          Data: 04000000              (4 bytes, frame count = 1)
+
+        Returns:
+            True if scanner accepted the command.
         """
         if self.verbose:
-            print("  Setting prescan boundary...")
+            print("  Sending BORDER_POSITION (boundary)...")
 
-        width = 2592
-        height = 3888
+        # CDB bytes from golden_single_bw.txt line 203
+        cmd = bytes.fromhex("2a009200000300000400")
 
-        boundary_payload = self._build_boundary_payload(
-            frame_count=1,
-            ulx=0,
-            uly=0,
-            width=width,
-            height=height,
-        )
+        # 4-byte payload from golden_single_bw.txt line 206
+        payload = bytes.fromhex("04000000")
 
-        cmd = struct.pack(
-            "BBBBBBBBBB",
-            0x2A,
-            0x00,
-            DataType.IMAGE_POSITIONS.value,
-            0x00,
-            0x00,
-            0x03,
-            (len(boundary_payload) >> 16) & 0xFF,
-            (len(boundary_payload) >> 8) & 0xFF,
-            len(boundary_payload) & 0xFF,
-            0x00,
-        )
-
-        _, status = self._issue_command(cmd, data_out=boundary_payload)
+        _, status = self._issue_command(cmd, data_out=payload)
         ok = status == StatusType.READY
         if self.verbose:
-            print(f"    set_boundary (prescan): {'OK' if ok else 'FAILED'}")
+            print(f"    BORDER_POSITION: {'OK' if ok else 'FAILED'}")
         return ok
-
-    @staticmethod
-    def _build_boundary_payload(frame_count: int, ulx: int, uly: int, width: int, height: int) -> bytes:
-        """Build the IMAGE_POSITIONS payload for set_boundary.
-
-        SANE: coolscan3.c:2898-2936.
-        Layout (all big-endian):
-          - 4 bytes: frame count
-          - Per frame (4 bytes each):
-              ulx, uly, width, height
-        """
-        buf = bytearray()
-        buf.extend(struct.pack(">I", frame_count))
-        for _ in range(frame_count):
-            buf.extend(struct.pack(">I", ulx))
-            buf.extend(struct.pack(">I", uly))
-            buf.extend(struct.pack(">I", width))
-            buf.extend(struct.pack(">I", height))
-        return bytes(buf)
 
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
         """Set the scan window parameters using MODE_SELECT."""
@@ -1695,11 +1705,12 @@ class CoolscanProtocol:
         """Start a scan operation.
 
         SANE: coolscan3.c:3137-3151 — re-issues command on REISSUE status.
+        Golden fixture: 3 attempts with READ 0x87 status/progress between retries.
         """
         cmd = self._build_6byte_command(0x1B, alloc_length=0x03, control=0x00)
         scan_data = bytes([0x01, 0x02, 0x03])  # R, G, B channels
 
-        max_attempts = 2 if scan_type == ScanType.NORMAL else 1
+        max_attempts = 3 if scan_type == ScanType.NORMAL else 1
         for attempt in range(max_attempts):
             data, status = self._issue_command(cmd, data_out=scan_data)
 
@@ -1719,7 +1730,14 @@ class CoolscanProtocol:
                 return True
             elif status == StatusType.REISSUE:
                 if attempt < max_attempts - 1:
-                    print(f"  ⚠️  REISSUE — re-issuing START_SCAN (attempt {attempt + 2})")
+                    print(f"  ⚠️  REISSUE — reading status/progress before retry")
+                    # Golden fixture: READ datatype 0x87 (6 bytes) + (33 bytes) between retries
+                    try:
+                        self.read_scan_data(6, DataType.STATUS_PROGRESS)
+                        self.read_scan_data(33, DataType.STATUS_PROGRESS)
+                    except Exception:
+                        pass  # Non-critical: scanner will continue anyway
+                    print(f"  ⚠️  Re-issuing START_SCAN (attempt {attempt + 2})")
                     continue
                 print(f"  ❌ REISSUE after {max_attempts} attempts")
                 return False
@@ -2040,6 +2058,51 @@ class CoolscanProtocol:
 
         return exposure_values
 
+    def read_channel_state(self, channel: int) -> Optional[bytes]:
+        """Read per-channel state (datatype 0x8c).
+
+        Golden fixture lines 236-250: three READ 0x8c commands for RGB channels
+        before SET_WINDOW for full scan. Command format:
+          28008c00[chan]0300000a80  (reads 10 bytes)
+
+        Args:
+            channel: Channel ID (1=R, 2=G, 3=B)
+
+        Returns:
+            10-byte response, or None if failed
+        """
+        if self.verbose:
+            ch_names = {1: "R", 2: "G", 3: "B"}
+            print(f"  Reading channel state for {ch_names.get(channel, str(channel))}...")
+
+        cmd = struct.pack(
+            "BBBBBBBBBB",
+            0x28,       # READ(10)
+            0x00,       # Reserved
+            0x8C,       # Datatype (CHANNEL_STATE)
+            0x00,       # Reserved
+            channel,    # Channel ID
+            0x03,       # Fixed from golden fixture
+            0x00,       # Reserved
+            0x00,       # Reserved
+            0x0A,       # Length (10 bytes)
+            0x80,       # Control byte
+        )
+
+        try:
+            data, status = self._issue_command(cmd, data_in_length=10)
+            if status == StatusType.READY and len(data) == 10:
+                if self.verbose:
+                    print(f"    Channel state OK: {data.hex()}")
+                return data
+            else:
+                print(f"    ⚠️  Channel state read failed: status={status}, len={len(data) if data else 0}")
+                return None
+        except Exception as e:
+            self._replay_reraise_if_needed(e)
+            print(f"    ⚠️  Error reading channel state: {e}")
+            return None
+
     def stop_scan(self) -> bool:
         """Stop the current scan operation.
 
@@ -2098,9 +2161,14 @@ class CoolscanProtocol:
         print(f"Auto focus: {'SUCCESS' if success else 'FAILED'}")
         return success
 
-    def prescan(self) -> bool:
-        """Perform prescan operation."""
+    def prescan(self, timeout: int = 120) -> bool:
+        """Perform prescan operation.
+
+        Args:
+            timeout: Total timeout budget in seconds for entire prescan sequence.
+        """
         print("Starting prescan...")
+        deadline = time.time() + timeout
 
         # Step 0: Ensure scanner is ready before starting
         # If scanner is in a bad state, try to reset it
@@ -2109,14 +2177,24 @@ class CoolscanProtocol:
             self.reset_scanner()
             # Wait a bit for scanner to recover
             time.sleep(0.5)
-            if not self.wait_scanner(max_attempts=5, delay=0.2):
+            if not self.wait_scanner(timeout=5.0, delay=0.5):
                 print("  ❌ Scanner not responsive after reset")
                 return False
+
+        # Check timeout budget after recovery
+        if time.time() >= deadline:
+            print("  ❌ Prescan timeout: scanner recovery exceeded budget")
+            return False
 
         # Step 0b: Reserve unit (required before scan operations)
         # USB capture shows RESERVE_UNIT (0x16) before prescan sequence
         if not self.reserve_unit():
             print("  ⚠️  Failed to reserve unit - scanner may be in use")
+            return False
+
+        # Check timeout budget after reserve
+        if time.time() >= deadline:
+            print("  ❌ Prescan timeout: reserve/setup exceeded budget")
             return False
 
         # Step 1: SET_WINDOW with 58-byte window descriptors
@@ -2190,8 +2268,13 @@ class CoolscanProtocol:
         # Step 5: Poll until scanner is ready (replaces fixed 8s sleep)
         # From USB capture: Scanner returns PROCESSING status while scanning,
         # then READY when complete (~13 seconds for prescan)
+        # Use remaining timeout budget from deadline
+        remaining = max(1, int(deadline - time.time()))
+        if remaining <= 0:
+            print("  ❌ Prescan timeout: setup exceeded budget")
+            return False
         print("  Waiting for prescan to complete...")
-        ready = self.poll_until_ready(timeout=30, poll_interval=0.1)
+        ready = self.poll_until_ready(timeout=remaining, poll_interval=0.1)
         if not ready:
             print("  ⚠️  Scanner not ready after prescan - aborting data read")
             return False
@@ -2359,7 +2442,7 @@ class CoolscanProtocol:
 
             # 2. Wait for scanner ready (multiple TEST_UNIT_READY)
             print("\n2. Waiting for scanner ready...")
-            if not self.wait_scanner(max_attempts=10, delay=0.5):
+            if not self.wait_scanner(timeout=10.0, delay=0.5):
                 print("  ⚠️  Scanner not ready, continuing anyway...")
 
             # 3. INQUIRY pages (two-step: get length, then full data)
@@ -2434,18 +2517,28 @@ class CoolscanProtocol:
             traceback.print_exc()
             return False
 
-    def perform_scan_sequence(self, params: ScanParameters) -> bool:
-        """Perform complete scan sequence like SANE backend."""
+    def perform_scan_sequence(self, params: ScanParameters, timeout: int = 300) -> bool:
+        """Perform complete scan sequence like SANE backend.
+
+        Args:
+            params: Scan parameters.
+            timeout: Total timeout budget in seconds for entire scan sequence.
+        """
         print("Performing complete scan sequence...")
+        deadline = time.time() + timeout
 
         try:
             # 1. Wait for scanner ready
-            if not self.scanner_ready(timeout=10):
+            if not self.scanner_ready(timeout=min(10, max(1, timeout - 5))):
                 print("Scanner not ready")
                 return False
 
             if not self._check_scanner_alive():
                 print("❌ Scanner became unresponsive")
+                return False
+
+            if time.time() >= deadline:
+                print("❌ Scan timeout: scanner_ready exceeded budget")
                 return False
 
             # 2. Reserve unit
@@ -2460,7 +2553,23 @@ class CoolscanProtocol:
                 print("❌ Scanner became unresponsive")
                 return False
 
-            # 4. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
+            if time.time() >= deadline:
+                print("❌ Scan timeout: reserve/capacity exceeded budget")
+                return False
+
+            # 4. Read per-channel state (golden fixture lines 236-250)
+            # READ datatype 0x8c for each RGB channel before SET_WINDOW.
+            # Unknown datatype (not in SANE scsidef.h), but present in golden
+            # fixture and may configure per-channel state needed for full scan.
+            for chan in [1, 2, 3]:
+                self.read_channel_state(chan)
+
+            # 4b. TUR × 3 (golden fixture lines 251-262)
+            # Three consecutive TEST_UNIT_READY polls before SET_WINDOW.
+            for _ in range(3):
+                self.test_unit_ready()
+
+            # 5. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
             # SET_WINDOW(0x24) + 58-byte WDB for each color channel.
             # MODE_SELECT was already sent during initialization.
             for win_id in [1, 2, 3]:
@@ -2480,23 +2589,20 @@ class CoolscanProtocol:
                 if self.verbose:
                     print("  ⚠️  Exposure read skipped (not available in this context)")
 
-            # 4c. Set scan boundary (SANE coolscan3.c:2898-2936, cs3_set_boundary)
-            # Tells scanner the scan area and frame count.
-            # Without this the scanner may stay in PROCESSING indefinitely.
-            if not self.set_boundary(params):
-                print("Failed to set scan boundary")
-                return False
-
             if not self._check_scanner_alive():
                 print("❌ Scanner became unresponsive")
                 return False
 
-            # 5. Send proper identity LUTs per channel (size from maxbits)
-            if not self.upload_identity_luts():
-                print("Failed to upload LUTs")
+            if time.time() >= deadline:
+                print("❌ Scan timeout: setup exceeded budget")
                 return False
 
-            # 6. Start scan
+            # 5. Send proper identity LUTs per channel (size from maxbits)
+            # Fire-and-forget like SANE: cs3_send_lut() is unchecked in cs3_scan().
+            if not self.upload_identity_luts():
+                print("  ⚠️  Failed to upload LUTs, continuing anyway")
+
+            # 6. Start scan (golden fixture shows 3 attempts with status reads between)
             if not self.start_scan():
                 print("Failed to start scan")
                 return False
@@ -2504,7 +2610,11 @@ class CoolscanProtocol:
             # 7. Poll until scanner is ready (no TEST_UNIT_READY after start_scan!)
             # USB capture shows direct PROCESSING->READY polling, not TUR.
             # Sending TUR after START_SCAN causes scanner to reject with ASCQ=1.
-            if not self.poll_until_ready(timeout=120, poll_interval=0.5):
+            remaining = max(1, int(deadline - time.time()))
+            if remaining <= 0:
+                print("❌ Scan timeout: start_scan exceeded budget")
+                return False
+            if not self.poll_until_ready(timeout=remaining, poll_interval=0.5):
                 print("Scanner did not become ready after scan start")
                 return False
 

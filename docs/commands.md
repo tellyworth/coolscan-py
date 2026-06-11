@@ -190,6 +190,25 @@ Command: 2a 00 88 00 00 03 [length] 00
 Data: Boundary data (variable length)
 Response: Status (8 bytes)
 ```
+**Note:** The SANE coolscan3 backend uses datatype 0x88 (IMAGE_POSITIONS) for set_boundary,
+but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST (sense key 5, ASC=0x26). The golden
+fixture shows the LS-40 ED uses two different commands instead:
+- **Prescan:** `2a009200000300000400` (0x92 BORDER_POSITION, 4-byte payload) — golden fixture line 203
+- **Full scan:** `2a008f00000300003400` (0x8f CONTROL_FRAME, 52-byte payload) — golden fixture line 427
+
+### SANE Silent Failure Analysis (0x88)
+
+Cross-referencing SANE source (`backends-1.4.0/backend/coolscan3.c` lines 2898-2936,
+`coolscan2.c` lines 2752-2803) confirms SANE uses `2a 00 88 00 00 03` for `set_boundary`
+across **all** coolscan models with no per-model differentiation. SANE's error handling
+(`cs3_parse_sense_data()` at line 2045) maps sense key 0x05 (ILLEGAL REQUEST) to
+`SANE_STATUS_IO_ERROR`, which would abort the scan at line 3106. This indicates SANE
+either **never successfully tested** `set_boundary` on the LS-40 ED, or experienced
+silent failures that went unreported. Datatypes 0x92 and 0x8f are not defined anywhere
+in SANE's `coolscan-scsidef.h` — SANE only defines `R_image_positions = 0x88` (line 638).
+The discrepancy likely stems from SANE reverse-engineering the protocol from a different
+scanner model (possibly LS-20 via coolscan2, or LS-50/LS-5000) and generalizing across
+all coolscan3 variants without per-model validation.
 
 ### Download LUT (0x2a, subcode 0x03)
 **Purpose**: Download lookup table for color correction

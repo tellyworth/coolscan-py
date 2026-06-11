@@ -118,6 +118,18 @@
 - Check if SANE handles Overflow errors differently
 - Verify if phase check is always done before data read (or if it's skipped for READ commands)
 
+## SANE Silent Failure: set_boundary (0x88)
+
+Cross-referencing SANE source (`backends-1.4.0/backend/coolscan3.c:2898-2936`) reveals
+SANE uses `2a 00 88 00 00 03` (datatype 0x88 IMAGE_POSITIONS) for `set_boundary` across
+**all** coolscan3 models, including LS-40 ED. SANE's error handling (`cs3_parse_sense_data()`
+line 2045) maps sense key 0x05 (ILLEGAL REQUEST) to `SANE_STATUS_IO_ERROR`, which would
+abort the scan at line 3106. The LS-40 ED rejects 0x88 with sense key 5/ASC=0x26, meaning
+SANE should fail on this model. Datatypes 0x92 (BORDER_POSITION) and 0x8f (CONTROL_FRAME),
+observed in golden USB captures, are **not defined** in SANE's `coolscan-scsidef.h`. This
+strongly suggests SANE's coolscan3 backend was never successfully tested on the LS-40 ED,
+or failures went unreported.
+
 ## Next Steps
 
 1. ✅ Extract and log the full status response from START_SCAN - **DONE**
