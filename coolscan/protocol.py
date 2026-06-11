@@ -706,6 +706,18 @@ class CoolscanProtocol:
         except Exception as e:
             self._replay_reraise_if_needed(e)
             self._on_usb_error(e)
+            # Auto clear-halt on bulk-in endpoint after failed read (SANE: sanei_usb.c:3492)
+            # Prevents cascading failures from stalled endpoints
+            try:
+                if (
+                    hasattr(self, "usb_device")
+                    and self.usb_device
+                    and hasattr(self, "bulk_in")
+                    and self.bulk_in
+                ):
+                    self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
+            except Exception:
+                pass
             # Log failed reads for debugging
             if self._usb_capture_log and self._usb_capture_start_time is not None:
                 try:
@@ -720,16 +732,33 @@ class CoolscanProtocol:
             print(f"    ❌ Read error: {e}")
             raise
 
-    def wait_scanner(self, max_attempts: int = 10, delay: float = 0.5) -> bool:
+    def wait_scanner(
+        self,
+        max_hard_errors: int = 3,
+        timeout: float = 60.0,
+        delay: float = 1.0,
+        acceptable_statuses: tuple = (StatusType.READY, StatusType.NO_DOCS),
+    ) -> bool:
         """
-        Wait for scanner to be ready - based on SANE backend wait_scanner().
+        Wait for scanner to be ready - based on SANE backend cs3_scanner_ready().
+
+        SANE uses two-tier retry: 3 hard-error retries + 120s soft timeout with 1s
+        delays. We use 3 hard errors + 60s soft timeout.
+
+        Args:
+            max_hard_errors: Max consecutive USB/IO errors before giving up.
+            timeout: Total timeout budget in seconds for scanner-busy states.
+            delay: Delay between polling attempts (SANE uses 1s).
+            acceptable_statuses: Tuple of status types that count as "ready".
         """
-        # Use shorter timeout for wait_scanner to fail faster
         original_timeout = self.usb_device.default_timeout
-        self.usb_device.default_timeout = 2000  # 2 seconds instead of 30
+        self.usb_device.default_timeout = 2000
 
         try:
-            for attempt in range(max_attempts):
+            hard_errors = 0
+            deadline = time.time() + timeout
+
+            while time.time() < deadline:
                 try:
                     cmd = self._build_6byte_command(0x00, control=0x00)
                     self._usb_write_bulk(cmd)
@@ -741,6 +770,12 @@ class CoolscanProtocol:
                             phase_response = phase_response.tobytes()
                     except Exception as e:
                         self._replay_reraise_if_needed(e)
+                        hard_errors += 1
+                        if hard_errors >= max_hard_errors:
+                            print(
+                                f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
+                            )
+                            return False
                         time.sleep(delay)
                         continue
 
@@ -750,19 +785,24 @@ class CoolscanProtocol:
 
                     if status_data and len(status_data) >= 8:
                         status, _ = self._parse_status(status_data)
-                        if status == StatusType.READY or status == StatusType.NO_DOCS:
+                        hard_errors = 0  # Reset on successful TUR
+                        if status in acceptable_statuses:
                             return True
 
                     time.sleep(delay)
                 except Exception as e:
                     self._replay_reraise_if_needed(e)
+                    hard_errors += 1
+                    if hard_errors >= max_hard_errors:
+                        print(
+                            f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
+                        )
+                        return False
                     time.sleep(delay)
-                    continue
 
-            print(f"  ⚠️  Scanner not ready after {max_attempts} attempts")
+            print(f"  ⚠️  Scanner not ready after {timeout:.0f}s")
             return False
         finally:
-            # Restore original timeout
             self.usb_device.default_timeout = original_timeout
 
     def _check_phase_with_retry(self, max_retries: int = 3) -> PhaseType:
@@ -807,7 +847,9 @@ class CoolscanProtocol:
             elif sense_asc == 0x3A and sense_ascq == 0x00:
                 status = StatusType.NO_DOCS  # No document
             else:
-                status = StatusType.ERROR
+                # SANE coolscan.c:191-195 returns GOOD for unknown NOT-READY ASC/ASCQ
+                # Tolerate firmware quirks: scanner is busy with something unexpected
+                status = StatusType.PROCESSING
         elif sense_key == 0x03:
             # Medium error
             status = StatusType.ERROR
@@ -980,6 +1022,14 @@ class CoolscanProtocol:
 
             # data_in already initialized at start of function
 
+            # SANE cs3_issue_cmd:2298-2304: status_only pattern
+            # When unexpected phase + no data expected, continue to status read
+            if phase_byte not in (0x02, 0x03, 0x04) and data_in_length == 0:
+                pass  # Graceful: skip data phase, proceed to status read
+            elif phase_byte not in (0x02, 0x03, 0x04):
+                print(f"    ⚠️  Unexpected phase 0x{phase_byte:02x} with data expected")
+                return b"", StatusType.ERROR
+
             # Send data if phase is Data OUT (0x02)
             if phase_byte == 0x02 and len(data_out) > 0:
                 try:
@@ -1109,8 +1159,7 @@ class CoolscanProtocol:
 
         This is a simpler wrapper - for proper wake-up sequence, use wait_scanner().
         """
-        max_attempts = int(timeout / 0.5)  # Number of attempts based on timeout
-        return self.wait_scanner(max_attempts=max_attempts, delay=0.5)
+        return self.wait_scanner(timeout=float(timeout), delay=1.0)
 
     def test_unit_ready(self) -> bool:
         """
@@ -1655,11 +1704,12 @@ class CoolscanProtocol:
         """Start a scan operation.
 
         SANE: coolscan3.c:3137-3151 — re-issues command on REISSUE status.
+        Golden fixture: 3 attempts with READ 0x87 status/progress between retries.
         """
         cmd = self._build_6byte_command(0x1B, alloc_length=0x03, control=0x00)
         scan_data = bytes([0x01, 0x02, 0x03])  # R, G, B channels
 
-        max_attempts = 2 if scan_type == ScanType.NORMAL else 1
+        max_attempts = 3 if scan_type == ScanType.NORMAL else 1
         for attempt in range(max_attempts):
             data, status = self._issue_command(cmd, data_out=scan_data)
 
@@ -1679,7 +1729,14 @@ class CoolscanProtocol:
                 return True
             elif status == StatusType.REISSUE:
                 if attempt < max_attempts - 1:
-                    print(f"  ⚠️  REISSUE — re-issuing START_SCAN (attempt {attempt + 2})")
+                    print(f"  ⚠️  REISSUE — reading status/progress before retry")
+                    # Golden fixture: READ datatype 0x87 (6 bytes) + (33 bytes) between retries
+                    try:
+                        self.read_scan_data(6, DataType.STATUS_PROGRESS)
+                        self.read_scan_data(33, DataType.STATUS_PROGRESS)
+                    except Exception:
+                        pass  # Non-critical: scanner will continue anyway
+                    print(f"  ⚠️  Re-issuing START_SCAN (attempt {attempt + 2})")
                     continue
                 print(f"  ❌ REISSUE after {max_attempts} attempts")
                 return False
@@ -2074,7 +2131,7 @@ class CoolscanProtocol:
             self.reset_scanner()
             # Wait a bit for scanner to recover
             time.sleep(0.5)
-            if not self.wait_scanner(max_attempts=5, delay=0.2):
+            if not self.wait_scanner(timeout=5.0, delay=0.5):
                 print("  ❌ Scanner not responsive after reset")
                 return False
 
@@ -2339,7 +2396,7 @@ class CoolscanProtocol:
 
             # 2. Wait for scanner ready (multiple TEST_UNIT_READY)
             print("\n2. Waiting for scanner ready...")
-            if not self.wait_scanner(max_attempts=10, delay=0.5):
+            if not self.wait_scanner(timeout=10.0, delay=0.5):
                 print("  ⚠️  Scanner not ready, continuing anyway...")
 
             # 3. INQUIRY pages (two-step: get length, then full data)
@@ -2474,13 +2531,6 @@ class CoolscanProtocol:
                 if self.verbose:
                     print("  ⚠️  Exposure read skipped (not available in this context)")
 
-            # 4c. Set scan boundary (SANE coolscan3.c:2898-2936, cs3_set_boundary)
-            # Tells scanner the scan area and frame count.
-            # Without this the scanner may stay in PROCESSING indefinitely.
-            if not self.set_boundary(params):
-                print("Failed to set scan boundary")
-                return False
-
             if not self._check_scanner_alive():
                 print("❌ Scanner became unresponsive")
                 return False
@@ -2490,11 +2540,11 @@ class CoolscanProtocol:
                 return False
 
             # 5. Send proper identity LUTs per channel (size from maxbits)
+            # Fire-and-forget like SANE: cs3_send_lut() is unchecked in cs3_scan().
             if not self.upload_identity_luts():
-                print("Failed to upload LUTs")
-                return False
+                print("  ⚠️  Failed to upload LUTs, continuing anyway")
 
-            # 6. Start scan
+            # 6. Start scan (golden fixture shows 3 attempts with status reads between)
             if not self.start_scan():
                 print("Failed to start scan")
                 return False
