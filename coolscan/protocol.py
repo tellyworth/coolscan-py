@@ -2058,6 +2058,51 @@ class CoolscanProtocol:
 
         return exposure_values
 
+    def read_control_frame(self) -> Optional[bytes]:
+        """Read CONTROL_FRAME state (datatype 0x8f, 58 bytes).
+
+        Golden fixture lines 219-223: READ 0x8f immediately after prescan
+        completes, before any full scan setup. May transition scanner from
+        prescan mode to full-scan-ready state.
+
+        Command: 28008f00000300003a80  (reads 58 bytes)
+
+        Returns:
+            58-byte response, or None if failed
+        """
+        if self.verbose:
+            print("  Reading CONTROL_FRAME state...")
+
+        cmd = struct.pack(
+            "BBBBBBBBBB",
+            0x28,       # READ(10)
+            0x00,       # Reserved
+            0x8F,       # Datatype (CONTROL_FRAME)
+            0x00,       # Reserved
+            0x03,       # Fixed from golden fixture
+            0x00,       # Reserved
+            0x00,       # Reserved
+            0x3A,       # Length (58 bytes)
+            0x80,       # Control byte
+        )
+
+        try:
+            data, status = self._issue_command(cmd, data_in_length=58)
+            if status == StatusType.READY and len(data) == 58:
+                if self.verbose:
+                    print(f"    CONTROL_FRAME read OK: {data.hex()}")
+                return data
+            else:
+                print(
+                    f"    ⚠️  CONTROL_FRAME read failed: status={status}, "
+                    f"len={len(data) if data else 0}"
+                )
+                return None
+        except Exception as e:
+            self._replay_reraise_if_needed(e)
+            print(f"    ⚠️  Error reading CONTROL_FRAME: {e}")
+            return None
+
     def read_channel_state(self, channel: int) -> Optional[bytes]:
         """Read per-channel state (datatype 0x8c).
 
@@ -2518,7 +2563,18 @@ class CoolscanProtocol:
             return False
 
     def perform_scan_sequence(self, params: ScanParameters, timeout: int = 300) -> bool:
-        """Perform complete scan sequence like SANE backend.
+        """Perform complete scan sequence matching golden fixture.
+
+        Golden fixture (golden_single_bw.txt lines 219-343) sequence:
+          1. READ 0x8f (CONTROL_FRAME, 58 bytes) — post-prescan state read
+          2. TUR × 3
+          3. READ 0x8c × 3 (RGB channel state, 10 bytes each)
+          4. TUR × 3
+          5. SET_WINDOW × 3 at 96 DPI (prescan-type, not full-res)
+          6. TUR
+          7. LUT uploads × 3 (RGB)
+          8. START_SCAN (with REISSUE retries)
+          9. Poll until READY
 
         Args:
             params: Scan parameters.
@@ -2557,37 +2613,39 @@ class CoolscanProtocol:
                 print("❌ Scan timeout: reserve/capacity exceeded budget")
                 return False
 
-            # 4. Read per-channel state (golden fixture lines 236-250)
+            # 4. READ CONTROL_FRAME (golden fixture lines 219-223)
+            # Post-prescan state read. May transition scanner from prescan
+            # mode to full-scan-ready state.
+            self.read_control_frame()
+
+            # 5. TUR × 3 (golden fixture lines 224-235)
+            # Three TUR polls before READ 0x8c. Note: golden fixture shows
+            # timing gaps (2.6s, 4.6s, 7.4s) as scanner processes internally.
+            for _ in range(3):
+                self.test_unit_ready()
+
+            # 6. Read per-channel state (golden fixture lines 236-250)
             # READ datatype 0x8c for each RGB channel before SET_WINDOW.
-            # Unknown datatype (not in SANE scsidef.h), but present in golden
-            # fixture and may configure per-channel state needed for full scan.
             for chan in [1, 2, 3]:
                 self.read_channel_state(chan)
 
-            # 4b. TUR × 3 (golden fixture lines 251-262)
+            # 7. TUR × 3 (golden fixture lines 251-262)
             # Three consecutive TEST_UNIT_READY polls before SET_WINDOW.
             for _ in range(3):
                 self.test_unit_ready()
 
-            # 5. Set per-channel scan windows (SANE coolscan3.c:3117-3119)
-            # SET_WINDOW(0x24) + 58-byte WDB for each color channel.
-            # MODE_SELECT was already sent during initialization.
+            # 8. Set per-channel scan windows (golden fixture lines 263-277)
+            # Golden fixture uses prescan-type WDB (96 DPI, scan_kind=0x02)
+            # for the pre-full-scan SET_WINDOW, not full resolution.
             for win_id in [1, 2, 3]:
-                if not self.set_scan_window(win_id, scan_type="normal"):
+                if not self.set_scan_window(win_id, scan_type="prescan"):
                     print(f"Failed to set scan window {win_id}")
                     return False
             if self.verbose:
-                print("  ✅ Scan windows set (RGB)")
+                print("  ✅ Scan windows set (RGB, 96 DPI)")
 
-            # 4b. Get exposure values after set_window (SANE coolscan3.c:3121-3123)
-            # Validates scanner accepted exposure settings. Non-disruptive: skip on failure.
-            try:
-                exposure = self.get_exposure_values(colors=[1, 2, 3])
-                if exposure is None and self.verbose:
-                    print("  ⚠️  Could not read exposure values after set_window")
-            except Exception:
-                if self.verbose:
-                    print("  ⚠️  Exposure read skipped (not available in this context)")
+            # 9. TUR after SET_WINDOW (golden fixture lines 278-281)
+            self.test_unit_ready()
 
             if not self._check_scanner_alive():
                 print("❌ Scanner became unresponsive")
@@ -2597,19 +2655,18 @@ class CoolscanProtocol:
                 print("❌ Scan timeout: setup exceeded budget")
                 return False
 
-            # 5. Send proper identity LUTs per channel (size from maxbits)
+            # 10. Send proper identity LUTs per channel (golden fixture lines 282-296)
             # Fire-and-forget like SANE: cs3_send_lut() is unchecked in cs3_scan().
             if not self.upload_identity_luts():
                 print("  ⚠️  Failed to upload LUTs, continuing anyway")
 
-            # 6. Start scan (golden fixture shows 3 attempts with status reads between)
+            # 11. Start scan (golden fixture lines 297-331, 3 attempts with status reads)
             if not self.start_scan():
                 print("Failed to start scan")
                 return False
 
-            # 7. Poll until scanner is ready (no TEST_UNIT_READY after start_scan!)
-            # USB capture shows direct PROCESSING->READY polling, not TUR.
-            # Sending TUR after START_SCAN causes scanner to reject with ASCQ=1.
+            # 12. Poll until scanner is ready (golden fixture lines 332-343)
+            # Scanner returns PROCESSING (0x02020401) then READY (0x00000000).
             remaining = max(1, int(deadline - time.time()))
             if remaining <= 0:
                 print("❌ Scan timeout: start_scan exceeded budget")
