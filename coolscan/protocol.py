@@ -2079,6 +2079,7 @@ class CoolscanProtocol:
             0x00,       # Reserved
             0x8F,       # Datatype (CONTROL_FRAME)
             0x00,       # Reserved
+            0x00,       # Reserved
             0x03,       # Fixed from golden fixture
             0x00,       # Reserved
             0x00,       # Reserved
