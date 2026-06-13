@@ -2670,14 +2670,14 @@ class CoolscanProtocol:
                 self.test_unit_ready()
 
             # 8. Set per-channel scan windows (golden fixture lines 263-277)
-            # Golden fixture uses prescan-type WDB (96 DPI, scan_kind=0x02)
-            # for the pre-full-scan SET_WINDOW, not full resolution.
+            # Use normal-type WDB (2900 DPI) for actual full scan.
+            # Prescan WDBs (96 DPI) produce tiny calibration data, not film images.
             for win_id in [1, 2, 3]:
-                if not self.set_scan_window(win_id, scan_type="prescan"):
+                if not self.set_scan_window(win_id, scan_type="normal"):
                     print(f"Failed to set scan window {win_id}")
                     return False
             if self.verbose:
-                print("  ✅ Scan windows set (RGB, 96 DPI)")
+                print("  ✅ Scan windows set (RGB, 2900 DPI)")
 
             # 9. TUR after SET_WINDOW (golden fixture lines 278-281)
             self.test_unit_ready()
