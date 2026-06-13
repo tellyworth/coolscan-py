@@ -1044,6 +1044,7 @@ class CoolscanProtocol:
                     return b"", StatusType.ERROR
 
             # Read data if phase is Data IN (0x03)
+            short_read = False
             if phase_byte == 0x03 and remaining_data_length > 0:
                 try:
                     # If we already got some data from Overflow handling, prepend it
@@ -1053,6 +1054,14 @@ class CoolscanProtocol:
                         new_data = self._usb_read_bulk(remaining_data_length)
                         if hasattr(new_data, "tobytes"):
                             new_data = new_data.tobytes()
+                        # Check for short read (signals end of scan data)
+                        if len(new_data) < remaining_data_length:
+                            short_read = True
+                            if self.verbose:
+                                print(
+                                    f"    Short read: {len(new_data)} < {remaining_data_length} "
+                                    f"(end of data)"
+                                )
                         data_in = existing_data + new_data
                     else:
                         data_in = existing_data
@@ -1062,6 +1071,22 @@ class CoolscanProtocol:
                     # Keep existing data if we have it
                     if len(data_in) == 0:
                         data_in = b""
+
+            # After short read, scanner stalls endpoints. Clear halt on both
+            # endpoints (like SANE sanei_usb.c) to recover the device.
+            if short_read:
+                try:
+                    self.usb_device.clear_halt(self.bulk_out.bEndpointAddress)
+                except Exception:
+                    pass
+                try:
+                    self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
+                except Exception:
+                    pass
+                time.sleep(0.05)  # Brief settling delay after clear_halt
+                if self.verbose:
+                    print("    Short read completed, returning data")
+                return data_in, StatusType.READY
 
             # Read status (8 bytes) - always read status after command
             try:
@@ -1649,18 +1674,19 @@ class CoolscanProtocol:
             }
         else:
             # Full resolution scan (2900 DPI), scan_kind: 0x01
+            # WDB bytes from working batch scan capture (58 bytes each)
             wdb_data = {
                 1: bytes.fromhex(
-                    "000000000000003201000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff00009ce6"
+                    "000000000000003201000b540b54000000000000001e00000b36000010ec0000000508000000000000000000000000000000010202ff0001c91e"
                 ),
                 2: bytes.fromhex(
-                    "000000000000003202000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff0000f912"
+                    "000000000000003202000b540b54000000000000001e00000b36000010ec0000000508000000000000000000000000000000010202ff0001847e"
                 ),
                 3: bytes.fromhex(
-                    "000000000000003203000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff0000d77a"
+                    "000000000000003203000b540b54000000000000001e00000b36000010ec0000000508000000000000000000000000000000010202ff0000ac49"
                 ),
                 9: bytes.fromhex(
-                    "000000000000003209000b540b54000000000000000000000b36000010ec0000000208000000000000000000000000000081010202ff0002056c"
+                    "0000000000000032090001220122000000000000111c00000b36000010ec000000050c000000000000000000000000000080010202ff0001d1ae"
                 ),
             }
 
@@ -1796,6 +1822,15 @@ class CoolscanProtocol:
             if status == StatusType.READY:
                 if self.verbose:
                     print(f"Read {len(data)} bytes successfully")
+                return data
+            elif len(data) < length:
+                # Short read signals end of scan data. Return what we got
+                # even if status is not READY (scanner may have stalled endpoint).
+                if self.verbose:
+                    print(
+                        f"Short read ({len(data)} < {length}), "
+                        f"status={status.name} — end of scan data"
+                    )
                 return data
             else:
                 raise RuntimeError(f"Read scan data failed with status {status}")
@@ -2636,14 +2671,14 @@ class CoolscanProtocol:
                 self.test_unit_ready()
 
             # 8. Set per-channel scan windows (golden fixture lines 263-277)
-            # Golden fixture uses prescan-type WDB (96 DPI, scan_kind=0x02)
-            # for the pre-full-scan SET_WINDOW, not full resolution.
+            # Use normal-type WDB (2900 DPI) for actual full scan.
+            # Prescan WDBs (96 DPI) produce tiny calibration data, not film images.
             for win_id in [1, 2, 3]:
-                if not self.set_scan_window(win_id, scan_type="prescan"):
+                if not self.set_scan_window(win_id, scan_type="normal"):
                     print(f"Failed to set scan window {win_id}")
                     return False
             if self.verbose:
-                print("  ✅ Scan windows set (RGB, 96 DPI)")
+                print("  ✅ Scan windows set (RGB, 2900 DPI)")
 
             # 9. TUR after SET_WINDOW (golden fixture lines 278-281)
             self.test_unit_ready()

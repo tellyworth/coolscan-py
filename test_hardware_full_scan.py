@@ -94,38 +94,94 @@ def main():
         if scan_data:
             print(f"\n=== SAVING IMAGE ===")
             try:
+                import struct
                 import numpy as np
                 from PIL import Image
 
-                # Try RGB first (3 channels)
                 data_len = len(scan_data)
-                for channels, mode in [(3, "RGB"), (1, "L")]:
-                    if data_len % channels == 0:
-                        # Estimate dimensions: LS-40 ED at 2700 DPI
-                        # A typical 35mm frame is ~2592x3888 at 2700 DPI
-                        total_pixels = data_len // channels
-                        # Try common dimensions
-                        for w, h in [(2592, 3888), (3888, 2592), (2400, 3600)]:
-                            if w * h == total_pixels:
-                                arr = np.frombuffer(scan_data, dtype=np.uint8)
-                                arr = arr.reshape((h, w, channels))
-                                img = Image.fromarray(arr, mode)
-                                img.save(output_path)
-                                print(f"Saved {w}x{h} {mode} image to {output_path}")
-                                break
-                        else:
-                            continue
+                pixels_per_channel = data_len // 6  # RGB, 2 bytes/pixel
+
+                # Compute dimensions from WDB parameters
+                # Normal WDB: size_x=2870, size_y=4332, resolution=2900 DPI
+                # pitch = resx_max / resolution = 4332 / 2900
+                # width = size_x / pitch, height = size_y / pitch
+                resx_max = 4332
+                scan_resolution = 2900
+                size_x = 2870
+                size_y = 4332
+                pitch = resx_max / scan_resolution
+                width = int(size_x / pitch)
+                height = int(size_y / pitch)
+                expected_pixels = width * height
+
+                print(f"  Computed dimensions: {width}x{height} "
+                      f"(pitch={pitch:.4f}, expected={expected_pixels} pixels/ch)")
+                print(f"  Actual pixels/ch: {pixels_per_channel}")
+
+                # If dimensions don't match, try to derive from data
+                if pixels_per_channel != expected_pixels:
+                    print(f"  Dimension mismatch! Trying factorization...")
+                    # Find best factor pair close to 35mm film AR (1.5)
+                    best_w, best_h = None, None
+                    best_diff = float('inf')
+                    for w in range(100, min(3000, int(pixels_per_channel**0.5) + 100)):
+                        if pixels_per_channel % w == 0:
+                            h = pixels_per_channel // w
+                            ar = max(w, h) / min(w, h)
+                            diff = abs(ar - 1.5)
+                            if diff < best_diff and 1.2 <= ar <= 2.0:
+                                best_diff = diff
+                                best_w, best_h = w, h
+                    if best_w and best_h:
+                        width, height = best_w, best_h
+                        print(f"  Using factorized dimensions: {width}x{height}")
+
+                # Parse BE uint16, 12-bit (shift 4), RGB plane-interleaved per line
+                bytes_per_line = 6 * width
+                img_r = np.zeros((height, width), dtype=np.uint16)
+                img_g = np.zeros((height, width), dtype=np.uint16)
+                img_b = np.zeros((height, width), dtype=np.uint16)
+
+                offset = 0
+                for y in range(height):
+                    line_data = scan_data[offset:offset + bytes_per_line]
+                    if len(line_data) < bytes_per_line:
+                        print(f"  Short line at y={y}, stopping")
+                        height = y
                         break
-                    else:
-                        continue
+                    offset += bytes_per_line
+                    for x in range(width):
+                        img_r[y, x] = struct.unpack_from('>H', line_data, 2 * x)[0] >> 4
+                        img_g[y, x] = struct.unpack_from('>H', line_data, 2*width + 2*x)[0] >> 4
+                        img_b[y, x] = struct.unpack_from('>H', line_data, 4*width + 2*x)[0] >> 4
+
+                # Grayscale with SANE weights
+                gray12 = (0.27 * img_r.astype(np.float32) +
+                          0.54 * img_g.astype(np.float32) +
+                          0.19 * img_b.astype(np.float32))
+
+                # Contrast stretch using percentiles (film negatives need this)
+                nz = gray12[gray12 > 5]
+                if len(nz) > 10:
+                    p1, p99 = np.percentile(nz, 1), np.percentile(nz, 99)
+                    gray8 = np.clip((gray12 - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
                 else:
-                    # Can't decode as image, save raw
-                    with open(output_path.replace(".png", ".raw"), "wb") as f:
-                        f.write(scan_data)
-                    print(f"Saved raw data to {output_path.replace('.png', '.raw')}")
+                    gray8 = (gray12 / 4095 * 255).astype(np.uint8)
+
+                img = Image.fromarray(gray8)
+                img.save(output_path)
+                print(f"Saved {width}x{height} grayscale image to {output_path}")
+
+                # Also save raw data for further analysis
+                raw_path = output_path.replace(".png", ".raw")
+                with open(raw_path, "wb") as f:
+                    f.write(scan_data)
+                print(f"Saved raw data ({data_len} bytes) to {raw_path}")
 
             except Exception as img_err:
                 print(f"Image save failed: {img_err}")
+                import traceback
+                traceback.print_exc()
                 # Save raw data as fallback
                 raw_path = output_path.replace(".png", ".raw")
                 with open(raw_path, "wb") as f:
