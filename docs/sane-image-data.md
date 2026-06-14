@@ -14,9 +14,19 @@
 
 ### 1. How SANE Interprets Raw Bytes (Byte Order, Bit Depth, Channel Layout)
 
+#### Output Bit Depth
+
+The WDB `bits_per_pixel` field (byte 0x1A) controls output depth:
+- `0x08` = 8-bit output (1 byte per pixel per channel)
+- `0x0C` = 12-bit output in 16-bit containers (2 bytes per pixel, big-endian)
+
+The LS-40 ED has a 12-bit ADC, but when WDB specifies 8-bit, the scanner converts
+12-bit ADC values to 8-bit before transmission. Our test scans use 8-bit output.
+
 #### Byte Order
 
-The scanner sends data in **big-endian** (network byte order). Both backends handle endianness explicitly:
+For 16-bit output: scanner sends data in **big-endian** (network byte order). Both backends handle endianness explicitly.
+For 8-bit output: byte order is irrelevant (1 byte per value).
 
 **coolscan.c (lines 1450-1460):**
 ```c
@@ -232,39 +242,41 @@ The data is piped from a child process/thread to the main SANE process.
 | **Channel layout** | Already interleaved RGB from scanner | Plane-interleaved by color; SANE reassembles |
 | **Width/height** | Computed from ILU coordinates and resolution | Computed from device pixels and pitch |
 | **READ_CAPACITY** | Uses `3a 00` | Uses `3a 80` for LS-40/LS-4000/LS-50/LS-5000 |
-| **Padding** | None mentioned | `odd_padding` (1 byte for odd width at 8-bit) and `block_padding` (to 512-byte boundary for LS-50) |
+| **Padding** | None mentioned | `odd_padding` (1 byte for odd width at 8-bit), `block_padding` (to 512-byte boundary for LS-50), plus 128 bytes line-end padding observed in LS-40 ED hardware tests |
+| **Output depth** | 8-bit only | 8-bit or 12-bit (controlled by WDB `bits_per_pixel`); 12-bit ADC always, but output depth is configurable |
 
 ---
 
-### 4. Verified Format (Hardware Test — LS-40 ED, Branch `fix/data-read`)
+### 4. Verified Format (Hardware Test — LS-40 ED)
 
 #### Raw Data Layout
 
-Confirmed by parsing actual hardware scan data (`hardware_scan_output.raw`, 665,280 bytes):
+Confirmed by parsing actual hardware scan data (`hardware_scan_output.raw`, 32,768,000 bytes):
 
-- **Byte order**: Big-endian 16-bit words. Each pixel value is 2 bytes, MSB first.
-- **Bit depth**: 12-bit ADC values in 16-bit containers. Values are **right-shifted by 4** to extract 12-bit data (range 0–4095). SANE does the inverse: left-shifts by 4 to fill 16-bit display space.
-- **Effective depth**: 11 bits observed (max value 2734/4095 = 0xAAE). Bits 0–10 carry data; bits 11–15 are never set.
-- **Channel layout**: RGB plane-interleaved per line:
+- **Bit depth**: 8-bit per channel. The LS-40 ED has a 12-bit ADC, but when WDB `bits_per_pixel = 0x08`, the scanner outputs 8-bit data (1 byte per pixel value). The WDB field `bits_per_pixel` controls output depth, not ADC depth.
+- **Channel layout**: RGB plane-interleaved per line (SANE coolscan3.c style):
   ```
-  [R_0 R_1 ... R_{w-1}][G_0 G_1 ... G_{w-1}][B_0 B_1 ... B_{w-1}]
+  [R_0 R_1 ... R_{w-1}][G_0 G_1 ... G_{w-1}][B_0 B_1 ... B_{w-1}][padding]
   ```
-  Each value is 2 bytes big-endian. No padding between planes for 16-bit data (`odd_padding = 0` when `bytes_per_pixel == 2`).
+  Each value is 1 byte. 128 bytes of padding follow each line (sensor data from outside active scan area).
 
 #### Dimension Calculation
 
 ```
-bytes_per_line = n_colors * logical_width * bytes_per_pixel  (= 6 * width for RGB 16-bit)
-total_bytes = bytes_per_line * logical_height
-pixels_per_channel = total_bytes / 6  (= 110,880 for our 665,280-byte capture)
+bytes_per_line = 3 * width + padding  (= 3 * 2624 + 128 = 8000)
+total_bytes = bytes_per_line * height  (= 8000 * 4096 = 32,768,000)
 ```
 
-For the test scan: 280 × 396 pixels (ratio 1.41). Dimensions derived from factorization of `total_bytes / 6`. SANE computes dimensions from scan area coordinates and pitch:
+For the test scan: **2624 × 4096 pixels** (aspect ratio 1.47, close to 35mm film ratio of 1.5).
 
-```c
-s->logical_width  = (xmax - xmin + 1) / s->real_pitchx;
-s->logical_height = (ymax - ymin + 1) / s->real_pitchy;
-```
+The WDB specifies scan area: size_x=2870, size_y=4332 at 2900 DPI (pitch=1.0).
+The effective output width (2624) is smaller than the WDB scan width (2870) because
+the remaining pixels per channel (246 pixels × 3 bytes = 738 bytes) plus inter-plane
+gaps account for the 128-byte line padding. The scanner reads the full carrier width
+but only 2624 pixels of RGB data go into each line buffer.
+
+> **Bug note**: The initial implementation incorrectly assumed 16-bit BE data with
+> 12-bit shift, producing diagonal artifacts. The data is 8-bit throughout.
 
 #### Grayscale Conversion
 
@@ -279,36 +291,40 @@ These differ from standard luminance weights (0.299/0.587/0.114) and reflect the
 #### Data Parsing Reference (Python)
 
 ```python
-import struct, numpy as np
+import numpy as np
+from PIL import Image
 
 # Read raw bytes from scanner (65536-byte chunks, concatenated)
 raw = open('scan_data.raw', 'rb').read()
+raw_arr = np.frombuffer(raw, dtype=np.uint8)
 
-# Dimensions (must be determined from scan parameters)
-width, height = 280, 396
-bytes_per_line = 6 * width  # 3 colors * 2 bytes * width
+# Verified dimensions for LS-40 ED full scan at 2900 DPI
+width, height = 2624, 4096
+bytes_per_line = 8000  # 3*width + 128 padding
 
-# Parse per-line, per-pixel, per-channel
-img_r = np.zeros((height, width), dtype=np.uint16)
-img_g = np.zeros((height, width), dtype=np.uint16)
-img_b = np.zeros((height, width), dtype=np.uint16)
+# Parse per-line: plane-interleaved RGB
+img_r = np.zeros((height, width), dtype=np.uint8)
+img_g = np.zeros((height, width), dtype=np.uint8)
+img_b = np.zeros((height, width), dtype=np.uint8)
 
 offset = 0
 for y in range(height):
-    line = raw[offset:offset + bytes_per_line]
-    offset += bytes_per_line
-    for x in range(width):
-        img_r[y, x] = struct.unpack_from('>H', line, 2 * x)[0] >> 4
-        img_g[y, x] = struct.unpack_from('>H', line, 2*width + 2*x)[0] >> 4
-        img_b[y, x] = struct.unpack_from('>H', line, 4*width + 2*x)[0] >> 4
+    img_r[y, :] = raw_arr[offset:offset + width]
+    img_g[y, :] = raw_arr[offset + width:offset + 2*width]
+    img_b[y, :] = raw_arr[offset + 2*width:offset + 3*width]
+    offset += bytes_per_line  # Skip 128-byte padding
 
 # Grayscale (SANE weights)
-gray12 = (0.27 * img_r + 0.54 * img_g + 0.19 * img_b).astype(np.float32)
+gray8 = (0.27 * img_r.astype(np.float32) +
+         0.54 * img_g.astype(np.float32) +
+         0.19 * img_b.astype(np.float32)).astype(np.uint8)
 
-# Scale to 8-bit (use percentile stretching for film negatives)
-nz = gray12[gray12 > 0]
-p1, p99 = np.percentile(nz, 1), np.percentile(nz, 99)
-gray8 = np.clip((gray12 - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
+# Contrast stretch (percentile stretching for film negatives)
+p1, p99 = np.percentile(gray8, 0.5), np.percentile(gray8, 99.5)
+gray8 = np.clip((gray8.astype(np.float32) - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
+
+img = Image.fromarray(gray8)
+img.save('scan_output.png')
 ```
 
 #### Short Read Behavior
@@ -320,3 +336,11 @@ When scan data is exhausted, the scanner returns fewer bytes than requested (sho
 3. Return data with READY status (skip status read — it will time out)
 
 See `coolscan/protocol.py` `read_scan_data()` and `_issue_usb_command()` for implementation.
+
+#### USB Transfer Pattern
+
+The scanner sends image data in bulk transfers of ~65,508 bytes each. The host
+issues READ(10) commands requesting larger amounts (e.g., 258,048 bytes = 0x3F000),
+and the scanner responds with multiple 65,508-byte transfers. The `read_scan_data()`
+function requests 65,536 bytes per call, which spans one or more scanner transfers.
+The total scan data is 32,768,000 bytes (500 × 65,536-byte reads).

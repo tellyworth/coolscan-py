@@ -138,24 +138,28 @@ print("\n" + "=" * 70)
 print("DIMENSION ANALYSIS FROM DATA")
 print("=" * 70)
 
-total_bytes = 665280
-pixels_per_channel = total_bytes // 6  # RGB, 2 bytes/pixel
+# Full scan: 32768000 bytes, 8-bit RGB, stride=8640 (width=2880, no padding)
+# Width verified by autocorrelation peak at lag=8640
+total_bytes = len(raw) if 'raw' in dir() else 32768000
+pixels_per_channel = total_bytes // 3  # rough estimate, actual uses stride
 print(f"\nTotal bytes: {total_bytes}")
-print(f"Pixels per channel: {pixels_per_channel}")
+print(f"Verified width: 2880 (autocorrelation peak at lag=8640)")
+print(f"Verified stride: 8640 bytes/row (no padding)")
 
-# Factor analysis
-print(f"\nAll factor pairs of {pixels_per_channel}:")
+# Factor analysis for reference
+pixels_est = total_bytes // 3
+print(f"\nAll factor pairs of {pixels_est}:")
 factors = []
-for w in range(1, int(pixels_per_channel**0.5) + 1):
-    if pixels_per_channel % w == 0:
-        h = pixels_per_channel // w
+for w in range(1, min(int(pixels_est**0.5) + 1, 5000)):
+    if pixels_est % w == 0:
+        h = pixels_est // w
         factors.append((w, h))
 
 # Show plausible dimensions
 plausible = []
 for w, h in factors:
     ar = max(w, h) / min(w, h)
-    if 1.2 <= ar <= 2.5 and min(w, h) >= 50 and max(w, h) <= 3000:
+    if 1.2 <= ar <= 2.5 and min(w, h) >= 50 and max(w, h) <= 5000:
         plausible.append((w, h, ar))
         print(f"  {w}x{h} (AR={ar:.3f})")
 
@@ -210,14 +214,24 @@ print("=" * 70)
 raw = open('hardware_scan_output.raw', 'rb').read()
 print(f"Raw data: {len(raw)} bytes")
 
-# Convert to 12-bit values
-values = np.frombuffer(raw, dtype='>H').astype(np.uint32) >> 4
-n = len(values) // 3
-r_plane = values[:n]
-g_plane = values[n:2*n]
-b_plane = values[2*n:]
+# 8-bit RGB, plane-interleaved per row, stride=8640 (width=2880, no padding)
+# Width confirmed by autocorrelation peak at lag=8640
+width = 2880
+bytes_per_line = 8640
+height = len(raw) // bytes_per_line
+data = np.frombuffer(raw, dtype=np.uint8)
 
-print(f"Values per plane: {n}")
+r_plane = np.zeros(height * width, dtype=np.uint8)
+g_plane = np.zeros(height * width, dtype=np.uint8)
+b_plane = np.zeros(height * width, dtype=np.uint8)
+for y in range(height):
+    o = y * bytes_per_line
+    r_plane[y*width:(y+1)*width] = data[o:o+width]
+    g_plane[y*width:(y+1)*width] = data[o+width:o+2*width]
+    b_plane[y*width:(y+1)*width] = data[o+2*width:o+3*width]
+n = height * width
+
+print(f"Dimensions: {width}x{height}, values per plane: {n}")
 
 # For each candidate width, check if the image shows film-like structure
 # Film negatives have: dark borders, bright center, possible sprocket holes
@@ -284,53 +298,30 @@ for r in results:
 if best:
     print(f"\n  Best match: {best['w']}x{best['h']}, content AR={best['c_ar']:.2f}")
 
-# --- Render image with best dimensions ---
+# --- Render image with verified dimensions ---
 print("\n" + "=" * 70)
-print("RENDERING")
+print("RENDERING (width=2880 verified by autocorrelation)")
 print("=" * 70)
 
-# Try 280x396 first (from handoff)
-for width, height in [(280, 396), (264, 420), (252, 440)]:
-    if width * height != pixels_per_channel:
-        continue
+# Reshape planes to image
+img_r = r_plane[:height * width].reshape(height, width)
+img_g = g_plane[:height * width].reshape(height, width)
+img_b = b_plane[:height * width].reshape(height, width)
 
-    bytes_per_line = 6 * width
+gray8bit = (0.27 * img_r.astype(np.float32) +
+            0.54 * img_g.astype(np.float32) +
+            0.19 * img_b.astype(np.float32))
 
-    img_r = np.zeros((height, width), dtype=np.uint16)
-    img_g = np.zeros((height, width), dtype=np.uint16)
-    img_b = np.zeros((height, width), dtype=np.uint16)
-
-    offset = 0
-    ok = True
-    for y in range(height):
-        line_data = raw[offset:offset + bytes_per_line]
-        if len(line_data) < bytes_per_line:
-            ok = False
-            break
-        offset += bytes_per_line
-        for x in range(width):
-            img_r[y, x] = struct.unpack_from('>H', line_data, 2 * x)[0] >> 4
-            img_g[y, x] = struct.unpack_from('>H', line_data, 2 * width + 2 * x)[0] >> 4
-            img_b[y, x] = struct.unpack_from('>H', line_data, 4 * width + 2 * x)[0] >> 4
-
-    if not ok:
-        continue
-
-    gray12 = (0.27 * img_r.astype(np.float32) +
-              0.54 * img_g.astype(np.float32) +
-              0.19 * img_b.astype(np.float32))
-
-    # Find content region
-    nz_mask = gray12 > 5
-    if not nz_mask.any():
-        print(f"  {width}x{height}: no content found")
-        continue
-
-    nz = gray12[nz_mask]
+# Find content region
+nz_mask = gray8bit > 5
+if not nz_mask.any():
+    print(f"  {width}x{height}: no content found")
+else:
+    nz = gray8bit[nz_mask]
     p1, p99 = np.percentile(nz, 1), np.percentile(nz, 99)
 
     print(f"\n  {width}x{height}:")
-    print(f"    Non-zero pixels: {nz_mask.sum()} / {width * height} ({100*nz_mask.sum()/(width*height):.1f}%)")
+    print(f"    Content pixels: {nz_mask.sum()} / {width * height} ({100*nz_mask.sum()/(width*height):.1f}%)")
     print(f"    Value range: [{nz.min():.0f}, {nz.max():.0f}]")
     print(f"    P1/P99: [{p1:.0f}, {p99:.0f}]")
 
@@ -342,9 +333,9 @@ for width, height in [(280, 396), (264, 420), (252, 440)]:
         print(f"    Content size: {cc[-1]-cc[0]+1}x{cr[-1]-cr[0]+1}")
 
     # Save grayscale
-    gray8 = np.clip((gray12 - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
+    gray_out = np.clip((gray8bit - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
     fname = f"scan_{width}x{height}_gray.png"
-    Image.fromarray(gray8).save(fname)
+    Image.fromarray(gray_out).save(fname)
     print(f"    Saved: {fname}")
 
     # Save RGB

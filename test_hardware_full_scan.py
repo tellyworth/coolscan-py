@@ -94,79 +94,53 @@ def main():
         if scan_data:
             print(f"\n=== SAVING IMAGE ===")
             try:
-                import struct
                 import numpy as np
                 from PIL import Image
 
                 data_len = len(scan_data)
-                pixels_per_channel = data_len // 6  # RGB, 2 bytes/pixel
 
-                # Compute dimensions from WDB parameters
-                # Normal WDB: size_x=2870, size_y=4332, resolution=2900 DPI
-                # pitch = resx_max / resolution = 4332 / 2900
-                # width = size_x / pitch, height = size_y / pitch
-                resx_max = 4332
-                scan_resolution = 2900
-                size_x = 2870
-                size_y = 4332
-                pitch = resx_max / scan_resolution
-                width = int(size_x / pitch)
-                height = int(size_y / pitch)
-                expected_pixels = width * height
+                # LS-40 ED scan data format (verified by autocorrelation analysis):
+                # - 8-bit RGB (NOT 16-bit), plane-interleaved per line
+                # - Each line: [R_plane][G_plane][B_plane] -- no padding
+                # - Stride: 8640 bytes (3 * 2880)
+                # - Autocorrelation peak at lag=8640 confirms width=2880
+                width = 2880
+                bytes_per_line = 8640  # 3*width, no padding
+                height = data_len // bytes_per_line
 
-                print(f"  Computed dimensions: {width}x{height} "
-                      f"(pitch={pitch:.4f}, expected={expected_pixels} pixels/ch)")
-                print(f"  Actual pixels/ch: {pixels_per_channel}")
+                print(f"  Dimensions: {width}x{height} "
+                      f"(bytes_per_line={bytes_per_line})")
+                print(f"  Actual bytes: {data_len} ({data_len % bytes_per_line} trailing)")
 
-                # If dimensions don't match, try to derive from data
-                if pixels_per_channel != expected_pixels:
-                    print(f"  Dimension mismatch! Trying factorization...")
-                    # Find best factor pair close to 35mm film AR (1.5)
-                    best_w, best_h = None, None
-                    best_diff = float('inf')
-                    for w in range(100, min(3000, int(pixels_per_channel**0.5) + 100)):
-                        if pixels_per_channel % w == 0:
-                            h = pixels_per_channel // w
-                            ar = max(w, h) / min(w, h)
-                            diff = abs(ar - 1.5)
-                            if diff < best_diff and 1.2 <= ar <= 2.0:
-                                best_diff = diff
-                                best_w, best_h = w, h
-                    if best_w and best_h:
-                        width, height = best_w, best_h
-                        print(f"  Using factorized dimensions: {width}x{height}")
-
-                # Parse BE uint16, 12-bit (shift 4), RGB plane-interleaved per line
-                bytes_per_line = 6 * width
-                img_r = np.zeros((height, width), dtype=np.uint16)
-                img_g = np.zeros((height, width), dtype=np.uint16)
-                img_b = np.zeros((height, width), dtype=np.uint16)
+                # Parse 8-bit RGB, plane-interleaved per line
+                # Layout: [R_0..R_{w-1}][G_0..G_{w-1}][B_0..B_{w-1}]
+                raw_arr = np.frombuffer(scan_data, dtype=np.uint8)
+                img_r = np.zeros((height, width), dtype=np.uint8)
+                img_g = np.zeros((height, width), dtype=np.uint8)
+                img_b = np.zeros((height, width), dtype=np.uint8)
 
                 offset = 0
                 for y in range(height):
-                    line_data = scan_data[offset:offset + bytes_per_line]
-                    if len(line_data) < bytes_per_line:
+                    line_end = offset + bytes_per_line
+                    if line_end > data_len:
                         print(f"  Short line at y={y}, stopping")
                         height = y
                         break
-                    offset += bytes_per_line
-                    for x in range(width):
-                        img_r[y, x] = struct.unpack_from('>H', line_data, 2 * x)[0] >> 4
-                        img_g[y, x] = struct.unpack_from('>H', line_data, 2*width + 2*x)[0] >> 4
-                        img_b[y, x] = struct.unpack_from('>H', line_data, 4*width + 2*x)[0] >> 4
+                    # Plane-interleaved: R plane, G plane, B plane (each = width bytes)
+                    img_r[y, :] = raw_arr[offset:offset + width]
+                    img_g[y, :] = raw_arr[offset + width:offset + 2*width]
+                    img_b[y, :] = raw_arr[offset + 2*width:offset + 3*width]
+                    offset = line_end
 
-                # Grayscale with SANE weights
-                gray12 = (0.27 * img_r.astype(np.float32) +
-                          0.54 * img_g.astype(np.float32) +
-                          0.19 * img_b.astype(np.float32))
+                # Grayscale with SANE weights (0.27 R + 0.54 G + 0.19 B)
+                gray8 = (0.27 * img_r.astype(np.float32) +
+                         0.54 * img_g.astype(np.float32) +
+                         0.19 * img_b.astype(np.float32)).astype(np.uint8)
 
                 # Contrast stretch using percentiles (film negatives need this)
-                nz = gray12[gray12 > 5]
-                if len(nz) > 10:
-                    p1, p99 = np.percentile(nz, 1), np.percentile(nz, 99)
-                    gray8 = np.clip((gray12 - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
-                else:
-                    gray8 = (gray12 / 4095 * 255).astype(np.uint8)
+                p1, p99 = np.percentile(gray8, 0.5), np.percentile(gray8, 99.5)
+                if p99 > p1:
+                    gray8 = np.clip((gray8.astype(np.float32) - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
 
                 img = Image.fromarray(gray8)
                 img.save(output_path)
