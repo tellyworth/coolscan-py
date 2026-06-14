@@ -99,28 +99,21 @@ def main():
 
                 data_len = len(scan_data)
 
-                # Verified format (hardware analysis of LS-40 ED scan data):
+                # LS-40 ED scan data format (verified by autocorrelation analysis):
                 # - 8-bit RGB (NOT 16-bit), plane-interleaved per line
-                # - Each line: [R_plane][G_plane][B_plane][128 bytes padding]
-                # - Line size: 8000 bytes (3*2624 + 128)
-                # - Dimensions: 2624 x 4096 pixels
-                # - Total: 8000 * 4096 = 32,768,000 bytes
-                width = 2624
-                height = 4096
-                bytes_per_line = 8000  # 3*width + 128 padding
-                expected_bytes = bytes_per_line * height
+                # - Each line: [R_plane][G_plane][B_plane] -- no padding
+                # - Stride: 8640 bytes (3 * 2880)
+                # - Autocorrelation peak at lag=8640 confirms width=2880
+                width = 2880
+                bytes_per_line = 8640  # 3*width, no padding
+                height = data_len // bytes_per_line
 
                 print(f"  Dimensions: {width}x{height} "
-                      f"(bytes_per_line={bytes_per_line}, expected={expected_bytes} bytes)")
-                print(f"  Actual bytes: {data_len}")
-
-                if data_len < expected_bytes:
-                    print(f"  Short data! Have {data_len}, need {expected_bytes}")
-                    height = data_len // bytes_per_line
-                    print(f"  Adjusted height: {height}")
+                      f"(bytes_per_line={bytes_per_line})")
+                print(f"  Actual bytes: {data_len} ({data_len % bytes_per_line} trailing)")
 
                 # Parse 8-bit RGB, plane-interleaved per line
-                # Layout: [R_0..R_{w-1}][G_0..G_{w-1}][B_0..B_{w-1}][padding]
+                # Layout: [R_0..R_{w-1}][G_0..G_{w-1}][B_0..B_{w-1}]
                 raw_arr = np.frombuffer(scan_data, dtype=np.uint8)
                 img_r = np.zeros((height, width), dtype=np.uint8)
                 img_g = np.zeros((height, width), dtype=np.uint8)

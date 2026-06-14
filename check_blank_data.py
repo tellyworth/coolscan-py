@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Check if scan data is blank and analyze data content."""
 
-import struct
 import numpy as np
 
 raw = open('hardware_scan_output.raw', 'rb').read()
-values = np.frombuffer(raw, dtype='>H').astype(np.uint32) >> 4
-n = len(values) // 3
+data = np.frombuffer(raw, dtype=np.uint8)
 
-r_plane = values[:n]
-g_plane = values[n:2*n]
-b_plane = values[2*n:]
+# 8-bit RGB, plane-interleaved per row, no padding
+# Width=2880 confirmed by autocorrelation peak at lag=8640
+width = 2880
+bytes_per_line = 8640  # 3 * width
+height = len(data) // bytes_per_line
+
+r_plane = np.concatenate([data[y*bytes_per_line:(y+1)*bytes_per_line] for y in range(height)])[:width * height]
+g_plane = np.concatenate([data[y*bytes_per_line+width:(y+1)*bytes_per_line+width] for y in range(height)])[:width * height]
+b_plane = np.concatenate([data[y*bytes_per_line+2*width:(y+1)*bytes_per_line+2*width] for y in range(height)])[:width * height]
+n = width * height
 
 print("=== DATA CONTENT ANALYSIS ===")
 print(f"Total values per plane: {n}")
@@ -23,16 +28,15 @@ print(f"\nR channel: { (r_plane == 0).sum() } zeros ({100*(r_plane==0).mean():.1
 print(f"G channel: { (g_plane == 0).sum() } zeros ({100*(g_plane==0).mean():.1f}%)")
 print(f"B channel: { (b_plane == 0).sum() } zeros ({100*(b_plane==0).mean():.1f}%)")
 
-# Check per-chunk content (64KB = 32768 uint16 = 16384 12-bit values)
-chunk_values = 65536 // 2  # 32768 values per 64KB chunk
+# Check per-chunk content (64KB chunks from USB transfer)
+chunk_bytes = 65536
+chunk_values = chunk_bytes  # 8-bit: one value per byte
 print(f"\n=== PER-CHUNK ANALYSIS ({chunk_values} values/chunk) ===")
-for i in range(min(12, len(values) // chunk_values)):
-    chunk = values[i*chunk_values:(i+1)*chunk_values]
-    # Determine which plane(s) this chunk covers
-    plane_r = (i * chunk_values) // n
-    print(f"  Chunk {i}: vals[{i*chunk_values}:{(i+1)*chunk_values}], "
-          f"plane_idx={plane_r}, range=[{chunk.min()},{chunk.max()}], "
-          f"mean={chunk.mean():.1f}, zeros={ (chunk==0).sum() }")
+for i in range(min(12, len(data) // chunk_values)):
+    chunk = data[i*chunk_values:(i+1)*chunk_values]
+    print(f"  Chunk {i}: bytes[{i*chunk_values}:{(i+1)*chunk_values}], "
+          f"range=[{chunk.min()},{chunk.max()}], "
+          f"mean={chunk.mean():.1f}, zeros={ (chunk==0).sum() }, ff={ (chunk==0xFF).sum() }")
 
 # Check if there's ANY meaningful signal (std > noise floor)
 gray = (0.27 * r_plane + 0.54 * g_plane + 0.19 * b_plane).astype(np.float32)
