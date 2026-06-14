@@ -132,7 +132,42 @@ e0 00 a0 00 00 00 00 00 0d 00 + focus coordinates (8 bytes)
 The scan mode (normal vs AE vs AE_WB) is encoded in the WDB itself (e.g. byte 50,
 "scan kind"), not in the opcode or final byte of the CDB.
 
-## Data Transfer
+## Image Data Format (LS-40 ED, Verified)
+
+### Raw Data Layout
+
+Full scan data from the LS-40 ED at 2900 DPI with 8-bit output:
+
+- **Bit depth**: 8-bit per channel (1 byte per pixel value)
+- **Pixel width**: 2880 pixels per row (verified by autocorrelation, peak at lag=8640)
+- **Row stride**: 8640 bytes (3 channels x 2880 pixels, **no padding**)
+- **Channel layout**: Plane-interleaved per row: `[R[2880]][G[2880]][B[2880]]`
+- **Total data**: 32,768,000 bytes (500 x 65,536-byte USB bulk reads)
+- **Complete rows**: 3792 (32,768,000 // 8640), with 5120 trailing bytes
+
+### Decoding Reference
+
+```python
+width = 2880
+bytes_per_line = 8640  # 3 * width, no padding
+height = len(raw_data) // bytes_per_line  # 3792
+
+for y in range(height):
+    offset = y * bytes_per_line
+    R_row = raw[offset:offset + width]
+    G_row = raw[offset + width:offset + 2*width]
+    B_row = raw[offset + 2*width:offset + 3*width]
+```
+
+### Common Bugs
+
+- **Wrong width** (e.g. 2624 instead of 2880): produces diagonal smear from channel
+  plane misalignment. Each row shifts by the width difference.
+- **Wrong bit depth** (e.g. 12-bit instead of 8-bit): produces vertical striping
+  from incorrect bit unpacking. Channel statistics become inconsistent.
+- **Assumed padding** (e.g. 128 bytes per row): the LS-40 ED at 8-bit has no per-row
+  padding. The 0xFF values in the data are actual sensor values (unexposed film areas),
+  not padding bytes.
 
 ### Read Operations
 ```c

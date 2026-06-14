@@ -205,6 +205,30 @@ The scanner uses a **non-standard 6-byte command format** (not standard SCSI), a
 
 ### Scanner-Specific Issues
 
+#### Image Artefacts
+
+**Diagonal smear / streak artefacts:**
+Caused by wrong pixel width in the decoding step. If each row's RGB planes are split
+at incorrect byte offsets, each successive row shifts horizontally, producing diagonal
+smearing at constant slope.
+
+**Fix**: Use width=2880, bytes_per_line=8640 (no padding). Verified by autocorrelation
+peak at lag=8640 in the raw byte stream.
+
+**Vertical striping / comb pattern:**
+Caused by wrong bit depth assumption. Interpreting 8-bit data as 12-bit packed
+(16-bit big-endian with >>4 shift) produces wrong pixel values with periodic
+vertical structures.
+
+**Fix**: Verify WDB `bits_per_pixel` field. For `0x08`, data is 8-bit (1 byte per
+pixel value). The scanner has a 12-bit ADC but converts to 8-bit before transmission
+when WDB requests 8-bit output.
+
+**All 0xFF (white) image:**
+The scanner outputs 0xFF for unexposed film areas and regions outside the active
+scan area. If the entire image is 0xFF, check that film is loaded and the scan
+window is positioned correctly.
+
 #### LS-40 ED Issues
 **Common problems**:
 - Infrared channel not working

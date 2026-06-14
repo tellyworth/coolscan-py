@@ -84,7 +84,7 @@ For 12-bit data: `shift_bits = 16 - 12 = 4`, so values are shifted left by 4 bit
 
 **RGB mode (3 channels):**
 - The scanner sends data organized as **plane-interleaved by color window** (R window, G window, B window)
-- For each line, data arrives as: `[R_pixels][padding][G_pixels][padding][B_pixels][padding]`
+- For each line, data arrives as: `[R_pixels][G_pixels][B_pixels]` -- **no padding between channels or at line end**
 - SANE reassembles this into **pixel-interleaved RGB** format: `R0 G0 B0 R1 G1 B1 ...`
 
 **RGBI mode (4 channels):**
@@ -242,7 +242,7 @@ The data is piped from a child process/thread to the main SANE process.
 | **Channel layout** | Already interleaved RGB from scanner | Plane-interleaved by color; SANE reassembles |
 | **Width/height** | Computed from ILU coordinates and resolution | Computed from device pixels and pitch |
 | **READ_CAPACITY** | Uses `3a 00` | Uses `3a 80` for LS-40/LS-4000/LS-50/LS-5000 |
-| **Padding** | None mentioned | `odd_padding` (1 byte for odd width at 8-bit), `block_padding` (to 512-byte boundary for LS-50), plus 128 bytes line-end padding observed in LS-40 ED hardware tests |
+| **Padding** | None mentioned | `odd_padding` (1 byte for odd width at 8-bit), `block_padding` (to 512-byte boundary for LS-50). LS-40 ED full scan at 8-bit has **no per-line padding** (stride = 3 * width exactly) |
 | **Output depth** | 8-bit only | 8-bit or 12-bit (controlled by WDB `bits_per_pixel`); 12-bit ADC always, but output depth is configurable |
 
 ---
@@ -256,27 +256,45 @@ Confirmed by parsing actual hardware scan data (`hardware_scan_output.raw`, 32,7
 - **Bit depth**: 8-bit per channel. The LS-40 ED has a 12-bit ADC, but when WDB `bits_per_pixel = 0x08`, the scanner outputs 8-bit data (1 byte per pixel value). The WDB field `bits_per_pixel` controls output depth, not ADC depth.
 - **Channel layout**: RGB plane-interleaved per line (SANE coolscan3.c style):
   ```
-  [R_0 R_1 ... R_{w-1}][G_0 G_1 ... G_{w-1}][B_0 B_1 ... B_{w-1}][padding]
+  [R_0 R_1 ... R_{w-1}][G_0 G_1 ... G_{w-1}][B_0 B_1 ... B_{w-1}]
   ```
-  Each value is 1 byte. 128 bytes of padding follow each line (sensor data from outside active scan area).
+  Each value is 1 byte. **No padding** between channels or at line end.
+
+#### Width Verification via Autocorrelation
+
+The correct pixel width was determined by computing the autocorrelation of the raw
+byte stream. A peak at **lag = 8640** (correlation = 0.999955) confirms the row
+period is exactly 8640 bytes, which corresponds to **width = 2880** (8640 / 3 = 2880).
+
+This is distinct from the WDB's `size_x = 2870` device units. The scanner outputs
+2880 pixels per row regardless of the WDB scan area specification. The SANE backend
+computes `logical_width = (xmax - xmin + 1) / pitch`, but the actual output width
+from the LS-40 ED sensor is 2880 pixels.
 
 #### Dimension Calculation
 
 ```
-bytes_per_line = 3 * width + padding  (= 3 * 2624 + 128 = 8000)
-total_bytes = bytes_per_line * height  (= 8000 * 4096 = 32,768,000)
+bytes_per_line = 3 * width  (= 3 * 2880 = 8640, no padding)
+height = total_bytes // bytes_per_line  (= 32,768,000 // 8640 = 3792)
+trailing_bytes = total_bytes % bytes_per_line  (= 5120 bytes)
 ```
 
-For the test scan: **2624 × 4096 pixels** (aspect ratio 1.47, close to 35mm film ratio of 1.5).
+For the test scan: **2880 × 3792 pixels** (aspect ratio 0.76 in scan orientation;
+rotated to portrait: 3792 × 2880, ratio 1.32, close to 35mm film ratio of 1.5).
 
 The WDB specifies scan area: size_x=2870, size_y=4332 at 2900 DPI (pitch=1.0).
-The effective output width (2624) is smaller than the WDB scan width (2870) because
-the remaining pixels per channel (246 pixels × 3 bytes = 738 bytes) plus inter-plane
-gaps account for the 128-byte line padding. The scanner reads the full carrier width
-but only 2624 pixels of RGB data go into each line buffer.
+The output width (2880) is close to the WDB width (2870) but not identical.
+The output height (3792) is less than the WDB height (4332), as the scanner
+does not scan the full WDB-specified area in a single read.
 
-> **Bug note**: The initial implementation incorrectly assumed 16-bit BE data with
-> 12-bit shift, producing diagonal artifacts. The data is 8-bit throughout.
+The remaining 5120 bytes after 3792 complete rows contain partial row data
+(mean value ~52, range 0-206), not uniform padding.
+
+> **Bug history**: The initial implementation used width=2624 with 128-byte line
+> padding (bytes_per_line=8000), producing diagonal smear artefacts caused by
+> channel-plane misalignment. A separate analysis script incorrectly interpreted
+> the data as 16-bit big-endian with 12-bit shift (>>4), producing vertical
+> striping artefacts from wrong bit-depth unpacking. Both bugs are now fixed.
 
 #### Grayscale Conversion
 
@@ -299,10 +317,12 @@ raw = open('scan_data.raw', 'rb').read()
 raw_arr = np.frombuffer(raw, dtype=np.uint8)
 
 # Verified dimensions for LS-40 ED full scan at 2900 DPI
-width, height = 2624, 4096
-bytes_per_line = 8000  # 3*width + 128 padding
+# Width=2880 confirmed by autocorrelation peak at lag=8640
+width = 2880
+bytes_per_line = 8640  # 3 * width, no padding
+height = len(raw) // bytes_per_line  # 3792
 
-# Parse per-line: plane-interleaved RGB
+# Parse per-line: plane-interleaved RGB, no padding
 img_r = np.zeros((height, width), dtype=np.uint8)
 img_g = np.zeros((height, width), dtype=np.uint8)
 img_b = np.zeros((height, width), dtype=np.uint8)
@@ -312,7 +332,7 @@ for y in range(height):
     img_r[y, :] = raw_arr[offset:offset + width]
     img_g[y, :] = raw_arr[offset + width:offset + 2*width]
     img_b[y, :] = raw_arr[offset + 2*width:offset + 3*width]
-    offset += bytes_per_line  # Skip 128-byte padding
+    offset += bytes_per_line
 
 # Grayscale (SANE weights)
 gray8 = (0.27 * img_r.astype(np.float32) +
@@ -343,4 +363,21 @@ The scanner sends image data in bulk transfers of ~65,508 bytes each. The host
 issues READ(10) commands requesting larger amounts (e.g., 258,048 bytes = 0x3F000),
 and the scanner responds with multiple 65,508-byte transfers. The `read_scan_data()`
 function requests 65,536 bytes per call, which spans one or more scanner transfers.
-The total scan data is 32,768,000 bytes (500 × 65,536-byte reads).
+The total scan data is 32,768,000 bytes (500 x 65,536-byte reads).
+
+#### Common Decoding Bugs
+
+Two classes of decoding bugs produce characteristic artefacts:
+
+**(a) Row-addressing corruption (diagonal smear):**
+Wrong pixel width causes each row's RGB planes to be split at incorrect offsets.
+Each successive row shifts by `(wrong_width - correct_width)` pixels, producing
+a diagonal streak pattern. Symptom: diagonal smearing at constant slope across
+the image, with channel statistics appearing artificially uniform (all channels
+have identical mean/std because data is being cross-read between channels).
+
+**(b) Packed-sample decoding corruption (vertical striping):**
+Wrong bit depth assumption (e.g., interpreting 8-bit data as 12-bit packed 16-bit
+big-endian with >>4 shift) produces wrong pixel values. Symptom: vertical stripes,
+comb-like horizontal patterns, bimodal value distributions, and channel statistics
+that don't match expected film characteristics (e.g., G channel not higher than R/B).
