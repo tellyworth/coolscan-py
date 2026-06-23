@@ -15,9 +15,9 @@ Based on my analysis of the SANE backend code, here are the key findings about w
 
 **Our Implementation:**
 - ✅ We have inquiry and scanner ready
-- ❌ **Missing**: Unit reservation/release cycle
-- ❌ **Missing**: Mode sense for MUD
-- ❌ **Missing**: Internal info read with datatype `0xe0`
+- ✅ Unit reservation happens once during `initialize_scanner()`; release happens in `disconnect()` / teardown
+- ❌ **Missing**: Mode sense for MUD (not currently called in `initialize_scanner()`)
+- ✅ Internal info read with datatype `0xe0` is implemented in `get_internal_info()`
 
 ### **2. Command Structure Differences**
 
@@ -36,8 +36,8 @@ static unsigned char sreadC[] = {
 ```
 
 **Key Differences:**
-- ❌ **Missing**: Proper datatype codes in READ commands
-- ❌ **Missing**: Unit reservation before operations
+- ✅ Proper datatype codes in READ commands are implemented (`DataType` enum)
+- ✅ Unit reservation is performed once during session initialization
 - ❌ **Missing**: Sense handler integration
 
 ### **3. Timing and Retry Logic**

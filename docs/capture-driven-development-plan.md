@@ -1,5 +1,12 @@
 # Capture-driven development plan
 
+> **Note (current):** The active sequence-refactor plan has moved to
+> `.opencode/plans/golden-fixture-sequence-alignment.md`. This document
+> describes the overall capture-driven philosophy and historical milestones.
+> The legacy full-sequence replay tests against `test_basic_scan_capture.txt`
+> were removed; current coverage uses focused golden-fixture slice tests and
+> cross-capture property tests.
+
 This project implements a Python scanner stack for Nikon Coolscan hardware using SANE-derived knowledge and **USB captures as the ground truth**. Hardware runs are slow and noisy; development should **iterate against captured traffic** first, then confirm on a real scanner.
 
 ## Goals
@@ -14,11 +21,12 @@ This project implements a Python scanner stack for Nikon Coolscan hardware using
 |------|----------|
 | Raw reference | `ls40-single-bw.pcapng` |
 | **Primary oracle** | **`tests/fixtures/golden_single_bw.txt`** — 1472-event fixture auto-derived from pcapng via `scripts/generate_fixture_from_pcapng.py`. SHA-256 of source pcapng pinned in header. Validated by `make validate-fixtures`. |
-| Secondary / legacy | `tests/fixtures/test_basic_scan_capture.txt` (303 lines, hand-edited slice). Still used by replay tests but superseded by golden fixture for cross-validation. |
+| Secondary / legacy | `tests/fixtures/test_basic_scan_capture.txt` was a hand-edited slice; it is now legacy and no replay tests depend on it. |
 | Deeper analysis | `docs/usb-capture-findings.md`, `docs/unified-protocol-spec.md` |
+| Active refactor plan | `.opencode/plans/golden-fixture-sequence-alignment.md` |
 | Second opinion | SANE backend source (intent, naming, edge cases); **wire format defers to capture** when they disagree |
 
-**Convention:** New tests and comments should cite **`tests/fixtures/golden_single_bw.txt`** as the primary reference. The legacy `test_basic_scan_capture.txt` remains for replay test compatibility.
+**Convention:** New tests and comments should cite **`tests/fixtures/golden_single_bw.txt`** as the primary reference. `ls40-batch.pcapng` is the secondary oracle for batch/multi-frame behavior.
 
 ## Three-tier test strategy
 
@@ -59,17 +67,29 @@ That runs **real `CoolscanProtocol` logic** without hardware and without simulat
 | Fail-fast | When `usb_capture_replay` is set, **`ReplayError`** is re-raised from `_usb_read_bulk` / `_usb_write_bulk`, `_issue_usb_command`, `wait_scanner`, `_check_phase` / `_check_phase_with_retry`, and `initialize_scanner` paths instead of being turned into generic `StatusType.ERROR` / swallowed retries. |
 | `close()` | Skips `usb.util` teardown when replay is active. |
 
-**Tests:** `tests/test_usb_replay_transport.py` (first INQUIRY, parser edge cases); `tests/test_usb_replay_init_sequence.py` — **`initialize_scanner()` through MODE_SELECT** matches **`test_basic_scan_capture.txt` lines 1–83** (line 84 is the next host transaction, start of the prescan-era segment).
+**Tests:** `tests/test_usb_replay_transport.py` (first INQUIRY, parser edge cases); `tests/test_usb_replay_init_sequence.py` — **`initialize_scanner()` through MODE_SELECT** matches **`golden_single_bw.txt` lines 1–123**.
 
-**Prescan replay:** `tests/test_usb_replay_prescan_sequence.py` — **`prescan()`** bulk I/O matches **lines 88–208** (replay starts at 88 so the first capture TUR before that does not duplicate `prescan`'s opening `test_unit_ready`). The post-**READY** tail is **synthetic** where needed: it follows **`CoolscanProtocol.prescan()` order** (three image `READ`s via `read_prescan_image_data`, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the chronological bus order in a raw export. Large IN payloads use **`@tests/fixtures/...` binary files** resolved from the capture file's directory (see `coolscan/usb_replay.py`). **LUT OUT rows** must be **full-length** hex (parser checks the length column). **Tooling:** `scripts/export_usb_capture_text.py` writes more text lines from `ls40-single-bw.pcapng` when `tshark` is available. **`scripts/refresh_prescan_image_fixtures.py`** rebuilds `tests/fixtures/prescan_image_block{1,2,3}.bin` from the same pcap. **`scripts/audit_capture_read_batches.py`** prints image `READ` allocation vs single-transfer IN sums for pcap QA before extending full-scan replay. **`scripts/validate_fixtures.py`** (`make validate-fixtures`) checks fixture consistency: column count, endpoint values, length-vs-hex match, `@path` resolution, file-size match, timestamp ordering, and cross-validates golden fixture against raw pcapng (SHA match, event count bounds, command code coverage). Runs as part of `make check-all`.
+**Focused replay tests (current strategy):** Rather than replaying entire sequences against a single legacy fixture, the suite now uses small, focused replay slices from `golden_single_bw.txt`:
 
-**Full scan setup replay:** `tests/test_usb_replay_full_scan_sequence.py` — **`perform_scan_sequence()`** bulk I/O matches **lines 210–254** (scanner_ready TUR, reserve_unit, set_window via MODE_SELECT, 3x 8192-byte LUT uploads, start_scan, polling PROCESSING→READY). `object_position` removed (LS-40 ED rejects with ILLEGAL REQUEST). `release_unit` moved to `scanner._perform_scan`. Command bytes match `CoolscanProtocol` output, not raw capture (full scan uses SET_WINDOW 0x24 vs MODE_SELECT 0x15, and 3x 8192-byte LUT uploads vs single 768-byte LUT).
+- `tests/test_usb_replay_start_scan_golden.py` — `START_SCAN` 3-attempt `REISSUE → ERROR → READY` pattern (lines 297-331).
+- `tests/test_usb_replay_prescan_helpers_golden.py` — individual prescan helpers:
+  `set_boundary_for_prescan()`, `read_exposure_data()`, `read_control_frame()`,
+  `read_channel_state()`, `upload_identity_luts(include_ir=False)`.
+- `tests/test_usb_replay_fullscan_helpers_golden.py` — individual full-scan helpers:
+  `set_boundary()` (CONTROL_FRAME), `read_focus()`, `read_channel_state(9)`,
+  `upload_identity_luts(include_ir=True)`, `stop_scan()`.
 
-**Full scan image replay:** `tests/test_usb_replay_full_scan_sequence.py::test_full_scan_image_reads_match_capture` — **`perform_scan_sequence()`** + synthetic 64-byte read + 4x `read_scan_data()` calls match **lines 210–303**. The four image READs correspond to the first stripe from the capture (frames 2399-2438): 3x READ(10) with allocation 258048 plus 1x READ(10) with allocation 223488. The scanner returns 65508 bytes per chunk, so each IN payload is 65508 bytes. Large INs use **`@tests/fixtures/scan_image_block{1,2,3,4}.bin`** rebuilt from `ls40-single-bw.pcapng` via **`scripts/refresh_scan_image_fixtures.py`**.
+The legacy full-sequence replay tests (`tests/test_usb_replay_prescan_sequence.py`
+and `tests/test_usb_replay_full_scan_sequence.py`) were removed because they
+locked the code to a hand-edited fixture and to a per-operation reservation model
+that does not match the pcapng.
 
-**Batch scan replay:** `tests/test_usb_replay_batch_scan.py` — 4 tests against `tests/fixtures/test_batch_scan_protocol.txt` (lines 256-290 from `ls40-batch.pcapng`): reserve_unit, 3x READ_CAPACITY (windows 1/2/3), START_SCAN, post-scan polling, 4x READ_SCAN_DATA (64, 258048, 259200, 103680 bytes), RELEASE_UNIT teardown.
-
-**Full scan image data strategy:** First-stripe replay validates the full scan image READ path with capture-derived data (4x 65508-byte chunks from frames 2399-2438). Remaining validation: (A) CDB construction test proves `read_scan_data(N)` emits correct READ(10) CDB for all stripe sizes; (B) post-READY GET_WINDOW fixture validates WDB responses; (C) integration test covers control flow from setup → scan → data read with synthetic IN data.
+**Tooling:** `scripts/export_usb_capture_text.py` writes text lines from
+`ls40-single-bw.pcapng` when `tshark` is available. `scripts/refresh_prescan_image_fixtures.py`
+and `scripts/refresh_scan_image_fixtures.py` rebuild binary payloads from the pcap.
+`scripts/validate_fixtures.py` (`make validate-fixtures`) checks fixture consistency
+and cross-validates `golden_single_bw.txt` against `ls40-single-bw.pcapng` (SHA match,
+event count bounds, command code coverage). Runs as part of `make check-all`.
 
 **Replay tests are fixture self-consistency checks**, not hardware correctness proofs. They verify that protocol code reproduces the fixture's byte sequence, but the fixture itself may contain errors relative to actual hardware behavior. Hardware smoke tests (`make smoke-test-hardware`) are needed to close this gap.
 
@@ -97,23 +117,23 @@ Normalize once per slice when building the fixture, document the rule in the tes
 
 Work in **order along the real single-bw session**, extending only as far as needed for a working scan:
 
-1. **Init / inquiry / mode** — **Done (replay).** `tests/test_usb_replay_init_sequence.py` locks **`test_basic_scan_capture.txt` lines 1–83** through MODE_SELECT (line 84 is the next host transaction). Fixture remains an **edited** slice of `ls40-single-bw.pcapng`, not a raw prefix (see **Pcap vs text fixture** above).
-2. **Prescan setup** — **Done (fixture + mocks).** SET_WINDOW x3, LUT upload, START_SCAN and earlier path are in the text capture; `tests/test_prescan_sequence_verification.py` still uses mocks for inner calls.
-3. **Post-START_SCAN** — **Done (replay slice).** Status reads (`0x87`), `poll_until_ready()` pattern, READY transition through line **168** of the text file; covered by `tests/test_usb_replay_prescan_sequence.py` from line **88**.
-4. **Full prescan image path** — **Done (replay harness).** `tests/test_usb_replay_prescan_sequence.py` matches **lines 88–208** including three image `READ`s (`@` fixture blobs), exposure `0x8e`, three `GET_WINDOW`s. Image fixture binaries are regenerated from **`ls40-single-bw.pcapng`** using **`scripts/refresh_prescan_image_fixtures.py`** (see **Pcap vs text fixture**).
-5. **Full scan setup + polling** — **Done (replay).** `tests/test_usb_replay_full_scan_sequence.py::test_perform_scan_sequence_matches_capture` locks **lines 210–259** against `perform_scan_sequence()` (scanner_ready TUR, reserve_unit, read_capacity, set_window via MODE_SELECT, 3x 8192-byte LUT uploads, start_scan with ERROR/ASCQ=6, post-scan polling PROCESSING→READY). Command bytes match `CoolscanProtocol` output, not raw capture (full scan uses SET_WINDOW 0x24 vs MODE_SELECT 0x15, and 3x 8192-byte LUT uploads vs single 768-byte LUT). `object_position` removed (LS-40 ED rejects). `release_unit` moved to `scanner._perform_scan`.
-6. **Full scan image data** — **Done (first-stripe replay + three-level validation).** `tests/test_usb_replay_full_scan_sequence.py::test_full_scan_image_reads_match_capture` replays the first stripe from the capture (lines 210-303): `perform_scan_sequence()` + synthetic 64-byte read + 4x `read_scan_data()` with capture-derived 65508-byte IN payloads. Remaining validation:
+1. **Init / inquiry / mode** — **Done (replay).** `tests/test_usb_replay_init_sequence.py` locks **`golden_single_bw.txt` lines 1–123** through MODE_SELECT.
+2. **Prescan setup** — **Partially done.** Individual prescan helpers now match the golden fixture (`set_boundary_for_prescan`, `read_exposure_data`, `read_control_frame`, `read_channel_state`, `upload_identity_luts`). `prescan()` itself still needs restructuring to drop redundant `SET_WINDOW` calls and add the missing `CONTROL_FRAME` / channel-state reads.
+3. **Post-START_SCAN** — **Done (replay slice).** Status reads (`0x87`), `poll_until_ready()` pattern, and the 3-attempt retry behavior are covered by `tests/test_usb_replay_start_scan_golden.py` (lines 297-331).
+4. **Full prescan image path** — **Historical.** Was covered by the now-removed legacy full-sequence replay test. Coverage will be restored as part of composing `prescan_frame()` in Phase 3.
+5. **Full scan setup + polling** — **Partially done.** Individual full-scan helpers now match the golden fixture (`set_boundary`, `read_focus`, `read_channel_state(9)`, `upload_identity_luts(include_ir=True)`, `stop_scan`). `perform_scan_sequence()` still needs restructuring to follow the real full-scan slice (lines ~427-660+) and to remove the obsolete `reserve_unit` / `read_capacity` preamble.
+6. **Full scan image data** — **Historical.** Was covered by the now-removed legacy full-sequence replay test. Coverage will be restored as part of composing `full_scan_frame()` in Phase 3. Remaining validation still applies:
    - **Piece A: CDB construction** — `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes.
    - **Piece B: Post-READY GET_WINDOW** — `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs for windows 1/2/3/9 and WDB exposure extraction (SANE formula, bytes 54-57).
-   - **Piece C: Integration** — `tests/test_scan_read_integration.py` covers full control flow (scanner_ready → reserve_unit → set_window → send_lut → start_scan → poll_until_ready → read_scan_data(64) → release_unit) with synthetic IN data.
+   - **Piece C: Integration** — `tests/test_scan_read_integration.py` covers full control flow with synthetic IN data.
 
-7. **Golden fixture infrastructure** — **Done.** `tests/fixtures/golden_single_bw.txt` (1472 events) derived from `ls40-single-bw.pcapng` via `scripts/generate_fixture_from_pcapng.py`. SHA-256 of source pcapng pinned in header. `make validate-fixtures` cross-checks golden fixture against raw capture (SHA match, event count bounds, command code coverage). `make generate-golden-fixture` regenerates from pcapng.
+7. **Golden fixture infrastructure** — **Done.** `tests/fixtures/golden_single_bw.txt` (1472 events) derived from `ls40-single-bw.pcapng` via `scripts/generate_fixture_from_pcapng.py`. SHA-256 of source pcapng pinned in header. `make validate-fixtures` cross-checks golden fixture against raw capture. `ls40-batch.pcapng` is available as the secondary oracle but a text fixture has not yet been generated from it.
 
-8. **Property tests** — **Done.** `tests/test_protocol_properties.py` adds 14 fixture-agnostic invariant tests: REISSUE handling, polling loops (3 and 12 BUSY cycles), LUT sizes (11-bit and 12-bit), SET_WINDOW CDB construction, TUR retries (2 and 5 retries), CDB format (INQUIRY, READ_CAPACITY, READ_SCAN_DATA), status parsing (READY, REISSUE, PROCESSING). Run via `make test-properties`.
+8. **Property tests** — **Done.** `tests/test_protocol_properties.py` adds fixture-agnostic invariant tests: REISSUE handling, polling loops, LUT sizes, SET_WINDOW CDB construction, TUR retries, CDB format, status parsing, focus/readback sequences. Run via `make test-properties`.
 
 9. **Hardware smoke tests** — **Done (infrastructure).** `tests/test_hardware_smoke.py` provides 3 hardware tests (enumerate, TUR, full prescan) that skip gracefully when no scanner is attached, plus 4 golden fixture structural tests. Run via `make smoke-test-hardware`.
 
-**Note:** Milestones 1-6 are **replay-locked**, meaning the protocol code reproduces the fixture's byte sequence. They have NOT been verified against actual hardware. The hardware smoke tests (Milestone 9) will close this gap once a scanner is attached.
+**Note:** The remaining work is tracked in `.opencode/plans/golden-fixture-sequence-alignment.md` (Phases 3-7). The protocol code reproduces individual helper slices, but the high-level `prescan()` / `perform_scan_sequence()` methods still need to be composed from those helpers before full-sequence hardware validation makes sense.
 
 ### Protocol fixes landed (Fixes 1-5)
 
@@ -124,6 +144,10 @@ Work in **order along the real single-bw session**, extending only as far as nee
 | Fix 3 | REISSUE byte positions corrected (buf4 in 0/1, not ASCQ low bits) | Landed |
 | Fix 4 | Session-level `_scanner_alive` fail-fast after 3 consecutive USB errors | Landed |
 | Fix 5 | Timeout budgeting — `prescan(timeout=120)` and `perform_scan_sequence(timeout=300)` track deadline, pass remaining budget to `poll_until_ready` | Landed |
+| Fix 6 | Session reservation model — reserve once in `initialize_scanner()`, release in `disconnect()` / teardown; remove per-operation reserve/release from `prescan()`, `auto_focus()`, `perform_scan_sequence()`, `_perform_scan()` | Landed |
+| Fix 7 | `read_exposure_data()` derives table length from the 6-byte header instead of a hardcoded value | Landed |
+| Fix 8 | `read_focus()` requests 9 bytes to match the golden fixture | Landed |
+| Fix 9 | `stop_scan()` retries on `REISSUE` with status/progress reads, matching the golden fixture | Landed |
 
 After each milestone: **`pytest` green**, **docs updated** (what is now guaranteed vs capture), **git commit** (see below).
 

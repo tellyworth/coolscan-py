@@ -352,9 +352,21 @@ Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The imple
 12. **READ** commands to get scan data
 13. **STOP_SCAN** (`1b 00 00 00 04 00`) when complete
 
-**USB replay test:** `tests/test_usb_replay_full_scan_sequence.py::test_perform_scan_sequence_matches_capture` locks bulk I/O for `perform_scan_sequence()` against `test_basic_scan_capture.txt` **lines 210–259**. The fixture enforces: scanner_ready TUR poll (READY), reserve_unit, read_capacity (58-byte response), set_window via MODE_SELECT (20-byte params), 3× 8192-byte identity LUT uploads (dt=0x03, channels R/G/B), start_scan (ERROR/ASCQ=6 treated as success), post-START_SCAN polling (2× PROCESSING → READY). Command bytes match `CoolscanProtocol` output, not the raw capture, where the full scan uses SET_WINDOW (0x24) instead of MODE_SELECT (0x15). `object_position` removed (LS-40 ED rejects with ILLEGAL REQUEST). `release_unit` moved to `scanner._perform_scan`.
+**USB replay tests:** The legacy full-sequence replay test that locked
+`perform_scan_sequence()` to `test_basic_scan_capture.txt` was removed.
+Current coverage uses focused golden-fixture slices in
+`tests/test_usb_replay_fullscan_helpers_golden.py`, covering individual
+full-scan helpers: `set_boundary()` (CONTROL_FRAME), `read_focus()`,
+`read_channel_state(9)`, `upload_identity_luts(include_ir=True)`, and
+`stop_scan()`. Full-sequence replay will be restored once `perform_scan_sequence()`
+is rewritten as composable scenario methods (see
+`.opencode/plans/golden-fixture-sequence-alignment.md`).
 
-**Full scan image data replay:** `tests/test_usb_replay_full_scan_sequence.py::test_full_scan_image_reads_match_capture` replays the first stripe from the capture (**lines 210–303**): `perform_scan_sequence()` + synthetic 64-byte read + 4× `read_scan_data()` with capture-derived 65508-byte IN payloads from `@tests/fixtures/scan_image_block{1,2,3,4}.bin` (rebuilt via `scripts/refresh_scan_image_fixtures.py` from `ls40-single-bw.pcapng` frames 2399-2438). The CDB allocation length (258048, 223488) is the host's requested size; the scanner returns 65508 bytes per chunk.
+**Full scan image data replay:** First-stripe replay is temporarily removed
+with the legacy full-sequence test. It will be restored when `full_scan_frame()`
+is composed. The CDB allocation lengths (258048, 223488, 259200, 103680) and the
+scanner's 65508-byte-per-chunk return behavior are still validated by
+`tests/test_read_scan_data_cdb.py`.
 
 **Remaining full scan validation:** (A) `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes; (B) `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs and WDB exposure extraction; (C) `tests/test_scan_read_integration.py` covers full control flow from setup through `read_scan_data(64)` to release_unit with synthetic IN data.
 

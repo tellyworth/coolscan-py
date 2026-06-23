@@ -5,6 +5,11 @@ After analyzing all three Coolscan driver files (`coolscan.c`, `coolscan2.c`, `c
 
 ## Key Findings
 
+> **Note:** The LS-40 ED pcapng (`ls40-single-bw.pcapng`) shows `RESERVE_UNIT`
+> at fixture line 85, during session initialization, and `RELEASE_UNIT` at
+> teardown. The statements below about no reservation cycle being visible come
+> from the SANE backend source and do not fully match the actual wire capture.
+
 ### 1. `coolscan.c` (Original Driver)
 **Initialization Sequence:**
 1. `attach_scanner()` - Opens device using `sanei_scsi_open()` or USB equivalent

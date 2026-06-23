@@ -173,8 +173,22 @@ class UsbCaptureReplay:
             raise ReplayDirectionError(
                 f"Expected OUT ({len(payload)} bytes) but host tried to read {length} bytes"
             )
-        self._index += 1
-        return payload
+        # If first IN event is large enough, consume it directly (old fixture behavior)
+        if len(payload) >= length:
+            self._index += 1
+            return payload
+        # Accumulate IN events until requested length is met
+        # (golden fixture splits large responses across multiple IN events)
+        result = bytearray()
+        while len(result) < length:
+            if self._index >= len(self.events):
+                break
+            kind, payload = self.events[self._index]
+            if kind != "in":
+                break
+            self._index += 1
+            result.extend(payload)
+        return bytes(result)
 
 
 class ReplayUsbDevice:

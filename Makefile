@@ -1,4 +1,4 @@
-.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures smoke-test-hardware generate-golden-fixture
+.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures smoke-test-hardware generate-golden-fixture generate-batch-fixture
 
 # Linting and code quality
 lint:
@@ -43,6 +43,10 @@ validate-fixtures:
 generate-golden-fixture:
 	@echo "Generating golden fixture from pcapng..."
 	python3 scripts/generate_fixture_from_pcapng.py
+
+generate-batch-fixture:
+	@echo "Generating batch fixture from pcapng..."
+	python3 scripts/generate_fixture_from_pcapng.py --pcap ls40-batch.pcapng --output tests/fixtures/golden_batch.txt
 
 # Run all checks (lint + validate + test)
 check-all: lint validate-fixtures test
