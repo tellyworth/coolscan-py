@@ -15,8 +15,7 @@ Example::
     python3 scripts/generate_fixture_from_pcapng.py
 """
 
-from __future__ import annotations
-
+import argparse
 import hashlib
 import re
 import subprocess
@@ -24,11 +23,10 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
-PCAP_PATH = _REPO / "ls40-single-bw.pcapng"
-OUTPUT_PATH = _REPO / "tests" / "fixtures" / "golden_single_bw.txt"
 
 BULK_OUT_EP = 0x01
 BULK_IN_EP = 0x82
+
 
 
 def _pcapng_sha256(path: Path) -> str:
@@ -241,13 +239,14 @@ def _normalize_timestamps(
 def _write_fixture(
     packets: list[tuple[int, str, int, bytes, float]],
     output_path: Path,
+    pcap_path: Path,
     pcap_sha: str,
 ) -> None:
     """Write packets to a fixture file in the standard tab-separated format."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines = []
-    lines.append(f"# Golden fixture generated from ls40-single-bw.pcapng")
+    lines.append(f"# Golden fixture generated from {pcap_path.name}")
     lines.append(f"# pcapng SHA-256: {pcap_sha}")
     lines.append(f"# Total events: {len(packets)}")
     out_count = sum(1 for _, d, _, _, _ in packets if d == "OUT")
@@ -274,19 +273,37 @@ def _write_fixture(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate a golden fixture from a pcapng file.")
+    parser.add_argument(
+        "--pcap", 
+        type=Path, 
+        default=_REPO / "ls40-single-bw.pcapng", 
+        help="Path to the pcapng capture file"
+    )
+    parser.add_argument(
+        "--output", 
+        type=Path, 
+        default=_REPO / "tests" / "fixtures" / "golden_single_bw.txt", 
+        help="Path to the output fixture file"
+    )
+    args = parser.parse_args()
+
+    pcap_path = args.pcap
+    output_path = args.output
+
     if not _has_tshark():
         print("Error: tshark not found on PATH. Install wireshark/tshark first.", file=sys.stderr)
         return 1
 
-    if not PCAP_PATH.is_file():
-        print(f"Error: pcapng file not found: {PCAP_PATH}", file=sys.stderr)
+    if not pcap_path.is_file():
+        print(f"Error: pcapng file not found: {pcap_path}", file=sys.stderr)
         return 1
 
-    print(f"Reading pcapng: {PCAP_PATH}")
-    pcap_sha = _pcapng_sha256(PCAP_PATH)
+    print(f"Reading pcapng: {pcap_path}")
+    pcap_sha = _pcapng_sha256(pcap_path)
     print(f"SHA-256: {pcap_sha}")
 
-    packets = _extract_packets(PCAP_PATH)
+    packets = _extract_packets(pcap_path)
     if not packets:
         print("Error: no USB bulk packets extracted", file=sys.stderr)
         return 1
@@ -302,8 +319,8 @@ def main() -> int:
     print(f"Collapsed TUR cycles: {out_before} -> {len(packets)} events")
 
     # Write fixture
-    _write_fixture(packets, OUTPUT_PATH, pcap_sha)
-    print(f"Wrote golden fixture: {OUTPUT_PATH}")
+    _write_fixture(packets, output_path, pcap_path, pcap_sha)
+    print(f"Wrote golden fixture: {output_path}")
     print(f"  OUT events: {sum(1 for _, d, _, _, _ in packets if d == 'OUT')}")
     print(f"  IN events: {sum(1 for _, d, _, _, _ in packets if d == 'IN')}")
 

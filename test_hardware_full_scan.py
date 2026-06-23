@@ -26,6 +26,7 @@ def main():
     print(f"Found scanner: {device.vendor} {device.model} ({device.revision})")
 
     protocol = None
+    success = False
     try:
         # 2. Create protocol with verbose logging + USB capture
         protocol = CoolscanProtocol(device, verbose=True)
@@ -43,17 +44,25 @@ def main():
             return False
         print("Scanner is ready")
 
+        # 4b. Focus setup (golden fixture lines 172-198)
+        print("\n=== FOCUS SETUP ===")
+        focus = protocol.focus_setup()
+        if focus is not None:
+            print(f"Focus position: {focus} (0x{focus:04X})")
+        else:
+            print("Focus setup failed, using scanner default")
+
         # 5. Prescan (auto-exposure)
         print("\n=== PRESCAN ===")
-        protocol.reserve_unit()
         prescan_ok = protocol.prescan()
-        protocol.release_unit()
         print(f"Prescan: {'OK' if prescan_ok else 'FAILED'}")
+        if not prescan_ok:
+            return False
 
         # 6. Full scan setup
         print("\n=== FULL SCAN SETUP ===")
         params = ScanParameters(resolution=2700)
-        if not protocol.perform_scan_sequence(params):
+        if not protocol.full_scan_frame(params):
             print("Scan sequence failed")
             return False
         print("Scan sequence complete, scanner ready for data read")
@@ -89,6 +98,11 @@ def main():
         elapsed = time.time() - start
         total_mb = len(scan_data) / (1024 * 1024)
         print(f"\nRead {chunk_idx} chunks, {total_mb:.1f} MB in {elapsed:.1f}s")
+
+        # Teardown scanner (golden fixture lines 1413-1478)
+        print("\n=== SCAN TEARDOWN ===")
+        protocol.scan_teardown()
+        print("Teardown complete")
 
         # 8. Save image
         if scan_data:
@@ -162,6 +176,7 @@ def main():
                     f.write(scan_data)
                 print(f"Saved raw data to {raw_path}")
 
+        success = True
         return True
 
     except Exception as e:
@@ -177,6 +192,12 @@ def main():
                 protocol.disable_usb_capture()
             except Exception:
                 pass
+            if not success:
+                try:
+                    protocol.eject_medium()
+                    print("Film ejected")
+                except Exception:
+                    print("Eject failed (scanner may be unresponsive)")
             try:
                 protocol.release_unit()
             except Exception:

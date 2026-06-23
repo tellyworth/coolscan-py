@@ -272,42 +272,43 @@ class TestCoolscanScannerPrescan:
         scanner = CoolscanScanner(device)
         scanner.is_connected = True
         scanner.protocol = Mock()
-        scanner.protocol.reserve_unit.return_value = True
         scanner.protocol.prescan.return_value = True
 
         result = scanner.prescan()
 
         assert result is True
-        scanner.protocol.reserve_unit.assert_called_once()
         scanner.protocol.prescan.assert_called_once()
-        scanner.protocol.release_unit.assert_called_once()
+        # Session-level reservation happens during connect(), not per operation.
+        scanner.protocol.reserve_unit.assert_not_called()
+        scanner.protocol.release_unit.assert_not_called()
 
-    def test_prescan_reserve_fails(self):
-        """Prescan fails if reserve fails."""
+    def test_prescan_failure(self):
+        """Prescan returns False when protocol.prescan fails."""
         device = MockDevice()
         scanner = CoolscanScanner(device)
         scanner.is_connected = True
         scanner.protocol = Mock()
-        scanner.protocol.reserve_unit.return_value = False
+        scanner.protocol.prescan.return_value = False
 
         result = scanner.prescan()
 
         assert result is False
-        scanner.protocol.prescan.assert_not_called()
+        scanner.protocol.prescan.assert_called_once()
+        scanner.protocol.reserve_unit.assert_not_called()
+        scanner.protocol.release_unit.assert_not_called()
 
-    def test_prescan_releases_on_error(self):
-        """Prescan releases unit even on error."""
+    def test_prescan_handles_error(self):
+        """Prescan handles exceptions without per-operation release."""
         device = MockDevice()
         scanner = CoolscanScanner(device)
         scanner.is_connected = True
         scanner.protocol = Mock()
-        scanner.protocol.reserve_unit.return_value = True
         scanner.protocol.prescan.side_effect = Exception("Prescan error")
 
         result = scanner.prescan()
 
         assert result is False
-        scanner.protocol.release_unit.assert_called()
+        scanner.protocol.release_unit.assert_not_called()
 
 
 class TestCoolscanScannerAutoFocus:
@@ -327,27 +328,29 @@ class TestCoolscanScannerAutoFocus:
         scanner = CoolscanScanner(device)
         scanner.is_connected = True
         scanner.protocol = Mock()
-        scanner.protocol.reserve_unit.return_value = True
         scanner.protocol.auto_focus.return_value = True
 
         result = scanner.auto_focus()
 
         assert result is True
-        scanner.protocol.reserve_unit.assert_called_once()
         scanner.protocol.auto_focus.assert_called_once()
-        scanner.protocol.release_unit.assert_called_once()
+        # Session-level reservation happens during connect(), not per operation.
+        scanner.protocol.reserve_unit.assert_not_called()
+        scanner.protocol.release_unit.assert_not_called()
 
-    def test_auto_focus_reserve_fails(self):
-        """Auto focus fails if reserve fails."""
+    def test_auto_focus_failure(self):
+        """Auto focus returns False when protocol.auto_focus fails."""
         device = MockDevice()
         scanner = CoolscanScanner(device)
         scanner.is_connected = True
         scanner.protocol = Mock()
-        scanner.protocol.reserve_unit.return_value = False
+        scanner.protocol.auto_focus.return_value = False
 
         result = scanner.auto_focus()
 
         assert result is False
+        scanner.protocol.reserve_unit.assert_not_called()
+        scanner.protocol.release_unit.assert_not_called()
 
 
 class TestCoolscanScannerCancelScan:
@@ -532,12 +535,12 @@ class TestCoolscanScannerScanPreview:
         scanner = CoolscanScanner(device)
         scanner.is_connected = True
         scanner.protocol = Mock()
-        scanner.protocol.perform_scan_sequence.return_value = False
+        scanner.protocol.full_scan_frame.return_value = False
 
         # Will fail but we can check params
         scanner.scan_preview("/tmp/test.png", resolution=300)
 
-        call_args = scanner.protocol.perform_scan_sequence.call_args
+        call_args = scanner.protocol.full_scan_frame.call_args
         params = call_args[0][0]
         assert params.resolution == 300
         assert params.preview is True
@@ -560,11 +563,11 @@ class TestCoolscanScannerScanFull:
         scanner = CoolscanScanner(device)
         scanner.is_connected = True
         scanner.protocol = Mock()
-        scanner.protocol.perform_scan_sequence.return_value = False
+        scanner.protocol.full_scan_frame.return_value = False
 
         scanner.scan_full("/tmp/test.png", resolution=2700, negative=True, infrared=True)
 
-        call_args = scanner.protocol.perform_scan_sequence.call_args
+        call_args = scanner.protocol.full_scan_frame.call_args
         params = call_args[0][0]
         assert params.resolution == 2700
         assert params.negative is True

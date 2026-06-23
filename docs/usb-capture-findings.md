@@ -227,9 +227,16 @@ same exposure information that prescan is designed to measure.
 **Implementation Methods:**
 - `poll_until_ready(timeout=30, poll_interval=0.1)` - Dynamic polling until ready
 - `read_prescan_image_data()` - Reads all image data blocks (273024 bytes total)
-- `read_exposure_data()` - Reads exposure header (6 bytes) and table (3464 bytes)
+- `read_exposure_data()` - Reads exposure header (6 bytes) and table using the length encoded in the header
 
-**Replay / fixture status:** `test_basic_scan_capture.txt` lines **88–208** are enforced by `tests/test_usb_replay_prescan_sequence.py` against real `prescan()` (only `time.sleep` patched). The post-READY segment orders traffic to match **`prescan()`** (image READs, then exposure `0x8e`, then three `GET_WINDOW`s), not necessarily the raw chronological order in an unedited pcap export. Lines **210–259** are enforced by `tests/test_usb_replay_full_scan_sequence.py::test_perform_scan_sequence_matches_capture` against real `perform_scan_sequence()` (scanner_ready TUR, reserve_unit, read_capacity, set_window via MODE_SELECT, 3× 8192-byte LUT uploads, start_scan with ERROR/ASCQ=6, post-scan polling PROCESSING→READY). Lines **210–303** are enforced by `test_full_scan_image_reads_match_capture` against `perform_scan_sequence()` + 4× `read_scan_data()` with capture-derived IN payloads. Fixture command bytes match `CoolscanProtocol` output, not the raw capture (see note below).
+**Replay / fixture status:** The legacy full-sequence replay tests that locked
+`prescan()` and `perform_scan_sequence()` to `test_basic_scan_capture.txt` were
+removed. Current coverage uses focused golden-fixture slices:
+`tests/test_usb_replay_start_scan_golden.py` (START_SCAN retry pattern),
+`tests/test_usb_replay_prescan_helpers_golden.py`, and
+`tests/test_usb_replay_fullscan_helpers_golden.py`. Full-sequence replay will be
+restored once `prescan()` and `perform_scan_sequence()` are rewritten as
+composable scenario methods (see `.opencode/plans/golden-fixture-sequence-alignment.md`).
 
 ### Beyond prescan (`ls40-single-bw`): full-resolution image READs
 
@@ -237,8 +244,8 @@ same exposure information that prescan is designed to measure.
 - The first stripe uses CDB payloads such as **`28000000000003f00080`** (**258048** bytes), **`28000000000003690080`** (**223488** bytes), followed by long runs of **`28000000000003f48080`** (**259200** bytes per issue) plus a **`28000000000001950080`** residual (**103680** bytes)—see `scripts/audit_capture_read_batches.py` with `--min-alloc 100000`.
 - **`tshark` framing:** Between repeated identical image READ outs, capture rows usually show **one ~65508-byte IN** (`0x82`) per READ issue, **not** the full allocation in one transfer. **`CoolscanProtocol._issue_usb_command`** still performs a **single** `_usb_read_bulk(allocation)`, so replay fixtures consolidate wire chunks (as with prescan **`refresh_prescan_image_fixtures.py`**). **`scripts/audit_capture_read_batches.py`** compares allocation length vs **single** intra-CDB-transfer IN sum — expect **`no`** for large READs unless you merge sibling URB rows first.
 - **Full scan first-stripe replay:** The fixture encodes **one IN event per CDB issue** with 65508-byte payloads from **`@tests/fixtures/scan_image_block{1,2,3,4}.bin`**, rebuilt via **`scripts/refresh_scan_image_fixtures.py`** (extract first 4 IN transfers from frames 2399-2438). The CDB allocation length (258048, 223488) is the host's requested size; the scanner returns 65508 bytes per chunk.
-- **`RELEASE UNIT` (17 00 …)** did not appear in this capture; **`RESERVE`** appears once earlier in the session.
-- **Image data validation strategy:** First-stripe replay validates the full scan image READ path with capture-derived data (4× 65508-byte chunks from frames 2399-2438). Remaining validation: (A) `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes; (B) `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs for windows 1/2/3/9 and WDB exposure extraction; (C) `tests/test_scan_read_integration.py` covers full control flow from setup through `read_scan_data(64)` to release_unit with synthetic IN data.
+- **`RELEASE UNIT` (17 00 …)** appears at session teardown, not between prescan and full scan. **`RESERVE`** appears once earlier in the session, immediately after initialization.
+- **Image data validation strategy:** First-stripe replay will be restored when `full_scan_frame()` is composed. Remaining validation: (A) `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes; (B) `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs for windows 1/2/3/9 and WDB exposure extraction; (C) `tests/test_scan_read_integration.py` covers full control flow with synthetic IN data.
 
 ## Implementation Status
 

@@ -28,11 +28,19 @@ import sys
 from pathlib import Path
 
 CAPTURE_DEFAULT = Path(__file__).resolve().parent.parent / "test_basic_scan_capture.txt"
-GOLDEN_FIXTURE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "golden_single_bw.txt"
-PCAP_PATH = Path(__file__).resolve().parent.parent / "ls40-single-bw.pcapng"
-
-# Known event count from original capture
-CAPTURE_EVENT_COUNT = 2544
+# Known event counts from raw capture
+GOLDEN_CONFIGS = [
+    {
+        "fixture": Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "golden_single_bw.txt",
+        "pcap": Path(__file__).resolve().parent.parent / "ls40-single-bw.pcapng",
+        "raw_count": 2544,
+    },
+    {
+        "fixture": Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "golden_batch.txt",
+        "pcap": Path(__file__).resolve().parent.parent / "ls40-batch.pcapng",
+        "raw_count": 9619,
+    },
+]
 
 
 def validate(path: Path) -> list[str]:
@@ -213,12 +221,12 @@ def _pcapng_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _extract_capture_command_codes() -> set[int] | None:
+def _extract_capture_command_codes(pcap_path: Path) -> set[int] | None:
     """Extract command codes from the raw pcapng capture using tshark."""
     try:
         result = subprocess.run(
             [
-                "tshark", "-r", str(PCAP_PATH),
+                "tshark", "-r", str(pcap_path),
                 "-Y", "usb.endpoint_address==0x01",
                 "-T", "fields", "-e", "usb.capdata",
             ],
@@ -243,8 +251,8 @@ def _extract_capture_command_codes() -> set[int] | None:
         return None
 
 
-def validate_golden_fixture() -> list[str]:
-    """Validate the golden fixture against the raw pcapng capture.
+def validate_golden_fixture(config: dict) -> list[str]:
+    """Validate a golden fixture against its raw pcapng capture.
 
     Checks:
     - Basic fixture consistency (column count, endpoints, lengths, @refs)
@@ -253,25 +261,30 @@ def validate_golden_fixture() -> list[str]:
     - Every command code in fixture appears at least once in raw capture
     """
     errors: list[str] = []
+    fixture_path = config["fixture"]
+    pcap_path = config["pcap"]
+    raw_count = config["raw_count"]
 
-    if not GOLDEN_FIXTURE.is_file():
-        errors.append("Golden fixture not found: run scripts/generate_fixture_from_pcapng.py")
+    if not fixture_path.is_file():
+        errors.append(f"Golden fixture not found: {fixture_path}")
         return errors
 
+    print(f"--- Validating golden fixture: {fixture_path.name} ---", file=sys.stderr)
+
     # Check 1: Basic fixture consistency
-    errors.extend(validate(GOLDEN_FIXTURE))
+    errors.extend(validate(fixture_path))
 
     # Check 2: pcapng SHA-256 checksum
     header_text = ""
-    for line in GOLDEN_FIXTURE.read_text(encoding="utf-8").splitlines():
+    for line in fixture_path.read_text(encoding="utf-8").splitlines():
         if line.startswith("# pcapng SHA-256:"):
             header_text = line
             break
 
     if header_text:
         embedded_sha = header_text.split(":", 1)[1].strip()
-        if PCAP_PATH.is_file():
-            actual_sha = _pcapng_sha256(PCAP_PATH)
+        if pcap_path.is_file():
+            actual_sha = _pcapng_sha256(pcap_path)
             if embedded_sha != actual_sha:
                 errors.append(
                     f"Golden fixture SHA-256 mismatch: "
@@ -283,20 +296,20 @@ def validate_golden_fixture() -> list[str]:
             print(f"  ⚠  pcapng not found, skipping SHA check", file=sys.stderr)
 
     # Check 3: Event count within 2x of capture
-    data_lines, golden_codes = _parse_fixture_stats(GOLDEN_FIXTURE)
+    data_lines, golden_codes = _parse_fixture_stats(fixture_path)
     if data_lines > 0:
-        lower = CAPTURE_EVENT_COUNT // 2
-        upper = CAPTURE_EVENT_COUNT * 2
+        lower = raw_count // 2
+        upper = raw_count * 2
         if data_lines < lower:
             errors.append(
                 f"Golden fixture has {data_lines} events, "
-                f"but capture has {CAPTURE_EVENT_COUNT}. "
+                f"but capture has {raw_count}. "
                 f"Fixture may be grossly truncated (minimum: {lower})."
             )
         elif data_lines > upper:
             errors.append(
                 f"Golden fixture has {data_lines} events, "
-                f"but capture has {CAPTURE_EVENT_COUNT}. "
+                f"but capture has {raw_count}. "
                 f"Unexpectedly large fixture (maximum: {upper})."
             )
         else:
@@ -307,7 +320,7 @@ def validate_golden_fixture() -> list[str]:
             )
 
     # Check 4: Every command code in fixture appears in capture
-    capture_codes = _extract_capture_command_codes()
+    capture_codes = _extract_capture_command_codes(pcap_path)
     if capture_codes is not None and golden_codes:
         missing = golden_codes - capture_codes
         if missing:
@@ -334,8 +347,9 @@ def main() -> int:
     # Validate main fixture
     errors = validate(target)
 
-    # Validate golden fixture
-    errors.extend(validate_golden_fixture())
+    # Validate all golden fixtures
+    for config in GOLDEN_CONFIGS:
+        errors.extend(validate_golden_fixture(config))
 
     if errors:
         print("FAILED — fixture errors:", file=sys.stderr)

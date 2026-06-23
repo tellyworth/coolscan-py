@@ -99,6 +99,7 @@ class TestHardwareSmoke:
         proto = CoolscanProtocol(_DeviceDescriptor(), verbose=False)
         try:
             proto.initialize_scanner()
+            proto.focus_setup()
             result = proto.prescan()
             assert result is True
         finally:

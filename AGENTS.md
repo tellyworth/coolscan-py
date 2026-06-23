@@ -14,13 +14,13 @@
 - Golden fixture: `tests/fixtures/golden_single_bw.txt`
 - Protocol implementation: `coolscan/protocol.py`
 - Replay harness: `coolscan/usb_replay.py`
-- Main hardware test: `test_hardware_full_scan.py` (init -> prescan -> full scan -> save image)
-- Recently updated docs: `docs/protocol.md`, `docs/sane-image-data.md`, `docs/troubleshooting.md`
+- Main hardware test: `test_hardware_full_scan.py` (standalone script, init -> prescan -> full scan -> save image)
+- Recently updated docs: `HARDWARE_DIAGNOSTICS.md`, `.opencode/plans/golden-fixture-sequence-alignment.md`, `docs/protocol.md`, `docs/sane-image-data.md`, `docs/troubleshooting.md`
 
 ## Verification Commands
 
 - `make check-all` -- full pipeline: lint + validate fixtures + tests
-- `make lint` -- flake8 (E9/F63/F7/F82) + mypy
+- `make lint` -- flake8 (E9/F63/F7/F82) + mypy (**mypy runs with `|| true`, so type errors do NOT block the pipeline**)
 - `make validate-fixtures` -- fixture consistency: columns, endpoints, length-vs-hex, @path resolution, timestamp ordering, golden-vs-pcapng SHA cross-check
 - `make test` -- all pytest tests in `tests/`
 - `make test-fast` -- short traceback, stop on first failure
@@ -38,8 +38,8 @@
 ## Development Plan
 
 - See `docs/capture-driven-development-plan.md` for milestones, strategy, and SANE audit findings
+- Active sequence-refactor plan: `.opencode/plans/golden-fixture-sequence-alignment.md`
 - Protocol spec: `docs/unified-protocol-spec.md`; command reference: `docs/commands.md`
-- All milestones 1-9 are replay-locked but not yet hardware-verified
 
 ## Stale / Legacy Files (AVOID)
 
@@ -47,6 +47,7 @@
 - `tests/fixtures/test_basic_scan_capture.txt` is legacy; `tests/fixtures/golden_single_bw.txt` is the current oracle
 - `sane-comparison.md` at root is stale; use `docs/sane-comparison.md` instead
 - `CLEANUP_SUMMARY.md`, `COMPLETE_IMPLEMENTATION_STATUS.md`, `IMPLEMENTATION_SUMMARY.md`, `DEVELOPMENT_SUMMARY.md` are outdated status docs
+- `coolscan/*.backup` files are stale copies; ignore them
 
 ## Rules
 
