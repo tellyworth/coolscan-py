@@ -5,7 +5,7 @@ Tests the complete control flow: setup → scan → image read → release,
 using a minimal fixture with synthetic IN data (zeros) for the image block.
 
 The 64-byte allocation proves the protocol transitions correctly from
-scanner_ready → reserve_unit → object_position → set_window → send_lut →
+scanner_ready → reserve_unit → object_position → set_window → _upload_lut →
 start_scan → poll_until_ready → read_scan_data → release_unit, without
 needing real image bytes from the capture.
 
@@ -53,8 +53,12 @@ def test_full_scan_flow_with_synthetic_data(tmp_path):
     mode_params = (
         "000000080000000000000001030600000b540000"
     )
-    # LUT data: 768 bytes of identity LUT (bytes 0-255 repeated 3 times)
-    lut_hex = "".join(f"{i:02x}" for i in range(256)) * 3
+    # LUT data: 8192 bytes of identity LUT (4096 entries × 2 bytes, big-endian)
+    lut_bytes = bytearray(8192)
+    for i in range(4096):
+        lut_bytes[i * 2] = (i >> 8) & 0xFF
+        lut_bytes[i * 2 + 1] = i & 0xFF
+    lut_hex = lut_bytes.hex()
 
     lines = [
         # === scanner_ready: TUR poll (READY on first attempt) ===
@@ -82,11 +86,12 @@ def test_full_scan_flow_with_synthetic_data(tmp_path):
         f"0.403000000\t0x01\t20\t{mode_params}",
         "0.404000000\t0x82\t8\t0000000000000000",
 
-        # === send_lut (9-byte command + 768-byte data OUT) ===
-        "0.500000000\t0x01\t9\t2a00c0000000000300",
+        # === _upload_lut (10-byte command + 8192-byte data OUT) ===
+        # CDB: 2a 00 03 00 [channel=1] 01 00 20 00 00
+        "0.500000000\t0x01\t10\t2a000300010100200000",
         "0.501000000\t0x01\t1\td0",
         "0.502000000\t0x82\t1\t02",
-        f"0.503000000\t0x01\t768\t{lut_hex}",
+        f"0.503000000\t0x01\t8192\t{lut_hex}",
         "0.504000000\t0x82\t8\t0000000000000000",
 
         # === start_scan (6-byte CDB + 3-byte data OUT) ===
@@ -146,8 +151,17 @@ def test_full_scan_flow_with_synthetic_data(tmp_path):
         assert proto.reserve_unit() is True
         assert proto.object_position() is True
         assert proto.set_window(ScanParameters()) is True
-        lut_data = bytes([i for i in range(256)] * 3)
-        assert proto.send_lut(lut_data) is True
+        # Use _upload_lut (datatype 0x03) instead of deprecated send_lut (0xC0)
+        lut_data = bytes(
+            (i >> 8) & 0xFF for i in range(4096)
+            for _ in (0, 1)
+        )
+        # Rebuild as proper big-endian 16-bit entries
+        lut_data = bytearray(8192)
+        for i in range(4096):
+            lut_data[i * 2] = (i >> 8) & 0xFF
+            lut_data[i * 2 + 1] = i & 0xFF
+        assert proto._upload_lut(channel=1, lut_data=bytes(lut_data)) is True
         assert proto.start_scan() is True
         assert proto.scanner_ready(timeout=30) is True
 
