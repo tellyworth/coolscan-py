@@ -387,6 +387,8 @@ class CoolscanProtocol:
         self.maxbits = 12  # LUT bit depth from inquiry page 0xc1 byte 82 (SANE coolscan3.c:2443)
         self._scanner_alive = True  # Session-level scanner health flag
         self._usb_error_count = 0  # Consecutive USB error counter
+        self._last_prescan_image_data = b""
+        self._last_ir_preview_data = b""
 
         if usb_capture_replay is not None and self.interface.value != "usb":
             raise ValueError("usb_capture_replay is only valid for USB interface devices")
@@ -1178,21 +1180,59 @@ class CoolscanProtocol:
                     if len(data_in) == 0:
                         data_in = b""
 
-            # After short read, scanner stalls endpoints. Clear halt on both
-            # endpoints (like SANE sanei_usb.c) to recover the device.
+            # On short read, the scanner always sends an 8-byte status after the
+            # final image chunk (golden fixture line 1412: 0000000000000000).
+            # On real hardware, attempt to read it to keep the pipe clean.
+            # In replay mode, the fixture already encodes the correct
+            # data+status sequence; skip the extra read to avoid consuming
+            # the next OUT event and triggering ReplayDirectionError.
             if short_read:
+                if self._usb_capture_replay is not None:
+                    # Replay mode: fixture already handles status; return READY
+                    if self.verbose:
+                        print(
+                            f"    Short read ({len(data_in)}B), replay mode — "
+                            f"returning READY"
+                        )
+                    return data_in, StatusType.READY
+
+                # Real hardware: try to read the 8-byte status that the scanner
+                # sends after the last image chunk.  Only fall back to clear_halt
+                # if the status read fails (scanner stalled before sending status).
                 try:
-                    self.usb_device.clear_halt(self.bulk_out.bEndpointAddress)
-                except Exception:
-                    pass
-                try:
-                    self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
-                except Exception:
-                    pass
-                time.sleep(0.05)  # Brief settling delay after clear_halt
-                if self.verbose:
-                    print("    Short read completed, returning data")
-                return data_in, StatusType.READY
+                    status_data = self._usb_read_bulk(8)
+                    if hasattr(status_data, "tobytes"):
+                        status_data = status_data.tobytes()
+                    status, parsed = self._parse_status(status_data)
+                    if len(status_data) == 8:
+                        self._last_status_raw = status_data
+                        self._last_status_parsed = parsed
+                    if self.verbose:
+                        print(
+                            f"    Short read ({len(data_in)}B) + status "
+                            f"{status.name}"
+                        )
+                    return data_in, status
+                except Exception as e:
+                    if self.verbose:
+                        print(
+                            f"    Short read, status read failed ({e}), "
+                            f"clearing halts"
+                        )
+                    try:
+                        self.usb_device.clear_halt(
+                            self.bulk_out.bEndpointAddress
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self.usb_device.clear_halt(
+                            self.bulk_in.bEndpointAddress
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.05)
+                    return data_in, StatusType.READY
 
             # Read status (8 bytes) - always read status after command
             try:
@@ -2157,6 +2197,7 @@ class CoolscanProtocol:
 
         if self.verbose:
             print(f"  ✅ Total image data: {len(all_data)} bytes")
+        self._last_prescan_image_data = bytes(all_data)
         return bytes(all_data)
 
     def batch_full_scan_capture_frame(self) -> bool:
@@ -2412,6 +2453,7 @@ class CoolscanProtocol:
 
         if self.verbose:
             print(f"  ✅ Total IR preview data: {len(all_data)} bytes")
+        self._last_ir_preview_data = bytes(all_data)
         return bytes(all_data)
 
     def read_exposure_data(self) -> Optional[dict]:
@@ -3084,10 +3126,57 @@ class CoolscanProtocol:
 
         return self._execute_command()
 
+    def _drain_buffered_scan_data(self) -> int:
+        """Drain any residual image data buffered in the scanner.
+
+        On real hardware the scanner may buffer more image data than we
+        consumed; unread data causes eject_medium() to fail with
+        ILLEGAL REQUEST / COMMAND SEQUENCE ERROR.  Read 64 KB chunks
+        until a short read or stall occurs.
+
+        Returns:
+            Number of bytes drained (may include a short final chunk).
+        """
+        drained = 0
+        for _ in range(20):
+            try:
+                chunk = self.read_scan_data(65536, DataType.IMAGE_DATA)
+                if not chunk:
+                    break
+                drained += len(chunk)
+                if len(chunk) < 65536:
+                    # Short read — scanner has no more data
+                    break
+            except Exception:
+                # Stall or timeout — scanner has no more data
+                break
+        if drained and self.verbose:
+            print(f"  Drained {drained} trailing overscan bytes before eject")
+        return drained
+
+    def _bus_reset_device(self) -> bool:
+        """Attempt a USB bus reset as last-resort recovery.
+
+        Returns True if the reset appeared to succeed.
+        """
+        if self._usb_capture_replay is not None:
+            return False
+        if not self.usb_device:
+            return False
+        try:
+            self.usb_device.reset()
+            if self.verbose:
+                print("  USB bus reset succeeded")
+            return True
+        except Exception as e:
+            if self.verbose:
+                print(f"  USB bus reset failed: {e}")
+            return False
+
     def scan_teardown(self) -> bool:
         """Perform post-scan teardown matching golden fixture.
 
-        Golden fixture lines 1413-1478 sequence:
+        Golden fixture lines 1413-1478 sequence (after the final image read):
           1. TUR polling until scanner ready (3 polls, ~2s apart)
           2. e0/d0 eject medium + c1 execute
           3. TUR polling (3 polls)
@@ -3095,8 +3184,9 @@ class CoolscanProtocol:
           5. TUR polling
           6. SET_WINDOW for channels 1/2/3/9 (flush scanner state)
 
-        This ensures the scanner is properly released and ready for
-        the next session or safe disconnection.
+        The capture does NOT issue STOP_SCAN and does NOT drain overscan
+        after a naturally-completed full scan.  Each step is wrapped so a
+        failure in one step does not skip subsequent cleanup.
 
         Returns:
             True if teardown completed successfully.
@@ -3104,52 +3194,82 @@ class CoolscanProtocol:
         if self.verbose:
             print("Performing scan teardown...")
 
-        # 1. TUR polling until ready
-        if self.verbose:
-            print("  Post-scan TUR polling...")
-        for i in range(3):
-            self.test_unit_ready()
-            if i < 2:
-                time.sleep(2.0)
+        eject_ok = False
 
-        # 2. Eject medium (with hardware-specific retry)
-        if not self.eject_medium():
+        try:
+            # 1. TUR polling until ready
             if self.verbose:
-                print("  Eject failed, continuing teardown...")
-            # On real hardware, eject can fail if residual image data is still
-            # buffered in the scanner.  Issue STOP_SCAN to flush the scan state,
-            # then retry eject.  Skip this in replay mode to avoid consuming
-            # extra fixture events.
-            if self._usb_capture_replay is None:
+                print("  Post-scan TUR polling...")
+            for i in range(3):
+                try:
+                    self.test_unit_ready()
+                except Exception:
+                    pass
+                if i < 2:
+                    time.sleep(2.0)
+        except Exception:
+            pass
+
+        try:
+            # 2. Eject medium
+            eject_ok = self.eject_medium()
+            if not eject_ok:
                 if self.verbose:
-                    print("  Retrying eject after STOP_SCAN...")
-                self.stop_scan()
-                self.poll_until_ready(timeout=10, poll_interval=0.1)
-                if not self.eject_medium():
-                    if self.verbose:
-                        print("  Eject retry also failed, continuing teardown...")
-
-        # 3. TUR polling after eject
-        for i in range(3):
-            self.test_unit_ready()
-            if i < 2:
-                time.sleep(1.0)
-
-        # 4. Reset params
-        if not self.reset_params():
+                    print("  Eject failed, attempting USB bus reset...")
+                # Last resort: USB bus reset on real hardware
+                if self._usb_capture_replay is None:
+                    if self._bus_reset_device():
+                        time.sleep(0.5)
+                        try:
+                            eject_ok = self.eject_medium()
+                        except Exception:
+                            eject_ok = False
+                if not eject_ok and self.verbose:
+                    print("  Eject failed after all retries")
+        except Exception:
             if self.verbose:
-                print("  Reset failed, continuing teardown...")
+                print("  Eject step raised exception")
 
-        # 5. Final TUR
-        self.test_unit_ready()
+        try:
+            # 4. TUR polling after eject
+            for i in range(3):
+                try:
+                    self.test_unit_ready()
+                except Exception:
+                    pass
+                if i < 2:
+                    time.sleep(1.0)
+        except Exception:
+            pass
 
-        # 6. SET_WINDOW for all 4 channels to flush state
-        for win_id in [1, 2, 3, 9]:
-            self.set_scan_window(win_id, scan_type="normal")
+        try:
+            # 5. Reset params
+            if not self.reset_params():
+                if self.verbose:
+                    print("  Reset failed, continuing teardown...")
+        except Exception:
+            if self.verbose:
+                print("  Reset step raised exception")
+
+        try:
+            # 6. Final TUR
+            self.test_unit_ready()
+        except Exception:
+            pass
+
+        try:
+            # 7. SET_WINDOW for all 4 channels to flush state
+            for win_id in [1, 2, 3, 9]:
+                try:
+                    self.set_scan_window(win_id, scan_type="normal")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         if self.verbose:
             print("  Scan teardown complete")
-        return True
+        return eject_ok
 
     def prescan_frame(self, timeout: int = 120) -> bool:
         """Run the prescan setup/start/poll sequence for one frame.

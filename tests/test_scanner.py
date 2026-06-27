@@ -12,9 +12,13 @@ import pytest
 from unittest.mock import Mock, MagicMock, patch, call
 import sys
 
+import numpy as np
+
 sys.path.insert(0, ".")
 
 from coolscan.scanner import (
+    LS40_CHANNEL_OFFSETS,
+    _parse_scan_data,
     CoolscanScanner,
     scan_preview,
     scan_full,
@@ -603,6 +607,129 @@ class TestConvenienceFunctions:
         result = auto_focus_scanner(device)
 
         mock_scanner.auto_focus.assert_called_once()
+
+
+class TestParseScanData:
+    """Test _parse_scan_data with channel_offsets for trilinear-CCD alignment."""
+
+    def _make_plane_data(self, width, height, num_channels, pattern=None):
+        """Create synthetic plane-interleaved scan data.
+
+        Returns (bytearray, expected_array) where expected_array is the
+        correctly decoded image without any offset.
+        """
+        if pattern is None:
+            np.random.seed(42)
+            pattern = np.random.randint(0, 256, (height, width, num_channels), dtype=np.uint8)
+
+        # Build plane-interleaved data: [R…][G…][B…] per line
+        data = bytearray()
+        for y in range(height):
+            for ch in range(num_channels):
+                data.extend(pattern[y, :, ch].tobytes())
+        return data, pattern
+
+    def test_plane_no_offset(self):
+        """Plane-interleaved with zero offsets produces correct output."""
+        width, height = 64, 32
+        data, expected = self._make_plane_data(width, height, 3)
+        from coolscan.scanner import _parse_scan_data
+
+        result, trailing = _parse_scan_data(
+            data, width, height, 3, 8, "plane", (0, 0, 0)
+        )
+
+        np.testing.assert_array_equal(result, expected)
+        assert trailing == 0
+
+    def test_plane_positive_offset_shifts_right(self):
+        """Positive channel offset shifts the channel right (delays it)."""
+        width, height = 64, 4
+        # Create a simple pattern: each channel has a unique marker at column 10
+        pattern = np.zeros((height, width, 3), dtype=np.uint8)
+        for ch in range(3):
+            pattern[:, 10, ch] = 100 + ch * 50  # R=100, G=150, B=200
+
+        data, _ = self._make_plane_data(width, height, 3, pattern)
+        from coolscan.scanner import _parse_scan_data
+
+        # Shift channel 1 (G) right by 5: marker moves from col 10 to col 15
+        result, _ = _parse_scan_data(data, width, height, 3, 8, "plane", (0, 5, 0))
+
+        # R unchanged: marker at col 10
+        assert result[0, 10, 0] == 100
+        # G shifted right by 5: marker at col 15
+        assert result[0, 15, 1] == 150
+        # B unchanged: marker at col 10
+        assert result[0, 10, 2] == 200
+
+        # Edge pixels filled with zeros
+        assert result[0, 0, 1] == 0  # First 5 pixels of G are zero
+
+    def test_plane_negative_offset_shifts_left(self):
+        """Negative channel offset shifts the channel left (advances it)."""
+        width, height = 64, 4
+        pattern = np.zeros((height, width, 3), dtype=np.uint8)
+        for ch in range(3):
+            pattern[:, 10, ch] = 100 + ch * 50
+
+        data, _ = self._make_plane_data(width, height, 3, pattern)
+        from coolscan.scanner import _parse_scan_data
+
+        # Shift channel 2 (B) left by 5: marker moves from col 10 to col 5
+        result, _ = _parse_scan_data(data, width, height, 3, 8, "plane", (0, 0, -5))
+
+        # R unchanged: marker at col 10
+        assert result[0, 10, 0] == 100
+        # G unchanged: marker at col 10
+        assert result[0, 10, 1] == 150
+        # B shifted left by 5: marker at col 5
+        assert result[0, 5, 2] == 200
+
+        # Last 5 pixels of B are zero
+        assert result[0, 63, 2] == 0
+
+    def test_ls40_channel_offsets(self):
+        """LS-40 ED decode-time workaround offsets: R=0, G=+10, B=+20."""
+        width, height = 128, 8
+        # Create a pattern with a vertical edge at column 50
+        pattern = np.zeros((height, width, 3), dtype=np.uint8)
+        for ch in range(3):
+            pattern[:, 50:, ch] = 200  # Bright region starts at col 50
+
+        data, _ = self._make_plane_data(width, height, 3, pattern)
+        from coolscan.scanner import _parse_scan_data
+
+        # Apply LS-40 workaround offsets: G shifted right by 10, B by 20
+        result, _ = _parse_scan_data(
+            data, width, height, 3, 8, "plane", LS40_CHANNEL_OFFSETS
+        )
+
+        # R edge unchanged: bright starts at col 50
+        assert result[0, 49, 0] == 0
+        assert result[0, 50, 0] == 200
+
+        # G edge shifted right by 10: bright starts at col 60
+        assert result[0, 59, 1] == 0
+        assert result[0, 60, 1] == 200
+
+        # B edge shifted right by 20: bright starts at col 70
+        assert result[0, 69, 2] == 0
+        assert result[0, 70, 2] == 200
+
+    def test_pixel_format_unchanged(self):
+        """Pixel-interleaved format ignores channel_offsets (no offset applied)."""
+        width, height = 16, 8
+        np.random.seed(99)
+        raw = np.random.randint(0, 256, height * width * 3, dtype=np.uint8)
+        data = bytearray(raw)
+        from coolscan.scanner import _parse_scan_data
+
+        result, _ = _parse_scan_data(data, width, height, 3, 8, "pixel", LS40_CHANNEL_OFFSETS)
+
+        # Pixel format just reshapes; offsets are ignored
+        expected = raw[:height * width * 3].reshape((height, width, 3))
+        np.testing.assert_array_equal(result, expected)
 
 
 if __name__ == "__main__":

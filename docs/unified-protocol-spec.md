@@ -321,6 +321,8 @@ The prescan performs auto-exposure (AE) at low resolution to determine optimal e
    - Two 130752-byte blocks (`28000000000001fec080`)
    - One 11520-byte residual block (`280000000000002d0080`)
    - Total: 273024 bytes of prescan image data
+   - Decode as 12-bit RGB, 96×474, plane-interleaved. See `docs/protocol.md` and
+     `docs/sane-image-data.md` for the verified low-res decoding recipe.
 10. **Read Exposure Data** - `read_exposure_data()` reads:
     - 6-byte header (`28008e00000000000680`)
     - 3464-byte exposure/calibration table (`28008e000000000d8880`)
@@ -351,6 +353,12 @@ Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The imple
 11. **Polling Loop** - TEST_UNIT_READY until scanner is ready
 12. **READ** commands to get scan data
 13. **STOP_SCAN** (`1b 00 00 00 04 00`) when complete
+
+> **Single-BW full scan nuance:** The capture-driven `full_scan_frame()` sequence
+> runs a 290 DPI IR/RGB preview between setup and the high-res capture. The
+> `read_ir_preview_data()` helper reads 997632 bytes of 12-bit plane-interleaved
+> R/G/B/IR data (288×433). See `docs/protocol.md` for the verified decoding
+> recipe and channel order.
 
 **USB replay tests:** The legacy full-sequence replay test that locked
 `perform_scan_sequence()` to `test_basic_scan_capture.txt` was removed.

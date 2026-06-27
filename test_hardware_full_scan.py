@@ -10,12 +10,17 @@ import time
 
 sys.path.insert(0, ".")
 
+from PIL import Image
+import numpy as np
+
 from coolscan.device import find_scanners
 from coolscan.protocol import CoolscanProtocol, DataType, ScanParameters
+from coolscan.scanner import LS40_CHANNEL_OFFSETS, _parse_scan_data
 
 
 def main():
     output_path = sys.argv[1] if len(sys.argv) > 1 else "hardware_scan_output.png"
+    base = output_path.rsplit(".", 1)[0]
 
     # 1. Discover scanner
     scanners = find_scanners()
@@ -26,7 +31,7 @@ def main():
     print(f"Found scanner: {device.vendor} {device.model} ({device.revision})")
 
     protocol = None
-    success = False
+    scan_saved = False
     try:
         # 2. Create protocol with verbose logging + USB capture
         protocol = CoolscanProtocol(device, verbose=True)
@@ -59,6 +64,21 @@ def main():
         if not prescan_ok:
             return False
 
+        if protocol._last_prescan_image_data:
+            # Prescan data is 12-bit RGB plane-interleaved.  Scale the full-res
+            # LS-40 ED channel offsets (0, 10, 20) by the 96/2900 DPI ratio.
+            prescan_arr, _ = _parse_scan_data(
+                bytearray(protocol._last_prescan_image_data),
+                width=96,
+                height=474,
+                num_channels=3,
+                depth=12,
+                format="plane",
+                channel_offsets=(0, 0, 1),
+            )
+            Image.fromarray(prescan_arr, "RGB").save(f"{base}_prescan_96dpi.png")
+            print(f"  Saved prescan image to {base}_prescan_96dpi.png")
+
         # 6. Full scan setup
         print("\n=== FULL SCAN SETUP ===")
         params = ScanParameters(resolution=2700)
@@ -67,123 +87,140 @@ def main():
             return False
         print("Scan sequence complete, scanner ready for data read")
 
+        if protocol._last_ir_preview_data:
+            # 290 DPI IR preview is 12-bit plane-interleaved R, G, B, IR.
+            # Scale the full-res LS-40 ED RGB offsets (0, 10, 20) by 290/2900.
+            ir_arr, _ = _parse_scan_data(
+                bytearray(protocol._last_ir_preview_data),
+                width=288,
+                height=433,
+                num_channels=4,
+                depth=12,
+                format="plane",
+                channel_offsets=(0, 1, 2, 0),
+            )
+            Image.fromarray(ir_arr[:, :, 0:3], "RGB").save(f"{base}_ir_preview_290dpi.png")
+            Image.fromarray(ir_arr[:, :, 3], "L").save(f"{base}_ir_preview_290dpi_ir.png")
+            print(f"  Saved IR preview RGB to {base}_ir_preview_290dpi.png")
+            print(f"  Saved IR preview IR  to {base}_ir_preview_290dpi_ir.png")
+
         # 7. Read scan data
         print("\n=== READING SCAN DATA ===")
         start = time.time()
         scan_data = bytearray()
         chunk_idx = 0
 
-        # Read in 64KB chunks. The scanner signals end-of-data via a non-READY
-        # status or a short read. We use a generous upper bound and stop early
-        # if the scanner signals completion.
-        max_chunks = 500  # ~32MB max
-        chunk_size = 64 * 1024
+        # Read exactly the expected frame size.  The golden fixture shows the
+        # host reading a precise amount of image data and then going straight
+        # to TUR/eject; reading trailing overscan in 64 KB chunks triggers a
+        # scanner hang on the LS-40 ED.  Use a large line-group-sized request
+        # (0x3f480 = 259200 bytes) like the capture, and make the final read
+        # exactly the remaining bytes so it returns a full transfer, not a
+        # short read.
+        width = 2880
+        height = 3888
+        num_channels = 3
+        bytes_per_channel = 1
+        expected_bytes = width * height * num_channels * bytes_per_channel
+        chunk_size = 0x3F480  # 259200 bytes, matches golden fixture reads
 
-        for i in range(max_chunks):
-            data = protocol.read_scan_data(chunk_size, DataType.IMAGE_DATA)
+        bytes_read = 0
+        while bytes_read < expected_bytes:
+            remaining = expected_bytes - bytes_read
+            request_length = min(chunk_size, remaining)
+            data = protocol.read_scan_data(request_length, DataType.IMAGE_DATA)
             if not data:
-                print(f"Empty read at chunk {i}, stopping")
+                print(f"Empty read at chunk {chunk_idx}, stopping")
                 break
             scan_data.extend(data)
+            bytes_read += len(data)
             chunk_idx += 1
             elapsed = time.time() - start
-            mb = len(scan_data) / (1024 * 1024)
-            print(f"  Chunk {i + 1}: {len(data)} bytes (total: {mb:.1f} MB, {elapsed:.1f}s)")
-
-            # If we got less than requested, scanner may be done
-            if len(data) < chunk_size:
-                print(f"Short read ({len(data)} < {chunk_size}), scanner done")
-                break
+            mb = bytes_read / (1024 * 1024)
+            print(f"  Chunk {chunk_idx}: {len(data)} bytes (total: {mb:.1f} MB, {elapsed:.1f}s)")
 
         elapsed = time.time() - start
         total_mb = len(scan_data) / (1024 * 1024)
         print(f"\nRead {chunk_idx} chunks, {total_mb:.1f} MB in {elapsed:.1f}s")
 
-        # Teardown scanner (golden fixture lines 1413-1478)
-        print("\n=== SCAN TEARDOWN ===")
-        protocol.scan_teardown()
-        print("Teardown complete")
-
-        # 8. Save image
+        # 8. Save image using decode-time channel alignment
         if scan_data:
             print(f"\n=== SAVING IMAGE ===")
             try:
-                import numpy as np
-                from PIL import Image
-
                 data_len = len(scan_data)
-
-                # LS-40 ED scan data format (verified by autocorrelation analysis):
-                # - 8-bit RGB (NOT 16-bit), plane-interleaved per line
-                # - Each line: [R_plane][G_plane][B_plane] -- no padding
-                # - Stride: 8640 bytes (3 * 2880)
-                # - Autocorrelation peak at lag=8640 confirms width=2880
                 width = 2880
-                bytes_per_line = 8640  # 3*width, no padding
-                height = data_len // bytes_per_line
+                height = 3888
+                num_channels = 3
+                depth = 8
 
-                print(f"  Dimensions: {width}x{height} "
-                      f"(bytes_per_line={bytes_per_line})")
-                print(f"  Actual bytes: {data_len} ({data_len % bytes_per_line} trailing)")
+                # Decode as plane-interleaved with LS-40 ED channel offsets.
+                # The workaround shifts G +10 px and B +20 px during decode
+                # to compensate for trilinear-CCD misalignment.
+                img_aligned, trailing = _parse_scan_data(
+                    scan_data, width, height, num_channels, depth, "plane",
+                    LS40_CHANNEL_OFFSETS,
+                )
+                print(
+                    f"  Dimensions: {width}x{height}, "
+                    f"bytes={data_len}, trailing={trailing}, "
+                    f"offsets={LS40_CHANNEL_OFFSETS}"
+                )
 
-                # Parse 8-bit RGB, plane-interleaved per line
-                # Layout: [R_0..R_{w-1}][G_0..G_{w-1}][B_0..B_{w-1}]
-                raw_arr = np.frombuffer(scan_data, dtype=np.uint8)
-                img_r = np.zeros((height, width), dtype=np.uint8)
-                img_g = np.zeros((height, width), dtype=np.uint8)
-                img_b = np.zeros((height, width), dtype=np.uint8)
+                # Save aligned image (with workaround)
+                image = Image.fromarray(img_aligned, "RGB")
+                image.save(output_path)
+                print(f"Saved {width}x{height} aligned image to {output_path}")
 
-                offset = 0
-                for y in range(height):
-                    line_end = offset + bytes_per_line
-                    if line_end > data_len:
-                        print(f"  Short line at y={y}, stopping")
-                        height = y
-                        break
-                    # Plane-interleaved: R plane, G plane, B plane (each = width bytes)
-                    img_r[y, :] = raw_arr[offset:offset + width]
-                    img_g[y, :] = raw_arr[offset + width:offset + 2*width]
-                    img_b[y, :] = raw_arr[offset + 2*width:offset + 3*width]
-                    offset = line_end
+                # Save unaligned copy (zero offsets) for comparison
+                img_unaligned, _ = _parse_scan_data(
+                    scan_data, width, height, num_channels, depth, "plane",
+                    (0, 0, 0),
+                )
+                Image.fromarray(img_unaligned, "RGB").save(f"{base}_unaligned.png")
+                print(f"  Unaligned copy saved: {base}_unaligned.png")
 
-                # Grayscale with SANE weights (0.27 R + 0.54 G + 0.19 B)
-                gray8 = (0.27 * img_r.astype(np.float32) +
-                         0.54 * img_g.astype(np.float32) +
-                         0.19 * img_b.astype(np.float32)).astype(np.uint8)
-
-                # Contrast stretch using percentiles (film negatives need this)
-                p1, p99 = np.percentile(gray8, 0.5), np.percentile(gray8, 99.5)
-                if p99 > p1:
-                    gray8 = np.clip((gray8.astype(np.float32) - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
-
-                img = Image.fromarray(gray8)
-                img.save(output_path)
-                print(f"Saved {width}x{height} grayscale image to {output_path}")
-
-                # Also save raw data for further analysis
-                raw_path = output_path.replace(".png", ".raw")
+                # Save raw data for further analysis
+                raw_path = output_path.rsplit(".", 1)[0] + ".raw"
                 with open(raw_path, "wb") as f:
                     f.write(scan_data)
                 print(f"Saved raw data ({data_len} bytes) to {raw_path}")
+
+                scan_saved = True
 
             except Exception as img_err:
                 print(f"Image save failed: {img_err}")
                 import traceback
                 traceback.print_exc()
                 # Save raw data as fallback
-                raw_path = output_path.replace(".png", ".raw")
+                raw_path = output_path.rsplit(".", 1)[0] + ".raw"
                 with open(raw_path, "wb") as f:
                     f.write(scan_data)
                 print(f"Saved raw data to {raw_path}")
 
-        success = True
-        return True
+        # Teardown scanner (golden fixture lines 1413-1478)
+        print("\n=== SCAN TEARDOWN ===")
+        try:
+            protocol.scan_teardown()
+            print("Teardown complete")
+        except Exception as teardown_err:
+            print(f"⚠️  Teardown encountered an error: {teardown_err}")
+            print("   Scanner may need power cycling if it remains unresponsive.")
 
     except Exception as e:
         print(f"\nError: {e}")
         import traceback
-
         traceback.print_exc()
+
+        # Attempt teardown even after an error
+        if protocol:
+            print("\n=== ATTEMPTING TEARDOWN AFTER ERROR ===")
+            try:
+                protocol.scan_teardown()
+                print("Teardown complete")
+            except Exception as teardown_err:
+                print(f"⚠️  Teardown also failed: {teardown_err}")
+                print("   Scanner may need power cycling if it remains unresponsive.")
+
         return False
 
     finally:
@@ -192,18 +229,19 @@ def main():
                 protocol.disable_usb_capture()
             except Exception:
                 pass
-            if not success:
-                try:
-                    protocol.eject_medium()
-                    print("Film ejected")
-                except Exception:
-                    print("Eject failed (scanner may be unresponsive)")
             try:
                 protocol.release_unit()
             except Exception:
                 pass
             protocol.close()
             print("\nUSB capture saved to test_hardware_scan_capture.txt")
+
+    if scan_saved:
+        print(f"\n✅ Scan completed successfully — image saved to {output_path}")
+    else:
+        print("\n⚠️  Scan did not produce an image")
+
+    return True
 
 
 if __name__ == "__main__":

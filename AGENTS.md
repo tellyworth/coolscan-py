@@ -56,3 +56,54 @@
 - Run `make check-all` before claiming work is done
 - One commit per logical chunk; commit message states which capture slice is enforced
 - `*.pcapng` files are gitignored but must exist locally for offline fixture regeneration
+
+## Working with Hex/Binary Strings
+
+Long hex or binary strings in fixtures, logs, and docs are easy to corrupt. Common mistakes:
+
+- Dropping or duplicating bytes while transcribing.
+- Case-insensitive mismatches (`AB` vs `ab`) in comparisons.
+- Off-by-one byte counts, especially when whitespace is involved.
+
+Avoid manual copy/paste validation. Prefer these CLI workflows:
+
+**Count bytes in a contiguous hex string**
+
+```bash
+printf '00112233aabbccdd' | awk '{print length/2}'
+```
+
+**Count bytes in the golden fixture payload on line N**
+
+The fixture is tab-separated: timestamp, endpoint, length, hex. The payload is column 4:
+
+```bash
+awk -F'\t' 'NR==10 {print length($4)/2}' tests/fixtures/golden_single_bw.txt
+```
+
+**Verify the fixture's length column matches the payload**
+
+```bash
+awk -F'\t' 'NR==10 {actual=length($4)/2; print ($3==actual ? "OK" : "FAIL: claimed "$3", actual "actual)}' tests/fixtures/golden_single_bw.txt
+```
+
+**Normalize and compare two hex strings**
+
+```bash
+clean_hex() { tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'; }
+echo "00 11 22 33" | clean_hex > /tmp/a.hex
+echo "00112233" | clean_hex > /tmp/b.hex
+diff /tmp/a.hex /tmp/b.hex && echo "identical"
+```
+
+**Compare a fixture line against a captured/reference value**
+
+```bash
+awk -F'\t' 'NR==10 {print $4}' tests/fixtures/golden_single_bw.txt | clean_hex > /tmp/fix.hex
+echo "0206280001000000" | clean_hex > /tmp/ref.hex
+diff /tmp/fix.hex /tmp/ref.hex && echo "identical"
+```
+
+**Never eyeball strings longer than a few bytes**
+
+For anything beyond 8 bytes, use normalized `diff` rather than visual scanning. When in doubt, run `make validate-fixtures` -- it already checks length-vs-hex consistency and SHA-256 alignment for the golden fixture.

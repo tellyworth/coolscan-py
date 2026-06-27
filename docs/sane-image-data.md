@@ -296,6 +296,36 @@ The remaining 5120 bytes after 3792 complete rows contain partial row data
 > the data as 16-bit big-endian with 12-bit shift (>>4), producing vertical
 > striping artefacts from wrong bit-depth unpacking. Both bugs are now fixed.
 
+### Low-Resolution Verified Formats
+
+#### 96 DPI Prescan
+
+Read by `CoolscanProtocol.read_prescan_image_data()`:
+
+- **Bit depth**: 12-bit per channel, packed in big-endian `uint16`
+- **Width**: 96 pixels (sensor width 2880 scaled by 96/2900)
+- **Channels**: 3 (R, G, B)
+- **Height**: derived from byte count: `273024 / (96 * 3 * 2) = 474`
+- **Layout**: plane-interleaved per row: `[R[96]][G[96]][B[96]]`
+- **12-bit → 8-bit**: `np.frombuffer(data, dtype=">u2") >> 4`
+- **Channel offsets**: scale `LS40_CHANNEL_OFFSETS = (0, 10, 20)` by 96/2900 → `(0, 0, 1)`
+
+#### 290 DPI IR Preview
+
+Read by `CoolscanProtocol.read_ir_preview_data()`:
+
+- **Bit depth**: 12-bit per channel, packed in big-endian `uint16`
+- **Width**: 288 pixels (sensor width 2880 scaled by 290/2900)
+- **Channels**: 4, in window-ID order: **R, G, B, IR** (windows 1, 2, 3, 9)
+- **Height**: derived from byte count: `997632 / (288 * 4 * 2) = 433`
+- **Layout**: plane-interleaved per row: `[R[288]][G[288]][B[288]][IR[288]]`
+- **12-bit → 8-bit**: `np.frombuffer(data, dtype=">u2") >> 4`
+- **Channel offsets**: scale `LS40_CHANNEL_OFFSETS = (0, 10, 20)` by 290/2900 → `(0, 1, 2)`, with IR offset `0` → `(0, 1, 2, 0)`
+
+> **Important**: The 12-bit sample sits in the **low 12 bits** of the big-endian
+> `uint16`. Use `>> 4` to extract the meaningful top 8 bits. Using `>> 8` keeps
+> only the top 4 bits and produces very dark images.
+
 #### Grayscale Conversion
 
 SANE converts RGB to grayscale using fixed weights (`coolscan.c` lines 2402-2420):

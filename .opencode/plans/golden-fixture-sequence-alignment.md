@@ -2,10 +2,10 @@
 
 ## Status
 
-Active. The immediate single-BW and batch fixture decomposition is complete and
-all replay/property tests pass (`make check-all`: 205 passed, 3 skipped). Work
-now focuses on composing the batch helpers into a full scenario method,
-strengthening cross-capture property tests, and cleaning up legacy artifacts.
+Active. The single-BW and batch fixture decomposition is complete, the merge
+conflict is resolved, and all replay/property tests pass (`make check-all`:
+216 passed, 3 skipped). Work now focuses on Phase 7 hardware validation of the
+eject mitigation and the new `batch_scan()` path.
 
 ## Background and principles
 

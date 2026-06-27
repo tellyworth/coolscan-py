@@ -207,6 +207,16 @@ The scanner uses a **non-standard 6-byte command format** (not standard SCSI), a
 
 #### Image Artefacts
 
+**Horizontal colour fringing on LS-40 ED:**
+If your LS-40 ED scans show a consistent colour fringe (red/green/blue
+halos along edges), this is caused by the trilinear CCD sensors being
+physically offset: the green sensor reads ~10 px to the left of red, and
+blue ~20 px to the left of red.  A temporary decode-time shift workaround
+(`LS40_CHANNEL_OFFSETS = (0, 10, 20)`) is applied automatically during
+plane-to-pixel conversion.  To disable it, pass `channel_offsets=(0, 0, 0)`
+to `scan_full()` / `scan_area()` / `scan_preview()`.  This workaround will
+be removed once the correct scanner configuration parameter is identified.
+
 **Diagonal smear / streak artefacts:**
 Caused by wrong pixel width in the decoding step. If each row's RGB planes are split
 at incorrect byte offsets, each successive row shifts horizontally, producing diagonal

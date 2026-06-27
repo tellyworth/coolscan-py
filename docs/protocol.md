@@ -159,12 +159,54 @@ for y in range(height):
     B_row = raw[offset + 2*width:offset + 3*width]
 ```
 
+### Low-Resolution Scan Data (Prescan and IR Preview)
+
+The LS-40 ED also returns 12-bit plane-interleaved image data for the 96 DPI
+prescan and the 290 DPI IR preview. The wire format is the same as the full-res
+scan (plane-interleaved, no padding), but samples are packed as 12-bit values in
+big-endian `uint16` containers.
+
+#### 96 DPI Prescan
+
+Read by `read_prescan_image_data()`:
+
+- **Bit depth**: 12-bit per channel (2 bytes per sample, big-endian)
+- **Pixel width**: 96
+- **Channels**: 3 (R, G, B)
+- **Height derived from data size**: `273024 / (96 * 3 * 2) = 474`
+- **Channel layout**: Plane-interleaved per row: `[R[96]][G[96]][B[96]]`
+- **12-bit to 8-bit conversion**: `np.frombuffer(data, dtype=">u2") >> 4`
+- **Channel offsets** (scaled from full-res LS40_CHANNEL_OFFSETS by 96/2900):
+  `(0, 0, 1)`
+
+#### 290 DPI IR Preview
+
+Read by `read_ir_preview_data()`:
+
+- **Bit depth**: 12-bit per channel (2 bytes per sample, big-endian)
+- **Pixel width**: 288
+- **Channels**: 4 (R, G, B, IR — output order follows window IDs 1, 2, 3, 9)
+- **Height derived from data size**: `997632 / (288 * 4 * 2) = 433`
+- **Channel layout**: Plane-interleaved per row: `[R[288]][G[288]][B[288]][IR[288]]`
+- **12-bit to 8-bit conversion**: `np.frombuffer(data, dtype=">u2") >> 4`
+- **Channel offsets** (scaled from full-res LS40_CHANNEL_OFFSETS by 290/2900):
+  `(0, 1, 2, 0)` (IR channel gets zero offset)
+
+> **Note**: The 12-bit samples occupy the **low 12 bits** of the big-endian
+> `uint16` word, not the high 12 bits. Shifting by `>> 4` keeps the top 8 bits
+> of the 12-bit value; `>> 8` keeps only the top 4 bits and produces very dark
+> images.
+
 ### Common Bugs
 
 - **Wrong width** (e.g. 2624 instead of 2880): produces diagonal smear from channel
   plane misalignment. Each row shifts by the width difference.
 - **Wrong bit depth** (e.g. 12-bit instead of 8-bit): produces vertical striping
   from incorrect bit unpacking. Channel statistics become inconsistent.
+- **Wrong 12-bit bit selection** (`>> 8` instead of `>> 4`): produces very dark
+  low-resolution images because only the top 4 bits are retained.
+- **Wrong 4-channel order** (e.g. IR/R/G/B instead of R/G/B/IR): produces false
+  color in the RGB preview and places a visible frame in the IR layer.
 - **Assumed padding** (e.g. 128 bytes per row): the LS-40 ED at 8-bit has no per-row
   padding. The 0xFF values in the data are actual sensor values (unexposed film areas),
   not padding bytes.
