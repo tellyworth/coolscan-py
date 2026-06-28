@@ -349,9 +349,14 @@ autofocus call.
 7. **Stage B data byte count mismatch**: Expected 372,984 bytes (287x433x3) but only
    196,524 returned. Either the scan area is smaller than the WDB suggests, or data
    is packed/compressed differently at 290 DPI.
-8. **Segment 0 lacks Stage A**: Segment 0 skips the 4-window 290 DPI scan (Stage A),
-   using the initial strip scan instead. This confirms Stage A is redundant with the
-   initial preview scan for the first frame.
+ 8. **Segment 0 lacks Stage A**: Segment 0 skips the 4-window 290 DPI scan (Stage A),
+    using the initial strip scan instead. This confirms Stage A is redundant with the
+    initial preview scan for the first frame.
+ 9. **Hardware test preview decoding is speculative**: `test_hardware_full_scan.py`
+    saves Stage A/B previews as PNGs using assumed 287×433×12-bit dimensions, but the
+    returned byte counts (~262 KB for Stage A, ~197 KB for Stage B) do not match those
+    assumptions. The PNGs may be garbage until the packing/format is understood; raw
+    `.raw` files are saved alongside for analysis.
 
 ## Could We Scan the Full Strip Continuously at 2900 DPI?
 

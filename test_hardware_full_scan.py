@@ -151,6 +151,12 @@ def main():
                 scan_saved = True
 
                 # Stage A preview (290 DPI, 4 channels: R, G, B, IR)
+                # NOTE: The byte counts for the batch 290 DPI intermediate
+                # stages do not match the single-frame 290 DPI preview
+                # (Stage A: ~262 KB returned vs ~497 KB expected at 8-bit,
+                # Stage B: ~197 KB vs ~373 KB expected). The 287x433x12-bit
+                # decode below is speculative and may produce garbage; the raw
+                # bytes are also saved for offline analysis.
                 if "stage_a" in previews and previews["stage_a"]:
                     stage_a_path = f"{base}_frame_{frame_idx}_stage_a.png"
                     save_preview_image(
