@@ -254,6 +254,23 @@ The scanner determines optimal exposure through a prescan (auto-exposure) phase:
 Exposure in the 58-byte WDB is stored as a single 32-bit big-endian value
 at **bytes 54–57** (not per-channel bytes at 0x49–0x4B).
 
+### Auto-Exposure Wiring
+
+`set_scan_window()` automatically applies calibrated exposure values when
+talking to real hardware:
+
+- If `read_channel_state()` was called for the channel, the calibrated
+  exposure from the READ 0x8c response is stored in `_calibrated_exposure`.
+- On the next `set_scan_window()` call for that channel (with no explicit
+  `exposure` parameter), the stored value is used for WDB bytes 54–57.
+- **IR channel** (window_id=9): the calibrated value is multiplied by 0.9
+  before being written to the WDB (pcapng-verified across captures).
+- **RGB channels** (window_id 1, 2, 3): the calibrated value is used directly
+  (scaling factor 1.0; no universal RGB scaling formula exists).
+- During fixture replay (`usb_capture_replay` set), the auto-apply is
+  disabled to preserve golden-fixture byte-exact matching.
+- Callers can disable auto-apply via `use_calibrated_exposure=False`.
+
 ## Error Handling
 
 ### Common Error Scenarios

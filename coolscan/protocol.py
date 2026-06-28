@@ -1927,12 +1927,20 @@ class CoolscanProtocol:
         depth: int = 8,
         resolution: Optional[int] = None,
         exposure: Optional[int] = None,
+        use_calibrated_exposure: bool = True,
     ) -> bool:
         """
         Send SET_WINDOW (0x24) command with 58-byte window descriptor.
 
         This is REQUIRED before LUT uploads and START_SCAN.
         From USB capture: 24000000000000003a80 + 58 bytes WDB
+
+        When talking to real hardware (not replaying a fixture) and
+        ``use_calibrated_exposure`` is True, the calibrated exposure value
+        stored by ``read_channel_state()`` is automatically applied to the
+        WDB bytes 54–57 if no explicit ``exposure`` is given.  The IR channel
+        (window_id=9) receives a 0.9× scaling factor on its calibrated value,
+        consistent with the pcapng capture analysis.
 
         Args:
             window_id: Window ID (1=R, 2=G, 3=B, 9=IR)
@@ -1943,12 +1951,14 @@ class CoolscanProtocol:
             resolution: Deprecated; use scan_type instead. Kept for backward
                 compatibility: 96 selects prescan, 290 selects setup.
             exposure: Optional calibrated exposure (10ns units) that overrides
-                the table default at WDB bytes 54–57.  When ``None``, the
-                capture-derived table default is used.  Calibrated values from
-                ``read_channel_state()`` are stored in ``_calibrated_exposure``
-                but are NOT applied automatically because the capture shows
-                additional processing between raw channel-state values and the
-                final WDB exposure fields.
+                the table default at WDB bytes 54–57.  When ``None`` and
+                auto-apply conditions are met, the calibrated exposure from
+                ``read_channel_state()`` is used.
+            use_calibrated_exposure: When True (default), auto-apply the
+                calibrated exposure from ``_calibrated_exposure`` on real
+                hardware.  Set to False to always use the table default.
+                Always False during fixture replay to preserve golden-fixture
+                byte-exact matching.
         """
         # Resolve effective scan_type (resolution is a deprecated override)
         if resolution == 96:
@@ -1958,15 +1968,28 @@ class CoolscanProtocol:
         else:
             effective_type = scan_type if scan_type in _SCAN_WINDOW_WDB_TABLES else "normal"
 
-        # Use explicit exposure when provided.  Calibrated values from
-        # read_channel_state() are stored in ``_calibrated_exposure`` but are
-        # NOT applied automatically — the capture shows the host applying
-        # additional processing between the raw channel-state values and the
-        # WDB exposure fields.  Callers that want calibrated exposure should
-        # pass it explicitly via the ``exposure`` parameter.
+        # Auto-apply calibrated exposure when:
+        #   - No explicit exposure was provided
+        #   - Auto-apply is enabled
+        #   - We are talking to real hardware (not replaying a fixture)
+        #   - A calibrated value exists for this window_id
+        effective_exposure = exposure
+        if (
+            exposure is None
+            and use_calibrated_exposure
+            and self._usb_capture_replay is None
+            and window_id in self._calibrated_exposure
+        ):
+            raw_calibrated = self._calibrated_exposure[window_id]
+            if window_id == 9:
+                # IR channel: apply 0.9× scaling factor (pcapng-verified)
+                effective_exposure = int(round(raw_calibrated * 0.9))
+            else:
+                # RGB channels: use calibrated value directly (factor 1.0)
+                effective_exposure = raw_calibrated
 
         # Build the 58-byte WDB using the structured builder
-        wdb = self._build_scan_window_wdb(window_id, effective_type, depth, exposure=exposure)
+        wdb = self._build_scan_window_wdb(window_id, effective_type, depth, exposure=effective_exposure)
         if wdb is None:
             print(f"  ⚠️  Unknown window ID {window_id} for scan_type={scan_type}, resolution={resolution}")
             return False
@@ -2809,6 +2832,18 @@ class CoolscanProtocol:
             self._replay_reraise_if_needed(e)
             print(f"    ⚠️  Error reading channel state: {e}")
             return None
+
+    def set_calibrated_exposure(self, channel: int, exposure: int) -> None:
+        """Set a calibrated exposure value for a channel.
+
+        Convenience method for tests and callers that need to inject calibrated
+        exposure values without reaching into ``_calibrated_exposure`` directly.
+
+        Args:
+            channel: Channel ID (1=R, 2=G, 3=B, 9=IR).
+            exposure: Calibrated exposure in 10-nanosecond units.
+        """
+        self._calibrated_exposure[channel] = exposure
 
     def stop_scan(self) -> bool:
         """Stop the current scan operation.

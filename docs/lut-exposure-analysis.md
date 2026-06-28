@@ -335,3 +335,118 @@ A reusable extraction script has been created at `scripts/extract_lut_from_fixtu
 - Outputs JSON summaries and exposure calibration data
 
 Run with `--plot` for ASCII plots, `--json` for machine-readable output.
+
+---
+
+## Auto-Exposure Scaling Analysis
+
+**Date**: 2026-06-28
+**Scope**: Relationship between READ 0x8c (channel state) responses and SET_WINDOW WDB exposure values
+**Trust hierarchy**: pcapng captures (ground truth) > golden fixture > SANE source code
+**Script**: `scripts/analyze_exposure_scaling.py` (read-only analysis tool)
+
+### Extraction Methodology
+
+For each capture, we extracted:
+
+1. **READ 0x8c responses**: The host sends `28 00 8c 00 <channel> 03 00 00 0a 80` to read channel state. The scanner responds with a 10-byte payload: `8c 20 00 00 00 04 <4-byte calibrated exposure>`. The 4-byte value (big-endian uint32) is the scanner's auto-calibrated exposure for that channel, in 10-nanosecond units.
+
+2. **SET_WINDOW WDB exposures**: The host sends a 58-byte Window Descriptor Block (WDB) via the SET_WINDOW (0x24) command. The exposure field is at bytes 54–57 (the last 4 bytes of the 58-byte payload), in 10-nanosecond units.
+
+3. **Scaling factor**: `WDB_exposure / 0x8c_calibrated` for each channel.
+
+### Data Tables
+
+#### Single-BW Capture (`ls40-single-bw.pcapng`)
+
+This capture represents a **Black & White** scan mode. The prescan uses AE (auto-exposure) kind=0x02 at low resolution (96). The full scan uses NORMAL kind=0x01 at production resolution (290).
+
+| Channel | READ 0x8c (calibrated) | Full Scan WDB | Scaling (WDB/0x8c) |
+|---------|----------------------|---------------|-------------------|
+| R | 32,173 (0.322ms) | 59,909 (0.599ms) | **1.8621** |
+| G | 22,169 (0.222ms) | 46,317 (0.463ms) | **2.0893** |
+| B | 14,181 (0.142ms) | 29,628 (0.296ms) | **2.0893** |
+| IR | 128,291 (1.283ms) | 115,461 (1.155ms) | **0.9000** |
+
+**Notable**: G and B have very similar scaling factors (~2.089), consistent with B&W mode treating them similarly.
+
+#### Batch Capture (`ls40-batch.pcapng`)
+
+This capture represents a **Color** batch scan mode. Multiple frames are scanned sequentially.
+
+| Channel | READ 0x8c (calibrated) | Full Scan WDB | Scaling (WDB/0x8c) |
+|---------|----------------------|---------------|-------------------|
+| R | 32,629 (0.326ms) | 54,150 (0.541ms) | **1.6596** |
+| G | 22,420 (0.224ms) | 89,255 (0.893ms) | **3.9810** |
+| B | 14,369 (0.144ms) | 77,166 (0.772ms) | **5.3703** |
+| IR | 132,460 (1.325ms) | 119,214 (1.192ms) | **0.9000** |
+
+**Notable**: Each RGB channel has a **different** scaling factor, consistent with color mode requiring per-channel calibration.
+
+### Cross-Capture Comparison
+
+| Channel | 0x8c ratio (batch/single) | WDB ratio (batch/single) |
+|---------|--------------------------|-------------------------|
+| R | 1.0142 | 0.9039 |
+| G | 1.0113 | 1.9270 |
+| B | 1.0133 | 2.6045 |
+| IR | 1.0325 | 1.0325 |
+
+The READ 0x8c calibrated values are nearly identical between captures (within 1–3%), confirming the scanner's auto-calibration is consistent regardless of scan mode. The WDB values differ significantly for RGB, confirming the host utility applies mode-specific scaling.
+
+### Conclusions
+
+#### IR Channel: Approximate 0.9× Scaling
+
+The IR channel consistently uses a scaling factor **close to 0.9** across both captures:
+
+| Capture | 0x8c IR | WDB IR | Ratio |
+|---------|---------|--------|-------|
+| single-bw | 128,291 | 115,461 | 0.9000 |
+| batch | 132,460 | 119,214 | 0.9000 |
+
+```
+WDB_exposure(IR) ≈ 0x8c_calibrated(IR) × 0.9
+```
+
+This is the most consistent relationship observed. The ~0.9× factor likely accounts for the fact that IR is used for dust/scratch detection, not the primary image. The slightly reduced exposure prevents IR channel saturation while maintaining sufficient signal for defect detection.
+
+#### RGB Channels: Mode-Dependent Scaling
+
+For RGB channels, **no simple universal formula exists**. The observed ratios differ between the two captures:
+
+- **single-bw**: R≈1.86, G≈2.09, B≈2.09
+- **batch**: R≈1.66, G≈3.98, B≈5.37
+
+These factors may be hardcoded in the Nikon utility based on scan mode and film type, or they may depend on additional state not present in the captures. Without more data or the utility's source code, they cannot be reliably derived.
+
+#### Prescan WDB Exposures
+
+The initial prescan WDB exposures differ between captures:
+
+| Capture | R | G | B |
+|---------|---|---|---|
+| single-bw | 41,857 | 33,874 | 20,009 |
+| batch | 40,166 | 63,762 | 55,162 |
+
+These are host-provided initial guesses that the scanner refines during auto-exposure; they are not fixed constants.
+
+#### SANE Backend Comparison
+
+SANE's `cs3_set_window()` sends `real_exposure[color]` directly to the scanner for RGB channels, and `0x00000000` (automatic) for IR. SANE computes `real_exposure` as `exposure × exposure_channel × 100`, producing values in 10ns units.
+
+SANE's approach differs from the Nikon utility:
+- SANE computes exposure from user parameters (exposure multiplier × channel factor × 100)
+- The Nikon utility reads the scanner's auto-calibrated 0x8c value and applies mode-specific scaling
+
+### Open Questions
+
+1. **Source of RGB scaling factors**: Are these hardcoded in the Nikon utility, or derived from film type metadata? Without access to the utility's source code, we cannot determine the exact formula.
+
+2. **Why G≈B scaling in B&W mode**: In single-bw mode, G and B have very similar scaling factors (~2.09). This suggests they're treated similarly (possibly as a luminance channel), but the mechanism is unclear.
+
+3. **Resolution dependency**: Both captures use the same full scan resolution (290), but different prescan resolutions (2900 vs 96). The scaling factors don't appear to depend on resolution, but more test captures would be needed to confirm.
+
+4. **Film type influence**: If the captures used different film types (B&W negative vs color negative), the scaling factors would naturally differ. The relationship between film type and scaling factors is unknown.
+
+5. **Multi-frame batch behavior**: The batch capture scans multiple frames. Do later frames use the same scaling factors, or are they re-calibrated per frame? The fixture shows consistent scaling across frames, suggesting the factors are computed once and reused.
