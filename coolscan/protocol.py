@@ -3531,8 +3531,13 @@ class CoolscanProtocol:
             self.read_control_frame()
         if self._check_scanner_alive():
             exposure_values = self.get_exposure_values(colors=[1, 2, 3])
-            if exposure_values and self.verbose:
-                print("  ✅ Exposure values extracted from WDBs")
+            if exposure_values:
+                color_to_channel = {"R": 1, "G": 2, "B": 3, "IR": 9}
+                for color, value in exposure_values.items():
+                    if color in color_to_channel:
+                        self._calibrated_exposure[color_to_channel[color]] = value
+                if self.verbose:
+                    print("  ✅ Calibrated exposure updated from post-prescan WDBs")
 
         print("✅ Prescan completed")
         return True
@@ -4073,6 +4078,10 @@ class CoolscanProtocol:
             try:
                 exposure_values = self.get_exposure_values(colors=[1, 2, 3])
                 if exposure_values:
+                    color_to_channel = {"R": 1, "G": 2, "B": 3, "IR": 9}
+                    for color, value in exposure_values.items():
+                        if color in color_to_channel:
+                            self._calibrated_exposure[color_to_channel[color]] = value
                     if self.verbose:
                         for ch, val in exposure_values.items():
                             print(f"    {ch} exposure: {val} (10ns units) = {val/100000:.2f} ms")

@@ -197,6 +197,31 @@ def main():
                     f.write(scan_data)
                 print(f"Saved raw data to {raw_path}")
 
+        # 8b. Brightness analysis of saved images
+        if scan_saved:
+            print("\n=== BRIGHTNESS ANALYSIS ===")
+            try:
+                prescan_arr = np.array(Image.open(f"{base}_prescan_96dpi.png"))
+                preview_arr = np.array(Image.open(f"{base}_ir_preview_290dpi.png"))
+                final_arr = np.array(Image.open(output_path))
+
+                prescan_mean = prescan_arr.mean()
+                preview_mean = preview_arr.mean()
+                final_mean = final_arr.mean()
+
+                print(f"  96 DPI prescan mean:   {prescan_mean:.2f}/255")
+                print(f"  290 DPI preview mean:  {preview_mean:.2f}/255")
+                print(f"  2900 DPI final mean:   {final_mean:.2f}/255")
+
+                if prescan_mean > 0:
+                    print(f"  Preview vs prescan:    {(preview_mean / prescan_mean - 1) * 100:+.1f}%")
+                if preview_mean > 0:
+                    print(f"  Final vs preview:      {(final_mean / preview_mean - 1) * 100:+.1f}%")
+                if prescan_mean > 0:
+                    print(f"  Final vs prescan:      {(final_mean / prescan_mean - 1) * 100:+.1f}%")
+            except Exception as analysis_err:
+                print(f"  ⚠️  Brightness analysis failed: {analysis_err}")
+
         # Teardown scanner (golden fixture lines 1413-1478)
         print("\n=== SCAN TEARDOWN ===")
         try:
