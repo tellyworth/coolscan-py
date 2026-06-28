@@ -139,10 +139,12 @@ The scanner uses **datatype codes in byte 2** of READ(10) / WRITE(10) commands t
 distinguish what is being transferred:
 
 - `0x00` (READ): Image data blocks (prescan / full scan pixels)
+- `0x03` (WRITE): LUT data (as described above)
 - `0x87` (READ): Internal status / progress blocks (6–33 byte payloads)
+- `0x8c` (READ): Per-channel state (10-byte response; bytes 6–9 = calibrated
+  exposure in 10ns units, big-endian uint32)
 - `0x8e` (READ): Exposure / calibration tables (prescan statistics)
 - `0x8f` (WRITE): Small control blocks (e.g. frame / exposure program writeback)
-- `0x03` (WRITE): LUT data (as described above)
 
 Examples from `usb_capture_timing.txt`:
 
@@ -153,6 +155,11 @@ Examples from `usb_capture_timing.txt`:
   - `28008700000000000680` → READ 6 bytes (datatype 0x87)
   - `28008700000000002180` → READ 0x21 bytes (datatype 0x87)
   - `28008700000000001880` → READ 0x18 bytes (datatype 0x87)
+- Channel state (auto-exposure calibration):
+  - `28008c00010300000a80` → READ 10 bytes for channel 1 (R)
+  - `28008c00020300000a80` → READ 10 bytes for channel 2 (G)
+  - `28008c00030300000a80` → READ 10 bytes for channel 3 (B)
+  - Response format: `8c 20 [header 4B] [exposure 4B big-endian]`
 - Exposure / calibration:
   - `28008e00000000000680` → READ 6 bytes (header)
   - `28008e000000000d8880` → READ 0x0d88 bytes (3456-byte table)

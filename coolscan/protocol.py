@@ -73,7 +73,13 @@ class DataType(Enum):
 
 @dataclass
 class WindowDescriptorBlock:
-    """Window Descriptor Block for scan configuration."""
+    """Window Descriptor Block for scan configuration.
+
+    The 58-byte WDB format derived from the LS-40 ED pcapng captures stores
+    exposure as a single 32-bit big-endian value at bytes 54–57 (10ns units).
+    The legacy per-channel fields (exposure_r/g/b, shift_r/g/b, offset_r/g/b)
+    are deprecated; use the ``exposure`` field instead.
+    """
 
     window_id: int = 0x00
     auto_flag: int = 0x00
@@ -97,6 +103,9 @@ class WindowDescriptorBlock:
     contrast_r: int = 128
     contrast_g: int = 128
     contrast_b: int = 128
+    # Calibrated exposure (32-bit, 10ns units) written at WDB bytes 54–57.
+    exposure: int = 0
+    # Deprecated: per-channel exposure bytes at 0x49–0x4B (SANE format).
     exposure_r: int = 120
     exposure_g: int = 120
     exposure_b: int = 100
@@ -153,7 +162,7 @@ class WindowDescriptorBlock:
         data[0x3B] = self.contrast_g
         data[0x3C] = self.contrast_b
 
-        # Exposure settings
+        # Exposure settings (deprecated per-channel bytes at 0x49-0x4B)
         data[0x49] = self.exposure_r
         data[0x4A] = self.exposure_g
         data[0x4B] = self.exposure_b
@@ -161,12 +170,10 @@ class WindowDescriptorBlock:
         # Color shifts
         data[0x52] = self.shift_r
         data[0x53] = self.shift_g
-        data[0x54] = self.shift_b
 
-        # Color offsets
-        data[0x55] = self.offset_r
-        data[0x56] = self.offset_g
-        data[0x57] = self.offset_b
+        # Bytes 54–57: 32-bit big-endian exposure (10ns units).
+        # This is the canonical exposure field per the capture-derived WDB format.
+        data[0x54:0x58] = struct.pack(">I", self.exposure)
 
         return bytes(data)
 
@@ -212,7 +219,7 @@ class WindowDescriptorBlock:
         wdb.contrast_g = data[0x3B]
         wdb.contrast_b = data[0x3C]
 
-        # Exposure settings
+        # Exposure settings (deprecated per-channel bytes at 0x49-0x4B)
         wdb.exposure_r = data[0x49]
         wdb.exposure_g = data[0x4A]
         wdb.exposure_b = data[0x4B]
@@ -220,12 +227,9 @@ class WindowDescriptorBlock:
         # Color shifts
         wdb.shift_r = data[0x52]
         wdb.shift_g = data[0x53]
-        wdb.shift_b = data[0x54]
 
-        # Color offsets
-        wdb.offset_r = data[0x55]
-        wdb.offset_g = data[0x56]
-        wdb.offset_b = data[0x57]
+        # Bytes 54–57: 32-bit big-endian exposure (10ns units)
+        wdb.exposure = struct.unpack(">I", data[0x54:0x58])[0]
 
         return wdb
 
@@ -389,6 +393,9 @@ class CoolscanProtocol:
         self._usb_error_count = 0  # Consecutive USB error counter
         self._last_prescan_image_data = b""
         self._last_ir_preview_data = b""
+        # Per-channel calibrated exposure from READ 0x8c (channel state).
+        # Keyed by channel ID (1=R, 2=G, 3=B, 9=IR), value in 10ns units.
+        self._calibrated_exposure: Dict[int, int] = {}
 
         if usb_capture_replay is not None and self.interface.value != "usb":
             raise ValueError("usb_capture_replay is only valid for USB interface devices")
@@ -1621,7 +1628,19 @@ class CoolscanProtocol:
         return success
 
     def send_lut(self, lut_data: bytes) -> bool:
-        """Send LUT data (like SANE send_LUT)."""
+        """Send LUT data (like SANE send_LUT).
+
+        .. deprecated::
+            Uses datatype 0xC0 (USER_REG_GAMMA) which does not match the
+            capture (datatype 0x03). Use :meth:`_upload_lut` or
+            :meth:`upload_identity_luts` instead.
+        """
+        warnings.warn(
+            "send_lut() is deprecated; use _upload_lut() or upload_identity_luts() "
+            "which use the capture-verified datatype 0x03",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         print("Sending LUT data...")
         # SEND with datatype 0xc0 for LUT
         cmd = bytearray(
@@ -1835,17 +1854,23 @@ class CoolscanProtocol:
         return True
 
     def _build_scan_window_wdb(
-        self, window_id: int, scan_type: str, depth: int
+        self,
+        window_id: int,
+        scan_type: str,
+        depth: int,
+        exposure: Optional[int] = None,
     ) -> Optional[bytes]:
         """Build a 58-byte WDB for SET_WINDOW from parameters.
 
         The base table is looked up from ``_SCAN_WINDOW_WDB_TABLES`` using
-        ``(scan_type, window_id)``.  Three fields are then parameterized:
+        ``(scan_type, window_id)``.  Fields are then parameterized:
 
         - Byte 8:  window_id
         - Bytes 10–13: x/y resolution from ``_SCAN_WINDOW_RESOLUTIONS``
         - Byte 34:  bits_per_pixel (depth), only for ``normal``/``single_bw``
           non-IR windows.  All other types keep the capture-derived value.
+        - Bytes 54–57: 32-bit big-endian exposure (10ns units), overridden
+          when ``exposure`` is provided.
 
         All remaining bytes are preserved verbatim from the pcapng-derived
         hardcoded tables.
@@ -1856,6 +1881,9 @@ class CoolscanProtocol:
                 'batch', 'batch_between'.
             depth: bits per pixel (8 or 12).  Applied only for
                 ``normal``/``single_bw`` non-IR windows.
+            exposure: Optional calibrated exposure value (10ns units) that
+                overrides the table default at bytes 54–57.  When ``None``,
+                the table's baked-in value is used.
 
         Returns:
             58-byte WDB, or ``None`` if the (scan_type, window_id) combo
@@ -1885,6 +1913,11 @@ class CoolscanProtocol:
         if scan_type in ("normal", "single_bw") and window_id != 9:
             wdb[34] = 0x0C if depth == 12 else 0x08
 
+        # Bytes 54–57: 32-bit big-endian exposure (10ns units).
+        # Override with calibrated value when provided.
+        if exposure is not None:
+            wdb[54:58] = struct.pack(">I", exposure)
+
         return bytes(wdb)
 
     def set_scan_window(
@@ -1893,12 +1926,21 @@ class CoolscanProtocol:
         scan_type: str = "prescan",
         depth: int = 8,
         resolution: Optional[int] = None,
+        exposure: Optional[int] = None,
+        use_calibrated_exposure: bool = True,
     ) -> bool:
         """
         Send SET_WINDOW (0x24) command with 58-byte window descriptor.
 
         This is REQUIRED before LUT uploads and START_SCAN.
         From USB capture: 24000000000000003a80 + 58 bytes WDB
+
+        When talking to real hardware (not replaying a fixture) and
+        ``use_calibrated_exposure`` is True, the calibrated exposure value
+        stored by ``read_channel_state()`` is automatically applied to the
+        WDB bytes 54–57 if no explicit ``exposure`` is given.  The IR channel
+        (window_id=9) receives a 0.9× scaling factor on its calibrated value,
+        consistent with the pcapng capture analysis.
 
         Args:
             window_id: Window ID (1=R, 2=G, 3=B, 9=IR)
@@ -1908,6 +1950,15 @@ class CoolscanProtocol:
             depth: bits per pixel (8 or 12). Default 8.
             resolution: Deprecated; use scan_type instead. Kept for backward
                 compatibility: 96 selects prescan, 290 selects setup.
+            exposure: Optional calibrated exposure (10ns units) that overrides
+                the table default at WDB bytes 54–57.  When ``None`` and
+                auto-apply conditions are met, the calibrated exposure from
+                ``read_channel_state()`` is used.
+            use_calibrated_exposure: When True (default), auto-apply the
+                calibrated exposure from ``_calibrated_exposure`` on real
+                hardware.  Set to False to always use the table default.
+                Always False during fixture replay to preserve golden-fixture
+                byte-exact matching.
         """
         # Resolve effective scan_type (resolution is a deprecated override)
         if resolution == 96:
@@ -1917,8 +1968,28 @@ class CoolscanProtocol:
         else:
             effective_type = scan_type if scan_type in _SCAN_WINDOW_WDB_TABLES else "normal"
 
+        # Auto-apply calibrated exposure when:
+        #   - No explicit exposure was provided
+        #   - Auto-apply is enabled
+        #   - We are talking to real hardware (not replaying a fixture)
+        #   - A calibrated value exists for this window_id
+        effective_exposure = exposure
+        if (
+            exposure is None
+            and use_calibrated_exposure
+            and self._usb_capture_replay is None
+            and window_id in self._calibrated_exposure
+        ):
+            raw_calibrated = self._calibrated_exposure[window_id]
+            if window_id == 9:
+                # IR channel: apply 0.9× scaling factor (pcapng-verified)
+                effective_exposure = int(round(raw_calibrated * 0.9))
+            else:
+                # RGB channels: use calibrated value directly (factor 1.0)
+                effective_exposure = raw_calibrated
+
         # Build the 58-byte WDB using the structured builder
-        wdb = self._build_scan_window_wdb(window_id, effective_type, depth)
+        wdb = self._build_scan_window_wdb(window_id, effective_type, depth, exposure=effective_exposure)
         if wdb is None:
             print(f"  ⚠️  Unknown window ID {window_id} for scan_type={scan_type}, resolution={resolution}")
             return False
@@ -2705,7 +2776,7 @@ class CoolscanProtocol:
                 print(f"    ⚠️  Error reading control params: {e}")
             return None
 
-    def read_channel_state(self, channel: int) -> Optional[bytes]:
+    def read_channel_state(self, channel: int) -> Optional[Dict[str, Any]]:
         """Read per-channel state (datatype 0x8c).
 
         Golden fixture lines 236-250: three READ 0x8c commands for RGB channels
@@ -2739,9 +2810,21 @@ class CoolscanProtocol:
         try:
             data, status = self._issue_command(cmd, data_in_length=10)
             if status == StatusType.READY and len(data) == 10:
+                # Parse the 10-byte response:
+                #   byte 0: datatype (0x8c)
+                #   byte 1: length indicator
+                #   bytes 2-5: header fields
+                #   bytes 6-9: calibrated exposure (big-endian uint32, 10ns units)
+                exposure = struct.unpack(">I", data[6:10])[0]
+                self._calibrated_exposure[channel] = exposure
                 if self.verbose:
-                    print(f"    Channel state OK: {data.hex()}")
-                return data
+                    exposure_ms = exposure / 100000.0
+                    ch_names = {1: "R", 2: "G", 3: "B", 9: "IR"}
+                    print(
+                        f"    Channel state {ch_names.get(channel, channel)} OK: "
+                        f"exposure={exposure} (10ns) = {exposure_ms:.3f} ms"
+                    )
+                return {"raw": data, "exposure": exposure}
             else:
                 print(f"    ⚠️  Channel state read failed: status={status}, len={len(data) if data else 0}")
                 return None
@@ -2749,6 +2832,18 @@ class CoolscanProtocol:
             self._replay_reraise_if_needed(e)
             print(f"    ⚠️  Error reading channel state: {e}")
             return None
+
+    def set_calibrated_exposure(self, channel: int, exposure: int) -> None:
+        """Set a calibrated exposure value for a channel.
+
+        Convenience method for tests and callers that need to inject calibrated
+        exposure values without reaching into ``_calibrated_exposure`` directly.
+
+        Args:
+            channel: Channel ID (1=R, 2=G, 3=B, 9=IR).
+            exposure: Calibrated exposure in 10-nanosecond units.
+        """
+        self._calibrated_exposure[channel] = exposure
 
     def stop_scan(self) -> bool:
         """Stop the current scan operation.

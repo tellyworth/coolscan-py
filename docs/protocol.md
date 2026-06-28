@@ -221,9 +221,55 @@ Read by `read_ir_preview_data()`:
 ### Write Operations
 ```c
 // Write data (WRITE(10), USB-specific CDB with datatype in byte 2)
-// Example: LUT write
+// Example: LUT write (datatype 0x03 = LUT/gamma table)
 2a 00 03 00 [channel] 01 00 len_hi len_lo 00 + data
 ```
+
+### LUT Upload (SEND 0x2a, datatype 0x03)
+
+LUTs (look-up tables) are uploaded per-channel via the SEND command with
+datatype 0x03. Each LUT is 8192 bytes (4096 entries × 2 bytes, big-endian),
+mapping 12-bit ADC input values to 16-bit output values.
+
+```
+CDB: 2a 00 03 00 [channel] 01 00 20 00 00
+Data: 8192 bytes of LUT entries (identity: 0000 0001 0002 ... 0fff)
+```
+
+Channel IDs: 1=R, 2=G, 3=B, 9=IR.
+
+### Auto-Exposure Flow
+
+The scanner determines optimal exposure through a prescan (auto-exposure) phase:
+
+1. **Prescan WDBs**: Host sends WDBs with initial exposure guesses (scan kind 0x02).
+2. **Prescan START**: Scanner performs the low-resolution preview scan.
+3. **Read channel state** (READ 0x8c): After prescan, host reads per-channel
+   calibration data. The 10-byte response contains the calibrated exposure
+   value at bytes 6–9 (big-endian uint32, 10ns units).
+4. **Full scan WDBs**: Host sends WDBs with calibrated exposure values at
+   bytes 54–57 (big-endian uint32, 10ns units).
+5. **Full scan START**: Scanner performs the high-resolution scan.
+
+Exposure in the 58-byte WDB is stored as a single 32-bit big-endian value
+at **bytes 54–57** (not per-channel bytes at 0x49–0x4B).
+
+### Auto-Exposure Wiring
+
+`set_scan_window()` automatically applies calibrated exposure values when
+talking to real hardware:
+
+- If `read_channel_state()` was called for the channel, the calibrated
+  exposure from the READ 0x8c response is stored in `_calibrated_exposure`.
+- On the next `set_scan_window()` call for that channel (with no explicit
+  `exposure` parameter), the stored value is used for WDB bytes 54–57.
+- **IR channel** (window_id=9): the calibrated value is multiplied by 0.9
+  before being written to the WDB (pcapng-verified across captures).
+- **RGB channels** (window_id 1, 2, 3): the calibrated value is used directly
+  (scaling factor 1.0; no universal RGB scaling formula exists).
+- During fixture replay (`usb_capture_replay` set), the auto-apply is
+  disabled to preserve golden-fixture byte-exact matching.
+- Callers can disable auto-apply via `use_calibrated_exposure=False`.
 
 ## Error Handling
 

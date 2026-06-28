@@ -106,8 +106,8 @@ info = protocol.get_internal_info()
 # Object position
 protocol.object_position()
 
-# LUT sending
-protocol.send_lut(lut_data)
+# LUT sending (per-channel identity LUTs, matching LS-40 ED capture format)
+protocol.upload_identity_luts()
 
 # Enhanced scan sequence
 protocol.perform_scan_sequence(params)
