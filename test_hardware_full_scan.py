@@ -137,12 +137,16 @@ def main():
                 frame_count += 1
                 print(f"\n=== FRAME {frame_idx + 1}: SAVING IMAGES ===")
 
-                # Full-res image (2870 x 4332 for batch)
+                # Full-res image: actual sensor width is 2880 pixels (not the
+                # WDB width of 2870).  Height is derived from the byte count
+                # since the scanner does not scan the full WDB height.
                 full_res_path = f"{base}_frame_{frame_idx}.png"
+                batch_width = 2880  # Verified by autocorrelation (docs/sane-image-data.md)
+                batch_height = len(full_res_data) // (batch_width * 3)
                 save_frame_image(
                     full_res_data,
-                    width=2870,
-                    height=args.frame_height,
+                    width=batch_width,
+                    height=batch_height,
                     num_channels=3,
                     depth=args.depth,
                     channel_offsets=LS40_CHANNEL_OFFSETS,

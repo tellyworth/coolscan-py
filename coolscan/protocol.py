@@ -2716,7 +2716,9 @@ class CoolscanProtocol:
             frame_y = first_y + i * step
             print(f"  Frame {i + 1}/{frame_count} (y={frame_y})...")
 
-            # For frames 1+, reconfigure and re-capture Stage A
+            # For frames 1+, reconfigure and re-capture Stage A.
+            # skip_autofocus=True because post_prescan_autofocus already
+            # focused at this frame's center (called after previous frame).
             if i > 0:
                 center_y = frame_y + frame_height // 2
                 if not self.batch_full_scan_setup_frame(
@@ -2726,6 +2728,7 @@ class CoolscanProtocol:
                     y_offset=frame_y,
                     height=frame_height,
                     skip_boundary=True,
+                    skip_autofocus=True,
                 ):
                     print(f"    ❌ Stage A setup failed for frame {i}")
                     return
@@ -4025,6 +4028,7 @@ class CoolscanProtocol:
         y_offset: Optional[int] = None,
         height: Optional[int] = None,
         skip_boundary: bool = False,
+        skip_autofocus: bool = False,
     ) -> bool:
         """Run the batch full-scan setup frame for one frame.
 
@@ -4045,6 +4049,10 @@ class CoolscanProtocol:
         Unlike the single-BW setup frame, the batch setup does **not** call
         ``stop_scan()``; the next event in the capture is ``start_scan()``.
 
+        When ``skip_autofocus=True``, steps 2–5 are omitted.  This is used
+        for frames 1+ in ``batch_scan_to_frames`` where
+        ``post_prescan_autofocus()`` already focused at the next frame center.
+
         Args:
             params: Scan parameters (currently unused; boundary payload comes
                 from the golden fixture).
@@ -4057,6 +4065,8 @@ class CoolscanProtocol:
             height: Optional height for scan windows.
             skip_boundary: If True, skip the set_boundary call (useful when
                 set_boundary was already called by the caller).
+            skip_autofocus: If True, skip autofocus steps (used for frames 1+
+                where ``post_prescan_autofocus`` already ran).
 
         Returns:
             True if the batch setup frame completes successfully.
@@ -4070,26 +4080,35 @@ class CoolscanProtocol:
                 print("  ❌ Failed to set batch full-scan boundary")
                 return False
 
-        # 2. One TUR before autofocus (golden_batch.txt lines 283-286).
-        self._wait_ready_or_replay_once()
-
-        # 3. Autofocus command + execute (golden_batch.txt lines 287-295).
-        if not self._auto_focus_command(focus_x, focus_y):
-            print("  ❌ Batch autofocus command failed")
-            return False
-
-        # 4. Three TUR polls before read_focus (golden_batch.txt lines 296-307).
-        for _ in range(3):
+        if skip_autofocus:
+            # Autofocus was already done by post_prescan_autofocus for
+            # frames 1+.  Skip to channel state read + window setup.
+            # The capture shows: TUR × 2 → read_channel_state(9) → TUR × 2
+            # → SET_WINDOW → TUR → LUTs.
+            for _ in range(2):
+                self._wait_ready_or_replay_once()
+            self.read_channel_state(9)
+        else:
+            # 2. One TUR before autofocus (golden_batch.txt lines 283-286).
             self._wait_ready_or_replay_once()
 
-        # 5. Read resulting focus position (golden_batch.txt lines 308-312).
-        self.read_focus()
+            # 3. Autofocus command + execute (golden_batch.txt lines 287-295).
+            if not self._auto_focus_command(focus_x, focus_y):
+                print("  ❌ Batch autofocus command failed")
+                return False
 
-        # 6. One TUR poll before IR channel state read (golden_batch.txt lines 313-316).
-        self._wait_ready_or_replay_once()
+            # 4. Three TUR polls before read_focus (golden_batch.txt lines 296-307).
+            for _ in range(3):
+                self._wait_ready_or_replay_once()
 
-        # 7. IR channel state read (golden_batch.txt lines 317-320).
-        self.read_channel_state(9)
+            # 5. Read resulting focus position (golden_batch.txt lines 308-312).
+            self.read_focus()
+
+            # 6. One TUR poll before IR channel state read (lines 313-316).
+            self._wait_ready_or_replay_once()
+
+            # 7. IR channel state read (golden_batch.txt lines 317-320).
+            self.read_channel_state(9)
 
         # 8. Two TUR polls before SET_WINDOW (golden_batch.txt lines 321-329).
         for _ in range(2):
