@@ -4049,8 +4049,9 @@ class CoolscanProtocol:
         Unlike the single-BW setup frame, the batch setup does **not** call
         ``stop_scan()``; the next event in the capture is ``start_scan()``.
 
-        When ``skip_autofocus=True``, steps 2–5 are omitted.  This is used
-        for frames 1+ in ``batch_scan_to_frames`` where
+        When ``skip_autofocus=True``, steps 2–7 are omitted and replaced by
+        four TEST_UNIT_READY polls (golden_batch.txt lines 1406-1417).  This
+        is used for frames 1+ in ``batch_scan_to_frames`` where
         ``post_prescan_autofocus()`` already focused at the next frame center.
 
         Args:
@@ -4082,12 +4083,11 @@ class CoolscanProtocol:
 
         if skip_autofocus:
             # Autofocus was already done by post_prescan_autofocus for
-            # frames 1+.  Skip to channel state read + window setup.
-            # The capture shows: TUR × 2 → read_channel_state(9) → TUR × 2
-            # → SET_WINDOW → TUR → LUTs.
-            for _ in range(2):
+            # frames 1+.  The capture (golden_batch.txt lines 1406-1417)
+            # shows only four TEST_UNIT_READY polls between read_focus and
+            # the Stage A SET_WINDOW commands; no read_channel_state(9).
+            for _ in range(4):
                 self._wait_ready_or_replay_once()
-            self.read_channel_state(9)
         else:
             # 2. One TUR before autofocus (golden_batch.txt lines 283-286).
             self._wait_ready_or_replay_once()
