@@ -1,10 +1,10 @@
 # Roadmap / ideas
 
 ## Protocol fixes and completion
- - [ ] Basic exposure and LUT
+ - [x] Basic exposure and LUT
  - [ ] 12 bit full scan
  - [ ] Batch scan (as per pcapng with separate segments)
- - [ ] Review output log for issues
+ - [x] Review output log for issues
 
 ## Proper scan script
  - [ ] New CLI script with args for bit depth, batch mode etc
