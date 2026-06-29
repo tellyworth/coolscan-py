@@ -1947,8 +1947,10 @@ class CoolscanProtocol:
 
         - Byte 8:  window_id
         - Bytes 10–13: x/y resolution from ``_SCAN_WINDOW_RESOLUTIONS``
-        - Bytes 14–17: uly (upper-left Y), overridden when ``y_offset`` given
-        - Bytes 18–21: length/height, overridden when ``height`` given
+        - Bytes 14–17: ulx (upper-left X), preserved from the capture table
+        - Bytes 18–21: uly (upper-left Y), overridden when ``y_offset`` given
+        - Bytes 22–25: width, preserved from the capture table
+        - Bytes 26–29: length/height, overridden when ``height`` given
         - Byte 34:  bits_per_pixel (depth), only for ``normal``/``single_bw``
           non-IR windows.  All other types keep the capture-derived value.
         - Bytes 54–57: 32-bit big-endian exposure (10ns units), overridden
@@ -1967,15 +1969,14 @@ class CoolscanProtocol:
                 overrides the table default at bytes 54–57.  When ``None``,
                 the table's baked-in value is used.
             y_offset: Optional upper-left Y coordinate that overrides the
-                table default at WDB bytes 14–17.  When ``None``, the
+                table default at WDB bytes 18–21.  When ``None``, the
                 table's baked-in value is used.
             height: Optional scan height (length) that overrides the table
-                default at WDB bytes 18–21 and also updates the pixel-count
-                length field at bytes 28–31.  When ``None``, the table's
+                default at WDB bytes 26–29.  When ``None``, the table's
                 baked-in value is used.
 
         Returns:
-            58-byte WDB, or ``None`` if the (scan_type, window_id) combo
+            58-byte WDB, or ``None`` if the ``(scan_type, window_id)`` combo
             has no table entry.
         """
         table = _SCAN_WINDOW_WDB_TABLES.get(scan_type, {})
@@ -1998,15 +1999,15 @@ class CoolscanProtocol:
         wdb[10:12] = struct.pack(">H", res)
         wdb[12:14] = struct.pack(">H", res)
 
-        # Bytes 14-17: uly (upper-left Y) — override when y_offset provided
+        # Bytes 18-21: uly (upper-left Y) — override when y_offset provided.
+        # Note: bytes 14-17 are ulx, bytes 22-25 are width, both preserved
+        # verbatim from the pcapng-derived tables.
         if y_offset is not None:
-            wdb[14:18] = struct.pack(">I", y_offset)
+            wdb[18:22] = struct.pack(">I", y_offset)
 
-        # Bytes 18-21: length/height — override when height provided.
-        # Also update pixel-count length at bytes 28-31 to match.
+        # Bytes 26-29: length/height — override when height provided.
         if height is not None:
-            wdb[18:22] = struct.pack(">I", height)
-            wdb[28:32] = struct.pack(">I", height)
+            wdb[26:30] = struct.pack(">I", height)
 
         # Byte 34: bits_per_pixel — only patch for normal/single_bw non-IR
         if scan_type in ("normal", "single_bw") and window_id != 9:
@@ -2061,11 +2062,11 @@ class CoolscanProtocol:
                 Always False during fixture replay to preserve golden-fixture
                 byte-exact matching.
             y_offset: Optional upper-left Y coordinate that overrides the
-                table default at WDB bytes 14–17.  Used for batch scanning
+                table default at WDB bytes 18–21.  Used for batch scanning
                 to position each frame.
-            height: Optional scan height that overrides the table default at
-                WDB bytes 18–21 (and pixel-count length at 28–31).  Used for
-                batch scanning to set per-frame height.
+            height: Optional scan height (length) that overrides the table
+                default at WDB bytes 26–29.  Used for batch scanning to set
+                per-frame height.
         """
         # Resolve effective scan_type (resolution is a deprecated override)
         if resolution == 96:
@@ -2660,8 +2661,10 @@ class CoolscanProtocol:
         if self._last_prescan_image_data:
             try:
                 prescan_wdb = self.get_window(1)
-                if prescan_wdb and len(prescan_wdb) >= 22:
-                    prescan_height = struct.unpack(">I", prescan_wdb[18:22])[0]
+                if prescan_wdb and len(prescan_wdb) >= 30:
+                    # The scan length/height lives at bytes 26-29 in the 58-byte
+                    # LS-40 ED WDB (bytes 18-21 are the upper-left Y coordinate).
+                    prescan_height = struct.unpack(">I", prescan_wdb[26:30])[0]
                     estimated = max(1, prescan_height // step)
                     if estimated < frame_count:
                         print(f"  Clamping frame_count from {frame_count} to {estimated} "

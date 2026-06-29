@@ -934,6 +934,119 @@ def test_build_scan_window_wdb_set_scan_window_integration():
     proto.close()
 
 
+@pytest.mark.property_test
+def test_build_scan_window_wdb_y_offset_and_height_offsets():
+    """_build_scan_window_wdb writes y_offset and height to the LS-40 ED WDB
+    offsets observed in ls40-batch.pcapng:
+
+    - bytes 14-17: ulx (preserved from table)
+    - bytes 18-21: uly (overridden by y_offset)
+    - bytes 22-25: width (preserved from table)
+    - bytes 26-29: length/height (overridden by height)
+    """
+    from coolscan.protocol import _SCAN_WINDOW_WDB_TABLES
+
+    replay = UsbCaptureReplay(events=[])
+    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
+    proto.maxbits = 12
+
+    base = _SCAN_WINDOW_WDB_TABLES["batch"][9]
+    built = proto._build_scan_window_wdb(
+        9, "batch", depth=8, y_offset=30, height=4332
+    )
+    assert built is not None
+
+    # ulx and width are preserved from the hardcoded table.
+    assert built[14:18] == base[14:18]
+    assert built[22:26] == base[22:26]
+
+    # y_offset -> uly at bytes 18-21.
+    assert struct.unpack(">I", built[18:22])[0] == 30
+
+    # height -> length at bytes 26-29.
+    assert struct.unpack(">I", built[26:30])[0] == 4332
+
+    # bytes 28-31 are preserved (were erroneously overwritten before).
+    assert built[28:32] == base[28:32]
+
+    proto.close()
+
+
+@pytest.mark.property_test
+def test_build_scan_window_wdb_batch_window_9_matches_golden_geometry():
+    """Batch window 9 with y_offset=30, height=4332 reproduces the golden
+    fixture WDB byte-for-byte (except exposure, which is calibrated on real
+    hardware and not patched when exposure=None)."""
+    from coolscan.protocol import _SCAN_WINDOW_WDB_TABLES
+
+    replay = UsbCaptureReplay(events=[])
+    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
+    proto.maxbits = 12
+
+    expected = _SCAN_WINDOW_WDB_TABLES["batch"][9]
+    built = proto._build_scan_window_wdb(
+        9, "batch", depth=8, y_offset=30, height=4332
+    )
+    assert built == expected, (
+        f"Batch window 9 WDB mismatch.\n"
+        f"Built:    {built.hex()}\n"
+        f"Expected: {expected.hex()}"
+    )
+
+    proto.close()
+
+
+@pytest.mark.property_test
+def test_batch_scan_frame_count_estimation_uses_wdb_length_field():
+    """batch_scan_to_frames estimates frame count from the WDB length field at
+    bytes 26-29, not from the uly field at bytes 18-21."""
+    from coolscan.protocol import _SCAN_WINDOW_WDB_TABLES
+    from contextlib import ExitStack
+
+    replay = UsbCaptureReplay(events=[])
+    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
+    proto.maxbits = 12
+
+    # Use a prescan WDB with uly=0 and length=34656 (matching golden fixture).
+    prescan_wdb = bytearray(_SCAN_WINDOW_WDB_TABLES["prescan"][1])
+    assert struct.unpack(">I", prescan_wdb[18:22])[0] == 0  # uly
+    assert struct.unpack(">I", prescan_wdb[26:30])[0] == 34656  # length
+
+    proto._last_prescan_image_data = b"dummy"
+
+    # Patch the downstream helpers so we can exercise just the estimation logic.
+    return_values = {
+        "prescan": True,
+        "set_boundary": True,
+        "batch_full_scan_setup_frame": True,
+        "start_scan": True,
+        "batch_full_scan_capture_frame": b"",
+        "_wait_ready_or_replay_once": True,
+        "batch_between_scan_setup_frame": True,
+        "batch_preview_capture_frame": b"",
+        "set_scan_window": True,
+        "upload_identity_luts": True,
+        "poll_until_ready": True,
+        "batch_full_res_capture_frame": b"",
+        "post_prescan_autofocus": None,
+        "scan_teardown": True,
+    }
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(proto, "get_window", return_value=bytes(prescan_wdb)))
+        for name, value in return_values.items():
+            stack.enter_context(patch.object(proto, name, return_value=value))
+        results = list(
+            proto.batch_scan_to_frames(
+                frame_count=6, first_y=30, frame_height=4332, step=4330
+            )
+        )
+        # With prescan_height=34656 and step=4330, estimated frames is
+        # max(1, 34656 // 4330) = 8, so the requested 6 is not clamped.
+        assert len(results) == 6
+
+    proto.close()
+
+
 # ---------------------------------------------------------------------------
 # Property: CONTROL_FRAME payload generation (batch scanning)
 # ---------------------------------------------------------------------------
