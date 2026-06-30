@@ -2739,12 +2739,7 @@ class CoolscanProtocol:
 
                 stage_a_data = self.batch_full_scan_capture_frame()
 
-            # Transition between Stage A and Stage B:
-            # TUR polls → STOP_SCAN → TUR polls → Stage B setup
-            # (golden_batch.txt pattern for both Frame 0 and Frames 1+)
-            for _ in range(2):
-                self._wait_ready_or_replay_once()
-            self.stop_scan()
+            # Transition TUR polls between Stage A and Stage B
             for _ in range(2):
                 self._wait_ready_or_replay_once()
 
@@ -2755,14 +2750,6 @@ class CoolscanProtocol:
                 print(f"    ❌ Stage B setup failed for frame {i}")
                 return
             stage_b_data = self.batch_preview_capture_frame()
-
-            # Transition between Stage B and Stage C:
-            # TUR polls → STOP_SCAN → TUR polls → Stage C setup
-            for _ in range(2):
-                self._wait_ready_or_replay_once()
-            self.stop_scan()
-            for _ in range(2):
-                self._wait_ready_or_replay_once()
 
             # Stage C: 2900 DPI full-res scan
             for win_id in [1, 2, 3]:
