@@ -155,17 +155,15 @@ def main():
                 scan_saved = True
 
                 # Stage A preview (290 DPI, 4 channels: R, G, B, IR)
-                # NOTE: The byte counts for the batch 290 DPI intermediate
-                # stages do not match the single-frame 290 DPI preview
-                # (Stage A: ~262 KB returned vs ~497 KB expected at 8-bit,
-                # Stage B: ~197 KB vs ~373 KB expected). The 287x433x12-bit
-                # decode below is speculative and may produce garbage; the raw
-                # bytes are also saved for offline analysis.
+                # NOTE: The batch 290 DPI intermediate stages decode at
+                # width=288 (2880 sensor pixels / 10 pitch at 290 DPI),
+                # height=433 (4332 device units / 10), depth=12.
+                # Stage A has 4 channels (R, G, B, IR); Stage B has 3 (R, G, B).
                 if "stage_a" in previews and previews["stage_a"]:
                     stage_a_path = f"{base}_frame_{frame_idx}_stage_a.png"
                     save_preview_image(
                         previews["stage_a"],
-                        width=287,
+                        width=288,
                         height=433,
                         num_channels=4,
                         depth=12,
@@ -177,7 +175,7 @@ def main():
                     stage_b_path = f"{base}_frame_{frame_idx}_stage_b.png"
                     save_preview_image(
                         previews["stage_b"],
-                        width=287,
+                        width=288,
                         height=433,
                         num_channels=3,
                         depth=12,

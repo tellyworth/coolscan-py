@@ -1022,6 +1022,7 @@ def test_batch_scan_frame_count_estimation_uses_wdb_length_field():
         "start_scan": True,
         "batch_full_scan_capture_frame": b"",
         "_wait_ready_or_replay_once": True,
+        "stop_scan": True,
         "batch_between_scan_setup_frame": True,
         "batch_preview_capture_frame": b"",
         "set_scan_window": True,

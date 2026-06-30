@@ -2739,15 +2739,30 @@ class CoolscanProtocol:
 
                 stage_a_data = self.batch_full_scan_capture_frame()
 
-            # Transition TUR polls between Stage A and Stage B
+            # Transition between Stage A and Stage B:
+            # TUR polls → STOP_SCAN → TUR polls → Stage B setup
+            # (golden_batch.txt pattern for both Frame 0 and Frames 1+)
+            for _ in range(2):
+                self._wait_ready_or_replay_once()
+            self.stop_scan()
             for _ in range(2):
                 self._wait_ready_or_replay_once()
 
-            # Stage B: 290 DPI RGB preview
-            if not self.batch_between_scan_setup_frame():
+            # Stage B: 290 DPI RGB preview (batch_between with correct y_offset)
+            if not self.batch_between_scan_setup_frame(
+                y_offset=frame_y, height=frame_height,
+            ):
                 print(f"    ❌ Stage B setup failed for frame {i}")
                 return
             stage_b_data = self.batch_preview_capture_frame()
+
+            # Transition between Stage B and Stage C:
+            # TUR polls → STOP_SCAN → TUR polls → Stage C setup
+            for _ in range(2):
+                self._wait_ready_or_replay_once()
+            self.stop_scan()
+            for _ in range(2):
+                self._wait_ready_or_replay_once()
 
             # Stage C: 2900 DPI full-res scan
             for win_id in [1, 2, 3]:
@@ -4506,21 +4521,34 @@ class CoolscanProtocol:
 
         return True
 
-    def batch_between_scan_setup_frame(self) -> bool:
+    def batch_between_scan_setup_frame(
+        self,
+        y_offset: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> bool:
         """Setup between scans in a batch (matches golden_batch.txt lines 454-519).
 
         Sequence:
-          1. SET_WINDOW for windows 1, 2, 3 (batch type = 290 DPI)
+          1. SET_WINDOW for windows 1, 2, 3 (batch_between type = 290 DPI)
           2. One TUR poll
           3. Identity LUTs for RGB (no IR)
           4. START_SCAN (with internal retries/status reads)
           5. Poll until READY
+
+        Args:
+            y_offset: Optional upper-left Y coordinate for scan windows.
+                When None, the table default (30) is used.  For frames
+                beyond the first, this MUST be set to the frame's y position.
+            height: Optional scan height that overrides the table default.
         """
         print("Starting batch between-scan setup frame...")
 
-        # 1. SET_WINDOW for windows 1, 2, 3
+        # 1. SET_WINDOW for windows 1, 2, 3 with correct y_offset
         for win_id in [1, 2, 3]:
-            if not self.set_scan_window(win_id, scan_type="batch_between"):
+            if not self.set_scan_window(
+                win_id, scan_type="batch_between",
+                y_offset=y_offset, height=height,
+            ):
                 return False
 
         # 2. One TUR poll
