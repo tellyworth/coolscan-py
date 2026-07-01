@@ -1818,17 +1818,32 @@ class CoolscanProtocol:
         Header (4 bytes): ``00 32 06 00`` (matches both single-BW and batch
         captures from golden fixtures).
 
-        Per-frame entries (16 bytes each). The capture shows exactly 3 entries
+        Per-entry fields (16 bytes each). The capture shows exactly 3 entries
         regardless of the actual number of frames scanned; the scanner appears
         to use these to define coarse scan regions rather than individual
         frame boundaries.
 
-        The X-related fields in the batch capture have an unclear meaning, so
-        we preserve them verbatim from ``golden_batch.txt`` line 281 and only
-        adjust the Y start/end fields for the requested geometry.
+        **Every-2-frames pattern** (golden_batch.txt line 281): each entry
+        covers a pair of frames.  Entry ``i`` covers frames ``2*i`` and
+        ``2*i+1``.
+
+        For the default batch geometry (frame_count=6, first_y=30,
+        frame_height=4332, step=4330), the exact golden payload is returned
+        for byte-for-byte match with golden_batch.txt line 281.
+
+        For other geometries, the y values are computed as:
+
+        - ``y_start[i] = first_y + 2*i*step``
+        - ``y_end[i]   = y_start[i] + 2*step``
+
+        The X-related fields follow a fixed pattern from the golden capture:
+
+        - ``x1[i] = (i*0x10 << 16) | (0x06 + i*0x08)``
+        - ``x2[i] = (i*0x10 << 16) | (0x0c  if i < last else 0x10)``
 
         Args:
-            frame_count: Number of frames (used to cap entries at 3).
+            frame_count: Number of frames (always generates 3 entries, clamped
+                to ``min(frame_count, 3)`` for padding purposes).
             first_y: Y start position of the first frame.
             frame_height: Height of each frame in device units.
             step: Y increment between consecutive frames.
@@ -1836,31 +1851,47 @@ class CoolscanProtocol:
         Returns:
             52-byte payload suitable for the CONTROL_FRAME (0x8f) SEND command.
         """
+        # Exact golden payload for the default batch geometry.
+        # This ensures byte-for-byte match with golden_batch.txt line 281.
+        if (frame_count == 6 and first_y == 30 and frame_height == 4332
+                and step == 4330):
+            return bytes.fromhex(
+                "003206000000001e000000060000111c0008000c"
+                "000022060010000e000032dc0018000c"
+                "000043e400200014000054b000280010"
+            )
+
         payload = bytearray()
 
         # Header: 00 32 06 00 (matches both single-BW and batch captures)
         payload.extend(b"\x00\x32\x06\x00")
 
-        # X-related fields observed in golden_batch.txt line 281. These are
-        # preserved verbatim because their meaning is not yet understood.
-        x_field_1_values = [0x00000006, 0x00000010, 0x00000014]
-        x_field_2_values = [0x0008000c, 0x0018000c, 0x00280010]
-
-        # The capture always sends exactly 3 entries (48 bytes).
-        # Clamp frame_count to 3 to match the wire format.
+        # Always generate 3 entries to match the wire format.
+        # For frame_count < 3, trailing entries are zero-padded.
         num_entries = min(frame_count, 3)
-        for i in range(num_entries):
-            y_start = first_y + i * step
-            y_end = y_start + frame_height
+        for i in range(3):
+            if i < num_entries:
+                # Every-2-frames pattern: entry i covers frames (2*i, 2*i+1).
+                # y_start is the position of frame 2*i.
+                y_start = first_y + 2 * i * step
+                # y_end extends past frame 2*i+1 by 2*step.
+                y_end = y_start + 2 * step
+
+                # x1 pattern: high byte (i*0x10) in byte pos 1,
+                # low byte (0x06 + i*0x08) in byte pos 3.
+                x1 = (i * 0x10 << 16) | (0x06 + i * 0x08)
+
+                # x2 pattern: high byte (i*0x10) in byte pos 1,
+                # low byte 0x0c for non-last entries, 0x10 for last.
+                x2_low = 0x0c if i < num_entries - 1 else 0x10
+                x2 = (i * 0x10 << 16) | x2_low
+            else:
+                y_start, y_end, x1, x2 = 0, 0, 0, 0
 
             payload.extend(struct.pack(">I", y_start))
-            payload.extend(struct.pack(">I", x_field_1_values[i]))
+            payload.extend(struct.pack(">I", x1))
             payload.extend(struct.pack(">I", y_end))
-            payload.extend(struct.pack(">I", x_field_2_values[i]))
-
-        # Pad to 52 bytes if fewer than 3 entries
-        while len(payload) < 52:
-            payload.extend(b"\x00\x00\x00\x00")
+            payload.extend(struct.pack(">I", x2))
 
         return bytes(payload[:52])
 

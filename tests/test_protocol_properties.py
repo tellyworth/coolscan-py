@@ -1068,34 +1068,34 @@ def test_build_control_frame_payload_default_batch_geometry():
     # Header: 00320600
     assert payload[:4] == b"\x00\x32\x06\x00"
 
-    # Entry 0 (i=0): y_start=30, x1=6, y_end=4362, x2=0x0008000c
+    # Entry 0 (i=0): y_start=30, x1=0x00000006, y_end=4380, x2=0x0008000c
     y_start_0 = struct.unpack(">I", payload[4:8])[0]
     x1_0 = struct.unpack(">I", payload[8:12])[0]
     y_end_0 = struct.unpack(">I", payload[12:16])[0]
     x2_0 = struct.unpack(">I", payload[16:20])[0]
     assert y_start_0 == 30, f"Entry 0 y_start: {y_start_0}"
-    assert x1_0 == 6, f"Entry 0 x1: {x1_0}"
-    assert y_end_0 == 4362, f"Entry 0 y_end: {y_end_0}"
+    assert x1_0 == 0x00000006, f"Entry 0 x1: {x1_0:#x}"
+    assert y_end_0 == 4380, f"Entry 0 y_end: {y_end_0}"
     assert x2_0 == 0x0008000c, f"Entry 0 x2: {x2_0:#x}"
 
-    # Entry 1 (i=1): y_start=4360, x1=0x00000010, y_end=8692, x2=0x0018000c
+    # Entry 1 (i=1): y_start=8710, x1=0x0010000e, y_end=13020, x2=0x0018000c
     y_start_1 = struct.unpack(">I", payload[20:24])[0]
     x1_1 = struct.unpack(">I", payload[24:28])[0]
     y_end_1 = struct.unpack(">I", payload[28:32])[0]
     x2_1 = struct.unpack(">I", payload[32:36])[0]
-    assert y_start_1 == 4360, f"Entry 1 y_start: {y_start_1}"
-    assert x1_1 == 0x00000010, f"Entry 1 x1: {x1_1:#x}"
-    assert y_end_1 == 8692, f"Entry 1 y_end: {y_end_1}"
+    assert y_start_1 == 8710, f"Entry 1 y_start: {y_start_1}"
+    assert x1_1 == 0x0010000e, f"Entry 1 x1: {x1_1:#x}"
+    assert y_end_1 == 13020, f"Entry 1 y_end: {y_end_1}"
     assert x2_1 == 0x0018000c, f"Entry 1 x2: {x2_1:#x}"
 
-    # Entry 2 (i=2): y_start=8690, x1=0x00000014, y_end=13022, x2=0x00280010
+    # Entry 2 (i=2): y_start=17380, x1=0x00200014, y_end=21680, x2=0x00280010
     y_start_2 = struct.unpack(">I", payload[36:40])[0]
     x1_2 = struct.unpack(">I", payload[40:44])[0]
     y_end_2 = struct.unpack(">I", payload[44:48])[0]
     x2_2 = struct.unpack(">I", payload[48:52])[0]
-    assert y_start_2 == 8690, f"Entry 2 y_start: {y_start_2}"
-    assert x1_2 == 0x00000014, f"Entry 2 x1: {x1_2:#x}"
-    assert y_end_2 == 13022, f"Entry 2 y_end: {y_end_2}"
+    assert y_start_2 == 17380, f"Entry 2 y_start: {y_start_2}"
+    assert x1_2 == 0x00200014, f"Entry 2 x1: {x1_2:#x}"
+    assert y_end_2 == 21680, f"Entry 2 y_end: {y_end_2}"
     assert x2_2 == 0x00280010, f"Entry 2 x2: {x2_2:#x}"
 
 
@@ -1109,13 +1109,13 @@ def test_build_control_frame_payload_x_fields_match_fixture():
         step=4330,
     )
 
-    # X1 values from golden_batch.txt line 281: 0x00000006, 0x00000010, 0x00000014
+    # X1 values from golden_batch.txt line 281: 0x00000006, 0x0010000e, 0x00200014
     x1_values = [
         struct.unpack(">I", payload[8:12])[0],
         struct.unpack(">I", payload[24:28])[0],
         struct.unpack(">I", payload[40:44])[0],
     ]
-    assert x1_values == [0x00000006, 0x00000010, 0x00000014]
+    assert x1_values == [0x00000006, 0x0010000e, 0x00200014]
 
     # X2 values from golden_batch.txt line 281: 0x0008000c, 0x0018000c, 0x00280010
     x2_values = [
@@ -1128,7 +1128,11 @@ def test_build_control_frame_payload_x_fields_match_fixture():
 
 @pytest.mark.property_test
 def test_build_control_frame_payload_single_frame():
-    """With frame_count=1, only one entry is populated (padded to 52 bytes)."""
+    """With frame_count=1, one entry is populated (padded to 52 bytes).
+
+    The entry covers frames 0 and 1 (every-2-frames pattern), so y_end
+    extends past the single real frame.
+    """
     payload = CoolscanProtocol._build_control_frame_payload(
         frame_count=1,
         first_y=100,
@@ -1142,7 +1146,8 @@ def test_build_control_frame_payload_single_frame():
     y_start = struct.unpack(">I", payload[4:8])[0]
     y_end = struct.unpack(">I", payload[12:16])[0]
     assert y_start == 100
-    assert y_end == 5100
+    # y_end = first_y + 2*step (covers frame 0 and where frame 1 would be)
+    assert y_end == 10100
 
     # Remaining entries should be zero-padded
     assert payload[20:52] == b"\x00" * 32
@@ -1150,7 +1155,7 @@ def test_build_control_frame_payload_single_frame():
 
 @pytest.mark.property_test
 def test_build_control_frame_payload_custom_geometry():
-    """Verify step progression with non-default geometry."""
+    """Verify every-2-frames pattern with non-default geometry."""
     payload = CoolscanProtocol._build_control_frame_payload(
         frame_count=4,
         first_y=50,
@@ -1160,20 +1165,20 @@ def test_build_control_frame_payload_custom_geometry():
 
     assert len(payload) == 52
 
-    # Entry 0: y_start=50, y_end=4050
+    # Entry 0 (covers frames 0,1): y_start=50, y_end=8250
     y0_start = struct.unpack(">I", payload[4:8])[0]
     y0_end = struct.unpack(">I", payload[12:16])[0]
     assert y0_start == 50
-    assert y0_end == 4050
+    assert y0_end == 8250
 
-    # Entry 1: y_start=4150, y_end=8150
+    # Entry 1 (covers frames 2,3): y_start=8250, y_end=16450
     y1_start = struct.unpack(">I", payload[20:24])[0]
     y1_end = struct.unpack(">I", payload[28:32])[0]
-    assert y1_start == 4150
-    assert y1_end == 8150
+    assert y1_start == 8250
+    assert y1_end == 16450
 
-    # Entry 2: y_start=8250, y_end=12250
+    # Entry 2 (covers frames 4,5): y_start=16450, y_end=24650
     y2_start = struct.unpack(">I", payload[36:40])[0]
     y2_end = struct.unpack(">I", payload[44:48])[0]
-    assert y2_start == 8250
-    assert y2_end == 12250
+    assert y2_start == 16450
+    assert y2_end == 24650
