@@ -41,6 +41,8 @@ def parse_args():
                         help="Bit depth (default: 8)")
     parser.add_argument("--no-previews", action="store_true",
                         help="Don't save Stage A/B preview images")
+    parser.add_argument("--strip", action="store_true",
+                        help="Scan entire film strip (6 frames) as one large frame")
     return parser.parse_args()
 
 
@@ -218,7 +220,10 @@ def main():
             # 6. Full scan setup
             print("\n=== FULL SCAN SETUP ===")
             params = ScanParameters(resolution=2700)
-            if not protocol.full_scan_frame(params):
+            strip_height = (3888 * 6) if args.strip else None
+            if args.strip:
+                print(f"  Strip mode: height={strip_height} (6x normal)")
+            if not protocol.full_scan_frame(params, strip_height=strip_height):
                 print("Scan sequence failed")
                 return False
             print("Scan sequence complete, scanner ready for data read")
@@ -245,7 +250,7 @@ def main():
             chunk_idx = 0
 
             width = 2880
-            height = 3888
+            height = strip_height if strip_height else 3888
             num_channels = 3
             bytes_per_channel = 1
             expected_bytes = width * height * num_channels * bytes_per_channel
@@ -276,7 +281,7 @@ def main():
                 try:
                     data_len = len(scan_data)
                     width = 2880
-                    height = 3888
+                    height = strip_height if strip_height else 3888
                     num_channels = 3
                     depth = args.depth
 
