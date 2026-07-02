@@ -1182,3 +1182,34 @@ def test_build_control_frame_payload_custom_geometry():
     y2_end = struct.unpack(">I", payload[44:48])[0]
     assert y2_start == 16450
     assert y2_end == 24650
+
+
+# ---------------------------------------------------------------------------
+# Property: _control_frame_positions (batch frame y-positions)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.property_test
+def test_control_frame_positions_default_geometry():
+    """Default 6-frame geometry returns golden positions from pcapng capture."""
+    positions = CoolscanProtocol._control_frame_positions(
+        frame_count=6, first_y=30, frame_height=4332, step=4330
+    )
+    assert positions == [30, 4380, 8710, 13020, 17380, 21680]
+
+
+@pytest.mark.property_test
+def test_control_frame_positions_partial_default():
+    """frame_count < 6 with default geometry slices golden positions."""
+    positions = CoolscanProtocol._control_frame_positions(
+        frame_count=3, first_y=30, frame_height=4332, step=4330
+    )
+    assert positions == [30, 4380, 8710]
+
+
+@pytest.mark.property_test
+def test_control_frame_positions_non_default_fallback():
+    """Non-default geometry falls back to first_y + i*step formula."""
+    positions = CoolscanProtocol._control_frame_positions(
+        frame_count=4, first_y=100, frame_height=4000, step=4100
+    )
+    assert positions == [100, 4200, 8300, 12400]
