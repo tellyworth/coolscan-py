@@ -358,6 +358,103 @@ autofocus call.
     assumptions. The PNGs may be garbage until the packing/format is understood; raw
     `.raw` files are saved alongside for analysis.
 
+## Investigation: Black Frames in Batch Mode (July 2026)
+
+**Symptom:** During initial hardware testing, frames 1, 2, and 4 produced
+almost entirely black images (~20 lines of real image at the top, remainder black),
+while frames 0, 3, and 5 produced complete images.
+
+### Initial Hypothesis
+
+The code used `frame_y = first_y + i * step` (with `first_y=30, step=4330`) to compute
+frame positions, producing: 30, 4360, 8690, 13020, 17350, 21680.
+
+The golden fixture from `ls40-batch.pcapng` showed Nikon Scan used different positions:
+30, 4380, 8710, 13020, 17380, 21680 — the CONTROL_FRAME entry boundaries.
+
+The hypothesis was: "the scanner requires y-positions at CONTROL_FRAME entry boundaries."
+
+### Changes Made
+
+A fix was implemented (`commit 677ab5d`) that:
+
+1. Added `_GOLDEN_BATCH_POSITIONS = [30, 4380, 8710, 13020, 17380, 21680]` — hardcoded
+   golden positions from the pcapng capture
+2. Added `_control_frame_positions()` method that returns these positions for default
+   geometry (6 frames, first_y=30, frame_height=4332, step=4330)
+3. Modified `batch_scan_to_frames()` to use `frame_positions[i]` instead of `first_y + i*step`
+
+### Hardware Test Results
+
+After the fix, all 6 frames produced complete image data. The logs confirmed
+the correct y-positions were being used:
+- Frame 1: y=4380 (was 4360)
+- Frame 2: y=8710 (was 8690)
+- Frame 4: y=17380 (was 17350)
+
+### Uncertainty: Was the Y-Position Change the Actual Fix?
+
+**This is uncertain.** Comparative analysis of the old and new hardware logs reveals
+two differences:
+
+| Factor | Old Log (broken) | New Log (fixed) |
+|--------|------------------|------------------|
+| Y-positions | 4360, 8690, 17350 | **4380, 8710, 17380** |
+| Exposure calibration | **4 bytes** (empty) | 1904 bytes (full) |
+
+The exposure calibration difference is NOT a code change — it's scanner state.
+The old log shows the scanner returning only 4 bytes of calibration data
+vs 1904 bytes in the new log. This suggests the scanner was pre-calibrated
+from the previous run when the new log was captured.
+
+**Hypothesis (uncertain):** Both factors may have contributed:
+
+1. **Y-positions must be within CONTROL_FRAME regions.** The old positions
+   (4360, 8690, 17350) fell slightly outside their respective CONTROL_FRAME
+   entry ranges (entry 0: 30-4380, entry 1: 8710-13020, entry 2: 17380-21680).
+   The 20-pixel deviation is tiny (~0.5% of frame height) but could cause the
+   scanner to clip or reject image data for frames starting outside their
+   designated regions.
+
+2. **Exposure calibration state may have been decisive.** Without proper
+   calibration (4 bytes vs 1904 bytes), the scanner's A/D conversion and
+   image processing may produce dark/garbage output regardless of y-position.
+
+### Open Question
+
+**Did the y-position fix work because of correct positions, or because the
+scanner happened to be pre-calibrated?**
+
+To test this definitively:
+1. Disconnect and reconnect the scanner (cold start)
+2. Run batch scan with the fixed code
+3. Verify the exposure calibration returns 1904 bytes (not 4)
+4. If frames are still black with 4 bytes of calibration, there's a second
+   bug requiring investigation
+
+### Lessons Learned
+
+1. **Hardware test state carries over.** Scanner calibration persists across
+   USB sessions. Always test with cold-start conditions to isolate bugs.
+
+2. **The golden y-positions encode Nikon Scan's prescan-adjusted film edge
+   detection.** The variation from `first_y + i*step` (±20 pixels) suggests
+   Nikon Scan analyzes the 96 DPI prescan to find actual frame borders,
+   then adjusts CONTROL_FRAME entries accordingly. We cannot replicate this
+   without implementing similar film-edge detection.
+
+3. **CONTROL_FRAME entry boundaries are not arbitrary.** The scanner may
+   enforce that per-frame y-offsets fall within the ranges defined by
+   CONTROL_FRAME entries. Using `first_y + i*step` with step=4330 produces
+   values that drift outside these ranges.
+
+### Status
+
+- [x] Y-position fix implemented (uses golden positions for default geometry)
+- [x] All 6 frames produce image data with fixed code + pre-calibrated scanner
+- [ ] Confirmed: Does fix work with cold-start scanner?
+- [ ] Confirmed: Does fix work with non-default geometry?
+
 ## Could We Scan the Full Strip Continuously at 2900 DPI?
 
 This is an open experimental question. The frame-by-frame approach used by Nikon Scan
