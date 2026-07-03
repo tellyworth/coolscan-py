@@ -123,6 +123,7 @@ def main():
 
             focus_x = 0x059B  # Default from batch capture
             frame_count = 0
+            prescan_saved = False
 
             for frame_idx, full_res_data, previews in protocol.batch_scan_to_frames(
                 frame_count=args.frames,
@@ -136,6 +137,33 @@ def main():
             ):
                 frame_count += 1
                 print(f"\n=== FRAME {frame_idx + 1}: SAVING IMAGES ===")
+
+                # Save prescan PNG after first frame (prescan runs inside
+                # batch_scan_to_frames before any frame is yielded)
+                if not prescan_saved and protocol._last_prescan_image_data:
+                    prescan_data = protocol._last_prescan_image_data
+                    prescan_width = 96
+                    prescan_pixels = len(prescan_data) // (2 * 3)
+                    prescan_height = prescan_pixels // prescan_width
+                    print(
+                        f"  Prescan data: {len(prescan_data)} bytes, "
+                        f"{prescan_pixels} pixels, {prescan_width}x{prescan_height}"
+                    )
+                    prescan_arr, trailing = _parse_scan_data(
+                        bytearray(prescan_data),
+                        width=prescan_width,
+                        height=prescan_height,
+                        num_channels=3,
+                        depth=12,
+                        format="plane",
+                        channel_offsets=(0, 0, 1),
+                    )
+                    Image.fromarray(prescan_arr, "RGB").save(f"{base}_prescan_96dpi.png")
+                    print(
+                        f"  Saved full prescan strip {prescan_width}x{prescan_height} "
+                        f"to {base}_prescan_96dpi.png (trailing={trailing})"
+                    )
+                    prescan_saved = True
 
                 # Full-res image: actual sensor width is 2880 pixels (not the
                 # WDB width of 2870).  Height is derived from the byte count
