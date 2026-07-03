@@ -4045,7 +4045,6 @@ class CoolscanProtocol:
         timeout: int = 300,
         lut_data: Optional[bytes] = None,
         lut_map: Optional[Dict[int, bytes]] = None,
-        strip_height: Optional[int] = None,
     ) -> bool:
         """Run the full-scan capture frame for one frame (high-res RGB scan start).
 
@@ -4067,9 +4066,6 @@ class CoolscanProtocol:
             timeout: Total timeout budget in seconds for the capture frame.
             lut_data: Optional single LUT payload for all RGB channels.
             lut_map: Optional per-channel LUT mapping ``{1: bytes, 2: bytes, 3: bytes}``.
-            strip_height: Optional scan height that overrides the default for
-                each window.  Used for strip scanning (e.g., 6× normal height
-                to capture an entire film strip in one pass).
 
         Returns:
             True if the scanner is ready after polling.
@@ -4083,7 +4079,7 @@ class CoolscanProtocol:
 
         # 2. High-res RGB windows at 2900 DPI (golden fixture lines 607-621).
         for win_id in [1, 2, 3]:
-            if not self.set_scan_window(win_id, scan_type="single_bw", height=strip_height):
+            if not self.set_scan_window(win_id, scan_type="single_bw"):
                 print(f"  ❌ Failed to set capture window {win_id}")
                 return False
 
@@ -4236,7 +4232,6 @@ class CoolscanProtocol:
         focus_x: int = 0,
         focus_y: int = 0,
         lut_map: Optional[Dict[int, bytes]] = None,
-        strip_height: Optional[int] = None,
     ) -> bool:
         """Run a complete full-scan sequence for one frame.
 
@@ -4251,8 +4246,6 @@ class CoolscanProtocol:
             focus_x: X coordinate for autofocus target.
             focus_y: Y coordinate for autofocus target.
             lut_map: Optional per-channel LUT mapping for the capture frame.
-            strip_height: Optional scan height override for strip scanning
-                (passed through to ``full_scan_capture_frame``).
 
         Returns:
             True if the full scan frame completes successfully.
@@ -4271,7 +4264,7 @@ class CoolscanProtocol:
 
         capture_timeout = max(1, int(deadline - time.time()))
         if not self.full_scan_capture_frame(
-            params, timeout=capture_timeout, lut_map=lut_map, strip_height=strip_height
+            params, timeout=capture_timeout, lut_map=lut_map
         ):
             return False
 

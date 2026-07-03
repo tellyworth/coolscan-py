@@ -41,8 +41,6 @@ def parse_args():
                         help="Bit depth (default: 8)")
     parser.add_argument("--no-previews", action="store_true",
                         help="Don't save Stage A/B preview images")
-    parser.add_argument("--strip", action="store_true",
-                        help="Scan entire film strip (6 frames) as one large frame")
     return parser.parse_args()
 
 
@@ -205,25 +203,36 @@ def main():
                 return False
 
             if protocol._last_prescan_image_data:
-                prescan_arr, _ = _parse_scan_data(
-                    bytearray(protocol._last_prescan_image_data),
-                    width=96,
-                    height=474,
+                prescan_data = protocol._last_prescan_image_data
+                prescan_width = 96
+                # Height derived from actual data size: 273024 bytes, planar, 3 ch, 12-bit
+                # pixels = data_len / (2 bytes/sample * 3 channels) = 45504
+                # height = pixels / width = 45504 / 96 = 474 (full strip at 96 DPI)
+                prescan_pixels = len(prescan_data) // (2 * 3)
+                prescan_height = prescan_pixels // prescan_width
+                print(
+                    f"  Prescan data: {len(prescan_data)} bytes, "
+                    f"{prescan_pixels} pixels, {prescan_width}x{prescan_height}"
+                )
+                prescan_arr, trailing = _parse_scan_data(
+                    bytearray(prescan_data),
+                    width=prescan_width,
+                    height=prescan_height,
                     num_channels=3,
                     depth=12,
                     format="plane",
                     channel_offsets=(0, 0, 1),
                 )
                 Image.fromarray(prescan_arr, "RGB").save(f"{base}_prescan_96dpi.png")
-                print(f"  Saved prescan image to {base}_prescan_96dpi.png")
+                print(
+                    f"  Saved full prescan strip {prescan_width}x{prescan_height} "
+                    f"to {base}_prescan_96dpi.png (trailing={trailing})"
+                )
 
             # 6. Full scan setup
             print("\n=== FULL SCAN SETUP ===")
             params = ScanParameters(resolution=2700)
-            strip_height = (3888 * 6) if args.strip else None
-            if args.strip:
-                print(f"  Strip mode: height={strip_height} (6x normal)")
-            if not protocol.full_scan_frame(params, strip_height=strip_height):
+            if not protocol.full_scan_frame(params):
                 print("Scan sequence failed")
                 return False
             print("Scan sequence complete, scanner ready for data read")
@@ -250,7 +259,7 @@ def main():
             chunk_idx = 0
 
             width = 2880
-            height = strip_height if strip_height else 3888
+            height = 3888
             num_channels = 3
             bytes_per_channel = 1
             expected_bytes = width * height * num_channels * bytes_per_channel
@@ -281,7 +290,7 @@ def main():
                 try:
                     data_len = len(scan_data)
                     width = 2880
-                    height = strip_height if strip_height else 3888
+                    height = 3888
                     num_channels = 3
                     depth = args.depth
 
