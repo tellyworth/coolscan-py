@@ -123,6 +123,7 @@ def main():
 
             focus_x = 0x059B  # Default from batch capture
             frame_count = 0
+            prescan_saved = False
 
             for frame_idx, full_res_data, previews in protocol.batch_scan_to_frames(
                 frame_count=args.frames,
@@ -137,12 +138,43 @@ def main():
                 frame_count += 1
                 print(f"\n=== FRAME {frame_idx + 1}: SAVING IMAGES ===")
 
-                # Full-res image (2870 x 4332 for batch)
+                # Save prescan PNG after first frame (prescan runs inside
+                # batch_scan_to_frames before any frame is yielded)
+                if not prescan_saved and protocol._last_prescan_image_data:
+                    prescan_data = protocol._last_prescan_image_data
+                    prescan_width = 96
+                    prescan_pixels = len(prescan_data) // (2 * 3)
+                    prescan_height = prescan_pixels // prescan_width
+                    print(
+                        f"  Prescan data: {len(prescan_data)} bytes, "
+                        f"{prescan_pixels} pixels, {prescan_width}x{prescan_height}"
+                    )
+                    prescan_arr, trailing = _parse_scan_data(
+                        bytearray(prescan_data),
+                        width=prescan_width,
+                        height=prescan_height,
+                        num_channels=3,
+                        depth=12,
+                        format="plane",
+                        channel_offsets=(0, 0, 1),
+                    )
+                    Image.fromarray(prescan_arr, "RGB").save(f"{base}_prescan_96dpi.png")
+                    print(
+                        f"  Saved full prescan strip {prescan_width}x{prescan_height} "
+                        f"to {base}_prescan_96dpi.png (trailing={trailing})"
+                    )
+                    prescan_saved = True
+
+                # Full-res image: actual sensor width is 2880 pixels (not the
+                # WDB width of 2870).  Height is derived from the byte count
+                # since the scanner does not scan the full WDB height.
                 full_res_path = f"{base}_frame_{frame_idx}.png"
+                batch_width = 2880  # Verified by autocorrelation (docs/sane-image-data.md)
+                batch_height = len(full_res_data) // (batch_width * 3)
                 save_frame_image(
                     full_res_data,
-                    width=2870,
-                    height=args.frame_height,
+                    width=batch_width,
+                    height=batch_height,
                     num_channels=3,
                     depth=args.depth,
                     channel_offsets=LS40_CHANNEL_OFFSETS,
@@ -151,17 +183,15 @@ def main():
                 scan_saved = True
 
                 # Stage A preview (290 DPI, 4 channels: R, G, B, IR)
-                # NOTE: The byte counts for the batch 290 DPI intermediate
-                # stages do not match the single-frame 290 DPI preview
-                # (Stage A: ~262 KB returned vs ~497 KB expected at 8-bit,
-                # Stage B: ~197 KB vs ~373 KB expected). The 287x433x12-bit
-                # decode below is speculative and may produce garbage; the raw
-                # bytes are also saved for offline analysis.
+                # NOTE: The batch 290 DPI intermediate stages decode at
+                # width=288 (2880 sensor pixels / 10 pitch at 290 DPI),
+                # height=433 (4332 device units / 10), depth=12.
+                # Stage A has 4 channels (R, G, B, IR); Stage B has 3 (R, G, B).
                 if "stage_a" in previews and previews["stage_a"]:
                     stage_a_path = f"{base}_frame_{frame_idx}_stage_a.png"
                     save_preview_image(
                         previews["stage_a"],
-                        width=287,
+                        width=288,
                         height=433,
                         num_channels=4,
                         depth=12,
@@ -173,7 +203,7 @@ def main():
                     stage_b_path = f"{base}_frame_{frame_idx}_stage_b.png"
                     save_preview_image(
                         previews["stage_b"],
-                        width=287,
+                        width=288,
                         height=433,
                         num_channels=3,
                         depth=12,
@@ -201,17 +231,31 @@ def main():
                 return False
 
             if protocol._last_prescan_image_data:
-                prescan_arr, _ = _parse_scan_data(
-                    bytearray(protocol._last_prescan_image_data),
-                    width=96,
-                    height=474,
+                prescan_data = protocol._last_prescan_image_data
+                prescan_width = 96
+                # Height derived from actual data size: 273024 bytes, planar, 3 ch, 12-bit
+                # pixels = data_len / (2 bytes/sample * 3 channels) = 45504
+                # height = pixels / width = 45504 / 96 = 474 (full strip at 96 DPI)
+                prescan_pixels = len(prescan_data) // (2 * 3)
+                prescan_height = prescan_pixels // prescan_width
+                print(
+                    f"  Prescan data: {len(prescan_data)} bytes, "
+                    f"{prescan_pixels} pixels, {prescan_width}x{prescan_height}"
+                )
+                prescan_arr, trailing = _parse_scan_data(
+                    bytearray(prescan_data),
+                    width=prescan_width,
+                    height=prescan_height,
                     num_channels=3,
                     depth=12,
                     format="plane",
                     channel_offsets=(0, 0, 1),
                 )
                 Image.fromarray(prescan_arr, "RGB").save(f"{base}_prescan_96dpi.png")
-                print(f"  Saved prescan image to {base}_prescan_96dpi.png")
+                print(
+                    f"  Saved full prescan strip {prescan_width}x{prescan_height} "
+                    f"to {base}_prescan_96dpi.png (trailing={trailing})"
+                )
 
             # 6. Full scan setup
             print("\n=== FULL SCAN SETUP ===")
