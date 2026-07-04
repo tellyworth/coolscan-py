@@ -368,7 +368,7 @@ def compare_sequences(golden, test):
         print(f"    ... and {len(payload_diffs) - 20} more")
 
 if __name__ == '__main__':
-    golden = parse_file('/Users/alex/dev/coolscan-py/tests/fixtures/golden_single_bw.txt')
+    golden = parse_file('/Users/alex/dev/coolscan-py/reference/golden_single_bw.txt')
     test = parse_file('/Users/alex/dev/coolscan-py/test_hardware_scan_capture.txt')
     print_timeline(golden, 'GOLDEN FIXTURE OUT Commands')
     print_timeline(test, 'TEST HARDWARE CAPTURE OUT Commands')

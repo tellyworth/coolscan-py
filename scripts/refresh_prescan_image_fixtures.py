@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rebuild ``tests/fixtures/prescan_image_block{1,2,3}.bin`` from ``ls40-single-bw.pcapng``.
+Rebuild ``reference/prescan_image_block{1,2,3}.bin`` from ``ls40-single-bw.pcapng``.
 
 ``parse_pcapng.extract_usb_traffic`` / ``tshark`` record prescan image bytes as several
 large IN URBs (typically **65508** bytes) plus a final **11520**-byte IN, with 1-byte

@@ -10,8 +10,8 @@ Reads a golden fixture and prints a comparison table of:
 This is a read-only analysis script. It does NOT modify any files.
 
 Usage:
-    python3 scripts/analyze_exposure_scaling.py tests/fixtures/golden_single_bw.txt
-    python3 scripts/analyze_exposure_scaling.py tests/fixtures/golden_batch.txt
+    python3 scripts/analyze_exposure_scaling.py reference/golden_single_bw.txt
+    python3 scripts/analyze_exposure_scaling.py reference/golden_batch.txt
 """
 
 import sys
@@ -264,7 +264,7 @@ def main():
         print("Usage: python3 analyze_exposure_scaling.py <fixture_path>")
         print("\nAvailable fixtures:")
         import glob
-        for f in sorted(glob.glob('tests/fixtures/golden_*.txt')):
+        for f in sorted(glob.glob('reference/golden_*.txt')):
             print(f"  {f}")
         sys.exit(1)
 

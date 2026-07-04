@@ -10,7 +10,7 @@ Checks performed on text fixtures:
 - ``@path`` file byte-length matches the length column
 - Timestamps are monotonically non-decreasing
 
-Additional checks for golden fixture (``tests/fixtures/golden_single_bw.txt``):
+Additional checks for golden fixture (``reference/golden_single_bw.txt``):
 - pcapng SHA-256 checksum matches embedded header value
 - Fixture event count is within 2x of capture event count (2544 events)
 - Every command code in fixture appears at least once in raw capture
@@ -36,7 +36,7 @@ GOLDEN_CONFIGS = [
         "raw_count": 2544,
     },
     {
-        "fixture": Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "golden_batch.txt",
+        "fixture": Path(__file__).resolve().parent.parent / "reference" / "golden_batch.txt",
         "pcap": Path(__file__).resolve().parent.parent / "ls40-batch.pcapng",
         "raw_count": 9619,
     },

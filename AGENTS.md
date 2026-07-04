@@ -3,7 +3,7 @@
 ## Trust Hierarchy (READ THIS FIRST)
 
 - **pcapng captures are the ground truth** -- `ls40-single-bw.pcapng` (primary oracle) and `ls40-batch.pcapng` (secondary) are the only trusted source for wire-format protocol behavior
-- **Golden fixture** (`tests/fixtures/golden_single_bw.txt`, 1472 events) is auto-derived from pcapng via `scripts/generate_fixture_from_pcapng.py`; trusted only when verified by `make validate-fixtures` (SHA-256 cross-check, event count bounds, command code coverage)
+- **Golden fixture** (`reference/golden_single_bw.txt`, 1472 events) is auto-derived from pcapng via `scripts/generate_fixture_from_pcapng.py`; trusted only when verified by `make validate-fixtures` (SHA-256 cross-check, event count bounds, command code coverage)
 - **SANE backend source** (`backends-1.4.0/backend/coolscan3.c`) is known buggy and incomplete; use only for intent, naming, and edge-case discovery -- wire format ALWAYS defers to pcapng when SANE and capture disagree
 - See `docs/pcapng-fixture-audit-report.md` for the full audit of why the old hand-edited fixture diverged from capture
 
@@ -11,7 +11,7 @@
 
 - SANE backend: `backends-1.4.0/backend/coolscan3.c` (+ `coolscan.h`, `coolscan-scsidef.h`)
 - Pcapng captures: `ls40-single-bw.pcapng` (single scan), `ls40-batch.pcapng` (multi-image)
-- Golden fixture: `tests/fixtures/golden_single_bw.txt`
+- Golden fixture: `reference/golden_single_bw.txt`
 - Protocol implementation: `coolscan/protocol.py`
 - Replay harness: `coolscan/usb_replay.py`
 - Main hardware test: `test_hardware_full_scan.py` (standalone script, init -> prescan -> full scan -> save image)
@@ -31,15 +31,23 @@
 
 ## Test Strategy (Three Tiers)
 
-The main test suite is fixture-independent.  Most tests use either
-`FakeCoolscanProtocol` (test double with configurable responses) or synthetic
-`UsbCaptureReplay` events (no fixture files).  This lets `make check-all`
+The main test suite is fixture-independent.  No test imports a fixture file.
+Most tests use either `FakeCoolscanProtocol` (test double with configurable
+responses) or synthetic `UsbCaptureReplay` events.  This lets `make check-all`
 pass without hardware or pre-generated fixtures.
 
-- **Replay** (`test_usb_replay_*.py`, marker `replay_consistency`) -- fixture self-consistency only, NOT hardware correctness
-- **Property** (`test_protocol_properties.py`, marker `property_test`) -- fixture-agnostic invariants (REISSUE, polling, LUT sizes, TUR retries, timeout resilience)
-- **Smoke** (`test_hardware_smoke.py`, marker `hardware`) -- actual hardware correctness; the required verification path for protocol changes; skip if no scanner
-- Markers in `tests/conftest.py`; replay tests auto-marked when unmarked
+- **Contract** (`test_protocol_contracts.py`) -- each helper and scenario method
+  calls the right low-level methods in the right order with the right arguments
+- **Property** (`test_protocol_properties.py`, `test_command_properties.py`,
+  marker `property_test`) -- fixture-agnostic invariants (CDB construction,
+  REISSUE polling, LUT sizes, TUR retries, timeout resilience)
+- **State-machine** (`test_batch_state_machine.py`) -- batch scan frame
+  transitions are valid; parameterized over frame counts
+- **Scanner** (`test_scanner.py`) -- `CoolscanScanner` uses the real
+  `CoolscanProtocol` API (via `FakeCoolscanProtocol` from `tests/fakes.py`)
+- **Smoke** (`test_hardware_smoke.py`, marker `hardware`) -- actual hardware
+  correctness; the required verification path for protocol changes; skip if no scanner
+- Markers in `tests/conftest.py`
 - `validate-fixtures` and `replay-check` are optional diagnostics, not pipeline gates
 
 ## Development Plan
@@ -51,7 +59,7 @@ pass without hardware or pre-generated fixtures.
 ## Stale / Legacy Files (AVOID)
 
 - Root `test_*.py` from Sep 2025 or earlier are experimental and superseded by `tests/` suite
-- `tests/fixtures/test_basic_scan_capture.txt` is legacy; `tests/fixtures/golden_single_bw.txt` is the current oracle
+- `reference/test_basic_scan_capture.txt` is legacy; `reference/golden_single_bw.txt` is the current oracle
 - `sane-comparison.md` at root is stale; use `docs/sane-comparison.md` instead
 - `CLEANUP_SUMMARY.md`, `COMPLETE_IMPLEMENTATION_STATUS.md`, `IMPLEMENTATION_SUMMARY.md`, `DEVELOPMENT_SUMMARY.md` are outdated status docs
 - `coolscan/*.backup` files are stale copies; ignore them
@@ -85,13 +93,13 @@ printf '00112233aabbccdd' | awk '{print length/2}'
 The fixture is tab-separated: timestamp, endpoint, length, hex. The payload is column 4:
 
 ```bash
-awk -F'\t' 'NR==10 {print length($4)/2}' tests/fixtures/golden_single_bw.txt
+awk -F'\t' 'NR==10 {print length($4)/2}' reference/golden_single_bw.txt
 ```
 
 **Verify the fixture's length column matches the payload**
 
 ```bash
-awk -F'\t' 'NR==10 {actual=length($4)/2; print ($3==actual ? "OK" : "FAIL: claimed "$3", actual "actual)}' tests/fixtures/golden_single_bw.txt
+awk -F'\t' 'NR==10 {actual=length($4)/2; print ($3==actual ? "OK" : "FAIL: claimed "$3", actual "actual)}' reference/golden_single_bw.txt
 ```
 
 **Normalize and compare two hex strings**
@@ -106,7 +114,7 @@ diff /tmp/a.hex /tmp/b.hex && echo "identical"
 **Compare a fixture line against a captured/reference value**
 
 ```bash
-awk -F'\t' 'NR==10 {print $4}' tests/fixtures/golden_single_bw.txt | clean_hex > /tmp/fix.hex
+awk -F'\t' 'NR==10 {print $4}' reference/golden_single_bw.txt | clean_hex > /tmp/fix.hex
 echo "0206280001000000" | clean_hex > /tmp/ref.hex
 diff /tmp/fix.hex /tmp/ref.hex && echo "identical"
 ```

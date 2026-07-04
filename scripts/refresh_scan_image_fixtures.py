@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rebuild ``tests/fixtures/scan_image_block{1,2,3,4}.bin`` from ``ls40-single-bw.pcapng``.
+Rebuild ``reference/scan_image_block{1,2,3,4}.bin`` from ``ls40-single-bw.pcapng``.
 
 The full-scan image READs start at frame ~2399.  Each logical READ(10) CDB issue
 returns a single **65508**-byte bulk IN URB (the scanner's max packet size).

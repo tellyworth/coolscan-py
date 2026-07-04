@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Extract low-resolution (96 DPI prescan and 290 DPI Stage A/B) scan images
-from tests/fixtures/golden_batch.txt to PNGs in tests/fixtures/extracted/.
+from reference/golden_batch.txt to reference/extracted/.
 
 The scanner outputs plane-interleaved data per line:
   [ch0[width]][ch1[width]][ch2[width]]...
@@ -27,9 +27,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-FIXTURE = Path("tests/fixtures/golden_batch.txt")
-BIN_DIR = Path("tests/fixtures")
-OUT_DIR = Path("tests/fixtures/extracted")
+FIXTURE = Path("reference/golden_batch.txt")
+BIN_DIR = Path("reference")
+OUT_DIR = Path("reference/extracted")
 
 # Width lookup derived from READ(10) factorization:
 #   96 DPI:  130752 / (3ch * 2B) = 21792 samples; 21792/227lines = 96px

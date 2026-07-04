@@ -46,7 +46,7 @@ generate-golden-fixture:
 
 generate-batch-fixture:
 	@echo "Generating batch fixture from pcapng..."
-	python3 scripts/generate_fixture_from_pcapng.py --pcap ls40-batch.pcapng --output tests/fixtures/golden_batch.txt
+	python3 scripts/generate_fixture_from_pcapng.py --pcap ls40-batch.pcapng --output reference/golden_batch.txt
 
 # Run all checks (lint + test; fixtures are optional diagnostics)
 check-all: lint test
