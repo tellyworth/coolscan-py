@@ -1344,8 +1344,8 @@ def test_read_scan_data_short_read_returns_partial():
         ("out", bytes([0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x80])),
         ("out", b"\xd0"),
         ("in", b"\x03"),  # DATA_IN phase
-        ("in", b"\xAA" * 32),  # Only 32 bytes (short read)
-        ("in", b"\x00" * 8),  # status READY
+        ("in", b"\xAA" * 32),  # Only 32 bytes (short read — exhausts replay)
+        # No more IN events; replay exhausts → USBTimeoutError → partial data returned
     ]
 
     replay = UsbCaptureReplay(events=events)
@@ -1355,5 +1355,6 @@ def test_read_scan_data_short_read_returns_partial():
 
     assert len(data) == 32, f"Expected 32 bytes (short read), got {len(data)}"
     assert data == b"\xAA" * 32
+    # Replay is exhausted (all events consumed)
     assert replay.position == replay.total
     proto.close()
