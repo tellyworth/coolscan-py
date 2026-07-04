@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 def main():
-    fixture = Path("tests/fixtures/golden_single_bw.txt")
+    fixture = Path("reference/golden_single_bw.txt")
     if not fixture.exists():
         print(f"SKIP: {fixture} not found")
         return 0

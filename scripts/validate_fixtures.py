@@ -31,7 +31,7 @@ CAPTURE_DEFAULT = Path(__file__).resolve().parent.parent / "test_basic_scan_capt
 # Known event counts from raw capture
 GOLDEN_CONFIGS = [
     {
-        "fixture": Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "golden_single_bw.txt",
+        "fixture": Path(__file__).resolve().parent.parent / "reference" / "golden_single_bw.txt",
         "pcap": Path(__file__).resolve().parent.parent / "ls40-single-bw.pcapng",
         "raw_count": 2544,
     },

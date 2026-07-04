@@ -283,7 +283,7 @@ def main() -> int:
     parser.add_argument(
         "--output", 
         type=Path, 
-        default=_REPO / "tests" / "fixtures" / "golden_single_bw.txt", 
+        default=_REPO / "reference" / "golden_single_bw.txt", 
         help="Path to the output fixture file"
     )
     args = parser.parse_args()

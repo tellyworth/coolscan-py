@@ -112,7 +112,7 @@ class TestGoldenFixtureCommandOrder:
 
     def test_golden_fixture_starts_with_inquiry(self):
         """Golden fixture begins with INQUIRY command (0x12)."""
-        golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
+        golden_path = Path(__file__).resolve().parent.parent / "reference" / "golden_single_bw.txt"
         if not golden_path.is_file():
             pytest.skip("golden fixture not generated yet")
 
@@ -122,7 +122,7 @@ class TestGoldenFixtureCommandOrder:
 
     def test_golden_fixture_has_tur_after_inquiry(self):
         """Golden fixture has TEST_UNIT_READY following initial INQUIRY sequence."""
-        golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
+        golden_path = Path(__file__).resolve().parent.parent / "reference" / "golden_single_bw.txt"
         if not golden_path.is_file():
             pytest.skip("golden fixture not generated yet")
 
@@ -132,7 +132,7 @@ class TestGoldenFixtureCommandOrder:
 
     def test_golden_fixture_has_reserve_unit(self):
         """Golden fixture contains RESERVE_UNIT (0x16)."""
-        golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
+        golden_path = Path(__file__).resolve().parent.parent / "reference" / "golden_single_bw.txt"
         if not golden_path.is_file():
             pytest.skip("golden fixture not generated yet")
 
@@ -141,7 +141,7 @@ class TestGoldenFixtureCommandOrder:
 
     def test_golden_fixture_has_read_capacity(self):
         """Golden fixture contains READ_CAPACITY (0x25)."""
-        golden_path = Path(__file__).parent / "fixtures" / "golden_single_bw.txt"
+        golden_path = Path(__file__).resolve().parent.parent / "reference" / "golden_single_bw.txt"
         if not golden_path.is_file():
             pytest.skip("golden fixture not generated yet")
 
