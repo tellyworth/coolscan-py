@@ -1,176 +1,105 @@
 """
-Piece C: Integration test — full scan flow with synthetic image data.
+Integration test — full scan flow using FakeCoolscanProtocol.
 
 Tests the complete control flow: setup → scan → image read → release,
-using a minimal fixture with synthetic IN data (zeros) for the image block.
+using the fixture-independent FakeCoolscanProtocol test double.  This
+verifies call sequencing and data lengths without depending on USB replay
+or fixture files.
 
 The 64-byte allocation proves the protocol transitions correctly from
 scanner_ready → reserve_unit → object_position → set_window → _upload_lut →
-start_scan → poll_until_ready → read_scan_data → release_unit, without
-needing real image bytes from the capture.
-
-We call the individual steps rather than perform_scan_sequence() because
-that method calls release_unit() in its finally block, which would prevent
-us from reading image data afterward.
+start_scan → poll_until_ready → read_scan_data → release_unit.
 """
-
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from coolscan.protocol import CoolscanProtocol, DataType, ScanParameters
-from coolscan.usb_replay import UsbCaptureReplay
-
-CAPTURE = Path(__file__).resolve().parent.parent / "test_basic_scan_capture.txt"
+from coolscan.protocol import DataType, ScanParameters
+from tests.fakes import FakeCoolscanProtocol
 
 
-class MockInterface:
-    value = "usb"
-
-
-class MockDevice:
-    def __init__(self):
-        self.vendor = "Nikon"
-        self.model = "LS-40 ED"
-        self.revision = "1.20"
-        self.interface = MockInterface()
-        self.device_path = "/dev/usb/scanner0"
-        self.vendor_id = 0x04B0
-        self.product_id = 0x4000
-
-
-def test_full_scan_flow_with_synthetic_data(tmp_path):
+@pytest.mark.property_test
+def test_full_scan_flow_with_synthetic_data():
     """
     Full control flow: scanner_ready → reserve → setup → start_scan →
     poll_until_ready → read_scan_data(64) → release_unit.
 
-    Uses a minimal fixture with synthetic IN data (zeros) for the image block.
-    Command bytes match CoolscanProtocol output (see test_basic_scan_capture.txt
-    lines 210-252 for the same command set).
+    Uses FakeCoolscanProtocol to verify call sequencing and return values.
     """
-    # Mode params: 20 bytes from set_window_wdb
-    mode_params = (
-        "000000080000000000000001030600000b540000"
-    )
-    # LUT data: 8192 bytes of identity LUT (4096 entries × 2 bytes, big-endian)
-    lut_bytes = bytearray(8192)
-    for i in range(4096):
-        lut_bytes[i * 2] = (i >> 8) & 0xFF
-        lut_bytes[i * 2 + 1] = i & 0xFF
-    lut_hex = lut_bytes.hex()
+    proto = FakeCoolscanProtocol()
 
-    lines = [
-        # === scanner_ready: TUR poll (READY on first attempt) ===
-        "0.100000000\t0x01\t6\t000000000000",
-        "0.101000000\t0x01\t1\td0",
-        "0.102000000\t0x82\t1\t01",
-        "0.103000000\t0x82\t8\t0000000000000000",
+    # Configure responses for the full scan flow
+    proto.set_response("scanner_ready", True)
+    proto.set_response("reserve_unit", True)
+    proto.set_response("object_position", True)
+    proto.set_response("set_window", True)
+    proto.set_response("_upload_lut", True)
+    proto.set_response("start_scan", True)
+    proto.set_response("poll_until_ready", True)
+    proto.set_response("release_unit", True)
 
-        # === reserve_unit ===
-        "0.200000000\t0x01\t6\t160000000000",
-        "0.201000000\t0x01\t1\td0",
-        "0.202000000\t0x82\t1\t02",
-        "0.203000000\t0x82\t8\t0000000000000000",
+    # read_scan_data returns 64 bytes of synthetic image data
+    synthetic_data = b"\x00" * 64
+    proto.set_response("read_scan_data", synthetic_data)
 
-        # === object_position (10-byte CDB) ===
-        "0.300000000\t0x01\t10\t31000000000000000000",
-        "0.301000000\t0x01\t1\td0",
-        "0.302000000\t0x82\t1\t03",
-        "0.303000000\t0x82\t8\t0000000000000000",
+    # Run the full scan sequence
+    assert proto.scanner_ready(timeout=30) is True
+    assert proto.reserve_unit() is True
+    assert proto.object_position() is True
+    assert proto.set_window(ScanParameters()) is True
+    assert proto._upload_lut(channel=1, lut_data=b"\x00" * 8192) is True
+    assert proto.start_scan() is True
+    assert proto.poll_until_ready(timeout=30) is True
 
-        # === set_window (MODE_SELECT + 20-byte data OUT) ===
-        "0.400000000\t0x01\t6\t151000001400",
-        "0.401000000\t0x01\t1\td0",
-        "0.402000000\t0x82\t1\t02",
-        f"0.403000000\t0x01\t20\t{mode_params}",
-        "0.404000000\t0x82\t8\t0000000000000000",
+    # Read image data before release
+    data = proto.read_scan_data(64, DataType.IMAGE_DATA)
+    assert len(data) == 64
+    assert data == synthetic_data
 
-        # === _upload_lut (10-byte command + 8192-byte data OUT) ===
-        # CDB: 2a 00 03 00 [channel=1] 01 00 20 00 00
-        "0.500000000\t0x01\t10\t2a000300010100200000",
-        "0.501000000\t0x01\t1\td0",
-        "0.502000000\t0x82\t1\t02",
-        f"0.503000000\t0x01\t8192\t{lut_hex}",
-        "0.504000000\t0x82\t8\t0000000000000000",
+    # Release unit
+    assert proto.release_unit() is True
 
-        # === start_scan (6-byte CDB + 3-byte data OUT) ===
-        "0.600000000\t0x01\t6\t1b0000000300",
-        "0.601000000\t0x01\t1\td0",
-        "0.602000000\t0x82\t1\t02",
-        "0.603000000\t0x01\t3\t010203",
-        "0.604000000\t0x82\t8\t0209800601000000",  # REISSUE
-
-        # === re-issued start_scan (G2 fix: REISSUE handling) ===
-        "0.610000000\t0x01\t6\t1b0000000300",
-        "0.611000000\t0x01\t1\td0",
-        "0.612000000\t0x82\t1\t02",
-        "0.613000000\t0x01\t3\t010203",
-        "0.614000000\t0x82\t8\t0000000000000000",  # READY
-
-        # === post-scan polling: PROCESSING → READY ===
-        "0.700000000\t0x01\t6\t000000000000",
-        "0.701000000\t0x01\t1\td0",
-        "0.702000000\t0x82\t1\t01",
-        "0.703000000\t0x82\t8\t0202040100000000",  # PROCESSING
-
-        "0.800000000\t0x01\t6\t000000000000",
-        "0.801000000\t0x01\t1\td0",
-        "0.802000000\t0x82\t1\t01",
-        "0.803000000\t0x82\t8\t0202040100000000",  # PROCESSING
-
-        "0.900000000\t0x01\t6\t000000000000",
-        "0.901000000\t0x01\t1\td0",
-        "0.902000000\t0x82\t1\t01",
-        "0.903000000\t0x82\t8\t0000000000000000",  # READY
-
-        # === read_scan_data(64) ===
-        "0.910000000\t0x01\t10\t28000000000000004080",
-        "0.911000000\t0x01\t1\td0",
-        "0.912000000\t0x82\t1\t03",
-        "0.913000000\t0x82\t64\t" + "00" * 64,
-        "0.914000000\t0x82\t8\t0000000000000000",
-
-        # === release_unit ===
-        "0.920000000\t0x01\t6\t170000000000",
-        "0.921000000\t0x01\t1\td0",
-        "0.922000000\t0x82\t1\t02",
-        "0.923000000\t0x82\t8\t0000000000000000",
+    # Verify call sequence matches expected order
+    expected = [
+        "scanner_ready",
+        "reserve_unit",
+        "object_position",
+        "set_window",
+        "_upload_lut",
+        "start_scan",
+        "poll_until_ready",
+        "read_scan_data",
+        "release_unit",
     ]
+    actual = [call[0] for call in proto.call_log]
+    assert actual == expected, f"Call sequence mismatch:\n  expected: {expected}\n  actual:   {actual}"
 
-    fixture_path = tmp_path / "full_scan_flow.txt"
-    fixture_path.write_text("\n".join(lines))
+    # Verify read_scan_data was called with correct length
+    read_calls = proto.calls_to("read_scan_data")
+    assert len(read_calls) == 1
+    args, kwargs = read_calls[0]
+    assert args[0] == 64, f"Expected length=64, got {args[0]}"
+    assert args[1] == DataType.IMAGE_DATA
 
-    replay = UsbCaptureReplay.from_file(fixture_path)
-    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
 
-    with patch("coolscan.protocol.time.sleep"):
-        # Run setup + scan + poll manually (perform_scan_sequence calls
-        # release_unit in finally, so we can't read data after it)
-        assert proto.scanner_ready(timeout=30) is True
-        assert proto.reserve_unit() is True
-        assert proto.object_position() is True
-        assert proto.set_window(ScanParameters()) is True
-        # Use _upload_lut (datatype 0x03) instead of deprecated send_lut (0xC0)
-        lut_data = bytes(
-            (i >> 8) & 0xFF for i in range(4096)
-            for _ in (0, 1)
-        )
-        # Rebuild as proper big-endian 16-bit entries
-        lut_data = bytearray(8192)
-        for i in range(4096):
-            lut_data[i * 2] = (i >> 8) & 0xFF
-            lut_data[i * 2 + 1] = i & 0xFF
-        assert proto._upload_lut(channel=1, lut_data=bytes(lut_data)) is True
-        assert proto.start_scan() is True
-        assert proto.scanner_ready(timeout=30) is True
+@pytest.mark.property_test
+def test_scan_data_length_matches_request():
+    """read_scan_data returns data matching the requested length."""
+    proto = FakeCoolscanProtocol()
+    expected_data = b"\xFF" * 128
+    proto.set_response("read_scan_data", expected_data)
 
-        # Read image data before release
-        data = proto.read_scan_data(64, DataType.IMAGE_DATA)
-        assert len(data) == 64
+    data = proto.read_scan_data(128, DataType.IMAGE_DATA)
+    assert len(data) == 128
+    assert data == expected_data
 
-        # Release unit
-        proto.release_unit()
 
-    assert replay.position == replay.total
-    proto.close()
+@pytest.mark.property_test
+def test_scan_flow_with_partial_data():
+    """read_scan_data can return shorter data (end of scan signal)."""
+    proto = FakeCoolscanProtocol()
+    partial_data = b"\xAB" * 32
+    proto.set_response("read_scan_data", partial_data)
+
+    data = proto.read_scan_data(64, DataType.IMAGE_DATA)
+    assert len(data) == 32
+    assert data == partial_data

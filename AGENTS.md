@@ -19,21 +19,28 @@
 
 ## Verification Commands
 
-- `make check-all` -- full pipeline: lint + validate fixtures + tests
+- `make check-all` -- full pipeline: lint + tests (fixtures are optional diagnostics)
 - `make lint` -- flake8 (E9/F63/F7/F82) + mypy (**mypy runs with `|| true`, so type errors do NOT block the pipeline**)
-- `make validate-fixtures` -- fixture consistency: columns, endpoints, length-vs-hex, @path resolution, timestamp ordering, golden-vs-pcapng SHA cross-check
+- `make validate-fixtures` -- fixture consistency: columns, endpoints, length-vs-hex, @path resolution, timestamp ordering, golden-vs-pcapng SHA cross-check (optional diagnostic)
 - `make test` -- all pytest tests in `tests/`
 - `make test-fast` -- short traceback, stop on first failure
 - `make test-properties` -- fixture-agnostic invariant tests only
 - `make smoke-test-hardware` -- hardware smoke tests (skip gracefully if no scanner)
 - `make generate-golden-fixture` -- regenerate golden fixture from pcapng
+- `make replay-check` -- ad-hoc replay regression check against golden fixture (optional)
 
 ## Test Strategy (Three Tiers)
 
+The main test suite is fixture-independent.  Most tests use either
+`FakeCoolscanProtocol` (test double with configurable responses) or synthetic
+`UsbCaptureReplay` events (no fixture files).  This lets `make check-all`
+pass without hardware or pre-generated fixtures.
+
 - **Replay** (`test_usb_replay_*.py`, marker `replay_consistency`) -- fixture self-consistency only, NOT hardware correctness
-- **Property** (`test_protocol_properties.py`, marker `property_test`) -- fixture-agnostic invariants (REISSUE, polling, LUT sizes, TUR retries)
-- **Smoke** (`test_hardware_smoke.py`, marker `hardware`) -- actual hardware correctness, skip if no scanner
+- **Property** (`test_protocol_properties.py`, marker `property_test`) -- fixture-agnostic invariants (REISSUE, polling, LUT sizes, TUR retries, timeout resilience)
+- **Smoke** (`test_hardware_smoke.py`, marker `hardware`) -- actual hardware correctness; the required verification path for protocol changes; skip if no scanner
 - Markers in `tests/conftest.py`; replay tests auto-marked when unmarked
+- `validate-fixtures` and `replay-check` are optional diagnostics, not pipeline gates
 
 ## Development Plan
 

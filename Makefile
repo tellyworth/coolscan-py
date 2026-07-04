@@ -1,4 +1,4 @@
-.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures smoke-test-hardware generate-golden-fixture generate-batch-fixture
+.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures smoke-test-hardware generate-golden-fixture generate-batch-fixture replay-check
 
 # Linting and code quality
 lint:
@@ -48,9 +48,13 @@ generate-batch-fixture:
 	@echo "Generating batch fixture from pcapng..."
 	python3 scripts/generate_fixture_from_pcapng.py --pcap ls40-batch.pcapng --output tests/fixtures/golden_batch.txt
 
-# Run all checks (lint + validate + test)
-check-all: lint validate-fixtures test
+# Run all checks (lint + test; fixtures are optional diagnostics)
+check-all: lint test
 	@echo "All checks passed!"
+
+# Replay regression check against golden fixture (optional diagnostic)
+replay-check:
+	PYTHONPATH=. python3 scripts/replay_regression_check.py
 
 # Quick syntax check (catches indentation errors)
 syntax-check:

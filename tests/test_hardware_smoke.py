@@ -173,3 +173,47 @@ def _extract_command_codes(fixture_path: Path) -> list[int]:
         except ValueError:
             continue
     return codes
+
+
+@pytest.fixture(scope="session")
+def scanner():
+    """Session-scoped scanner for hardware tests."""
+    dev = _find_scanner()
+    if dev is None:
+        pytest.skip("scanner not found")
+    from coolscan.protocol import CoolscanProtocol
+
+    proto = CoolscanProtocol(_DeviceDescriptor(), verbose=False)
+    proto.initialize_scanner()
+    yield proto
+    proto.close()
+
+
+@pytest.mark.hardware
+@pytest.mark.hardware_correctness
+class TestHardwareExtended:
+    """Extended hardware tests using a session-scoped scanner fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_scanner(self, scanner):
+        self.proto = scanner
+
+    def test_full_scan_frame_succeeds(self, scanner):
+        """Full scan frame completes and returns True."""
+        result = scanner.full_scan_frame()
+        assert result is True
+
+    def test_prescan_returns_exposure_values(self, scanner):
+        """Prescan completes and returns exposure data."""
+        result = scanner.prescan()
+        assert result is True
+
+    def test_teardown_eject_succeeds(self, scanner):
+        """Scan teardown completes cleanly."""
+        result = scanner.scan_teardown()
+        assert result is True
+
+    def test_drain_loop_terminates(self, scanner):
+        """Buffer drain during prescan terminates without hanging."""
+        result = scanner.prescan(timeout=120)
+        assert result is True

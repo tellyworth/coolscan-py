@@ -1213,3 +1213,147 @@ def test_control_frame_positions_non_default_fallback():
         frame_count=4, first_y=100, frame_height=4000, step=4100
     )
     assert positions == [100, 4200, 8300, 12400]
+
+
+# ---------------------------------------------------------------------------
+# Resilience: poll_until_ready timeout returns False
+# ---------------------------------------------------------------------------
+
+@pytest.mark.property_test
+def test_poll_until_ready_timeout_returns_false():
+    """poll_until_ready returns False when timeout expires with all BUSY."""
+    # timeout=1, poll_interval=0.1 → max_attempts = 10
+    # Provide exactly 10 BUSY (PROCESSING) responses; no READY at the end.
+    events = []
+    for _ in range(10):
+        events.extend([
+            ("out", bytes([0x00] * 6)),
+            ("out", b"\xd0"),
+            ("in", b"\x01"),
+            ("in", bytes([0x02, 0x02, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00])),  # PROCESSING
+        ])
+
+    replay = UsbCaptureReplay(events=events)
+    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
+
+    with patch("coolscan.protocol.time.sleep"):
+        result = proto.poll_until_ready(timeout=1, poll_interval=0.1)
+
+    assert result is False
+    # All 10 BUSY events should have been consumed
+    assert replay.position == replay.total
+    proto.close()
+
+
+# ---------------------------------------------------------------------------
+# Resilience: scanner_ready timeout returns False
+# ---------------------------------------------------------------------------
+
+@pytest.mark.property_test
+def test_scanner_ready_timeout_returns_false():
+    """scanner_ready returns False after timeout with all BUSY TURs."""
+    # scanner_ready calls wait_scanner(timeout=1.0, delay=1.0).
+    # With sleep mocked and time.time() advancing, ~1 BUSY poll then timeout.
+    events = [
+        # TUR → BUSY
+        ("out", bytes([0x00] * 6)),
+        ("out", b"\xd0"),
+        ("in", b"\x01"),
+        ("in", bytes([0x02, 0x06, 0x28, 0x00, 0x01, 0x00, 0x00, 0x00])),  # BUSY
+        # Second TUR → BUSY (to handle the sleep between polls)
+        ("out", bytes([0x00] * 6)),
+        ("out", b"\xd0"),
+        ("in", b"\x01"),
+        ("in", bytes([0x02, 0x06, 0x28, 0x00, 0x01, 0x00, 0x00, 0x00])),  # BUSY
+    ]
+
+    replay = UsbCaptureReplay(events=events)
+    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
+
+    # Advance time.time() past the 1.0s timeout deadline
+    fake_time = 0.0
+    def fake_time_fn():
+        nonlocal fake_time
+        fake_time += 0.5
+        return fake_time
+
+    with patch("coolscan.protocol.time.sleep"):
+        with patch("coolscan.protocol.time.time", side_effect=fake_time_fn):
+            result = proto.scanner_ready(timeout=1.0)
+
+    assert result is False
+    proto.close()
+
+
+# ---------------------------------------------------------------------------
+# Resilience: stop_scan REISSUE retry
+# ---------------------------------------------------------------------------
+
+@pytest.mark.property_test
+def test_stop_scan_retries_on_reissue():
+    """STOP_SCAN retries on REISSUE (sense 0x09800601) then succeeds."""
+    stop_cmd = bytes([0x1B, 0x00, 0x00, 0x00, 0x04, 0x00])
+    scan_data = bytes([0x09, 0x01, 0x02, 0x03])
+
+    events = [
+        # Attempt 1: REISSUE
+        ("out", stop_cmd),
+        ("out", b"\xd0"),
+        ("in", b"\x02"),
+        ("out", scan_data),
+        ("in", bytes([0x02, 0x09, 0x80, 0x06, 0x01, 0x00, 0x00, 0x00])),  # REISSUE
+        # Progress reads after REISSUE: 6 bytes then 33 bytes
+        ("out", bytes([0x28, 0x00, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x80])),
+        ("out", b"\xd0"),
+        ("in", b"\x03"),
+        ("in", bytes([0x87, 0x08, 0x00, 0x00, 0x00, 0x1b])),
+        ("in", b"\x00" * 8),
+        ("out", bytes([0x28, 0x00, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x80])),
+        ("out", b"\xd0"),
+        ("in", b"\x03"),
+        ("in", b"\x00" * 33),
+        ("in", b"\x00" * 8),
+        # Attempt 2: READY
+        ("out", stop_cmd),
+        ("out", b"\xd0"),
+        ("in", b"\x02"),
+        ("out", scan_data),
+        ("in", b"\x00" * 8),  # READY
+    ]
+
+    replay = UsbCaptureReplay(events=events)
+    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
+
+    with patch("coolscan.protocol.time.sleep"):
+        result = proto.stop_scan()
+
+    assert result is True
+    assert replay.position == replay.total
+    proto.close()
+
+
+# ---------------------------------------------------------------------------
+# Resilience: read_scan_data short read returns partial data
+# ---------------------------------------------------------------------------
+
+@pytest.mark.property_test
+def test_read_scan_data_short_read_returns_partial():
+    """read_scan_data returns whatever data was received when it's shorter than requested."""
+    events = [
+        # READ(10) for 64 bytes of IMAGE_DATA
+        ("out", bytes([0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x80])),
+        ("out", b"\xd0"),
+        ("in", b"\x03"),  # DATA_IN phase
+        ("in", b"\xAA" * 32),  # Only 32 bytes (short read)
+        ("in", b"\x00" * 8),  # status READY
+    ]
+
+    replay = UsbCaptureReplay(events=events)
+    proto = CoolscanProtocol(MockDevice(), verbose=False, usb_capture_replay=replay)
+
+    data = proto.read_scan_data(64, DataType.IMAGE_DATA)
+
+    assert len(data) == 32, f"Expected 32 bytes (short read), got {len(data)}"
+    assert data == b"\xAA" * 32
+    assert replay.position == replay.total
+    proto.close()
