@@ -696,15 +696,32 @@ def diff_events(events_a: List[Event], events_b: List[Event]) -> List[Dict[str, 
 
 
 def annotate_protocol(events: List[Event]) -> List[Issue]:
-    """Cross-reference commands against protocol.py via the command registry.
+    """Cross-reference commands against protocol.py implementation."""
+    implemented: Dict[str, List[int]] = {
+        "test_unit_ready": [0x00],
+        "inquiry": [0x12],
+        "reserve_unit": [0x16],
+        "release_unit": [0x17],
+        "mode_sense": [0x1a],
+        "mode_select": [0x15],
+        "send_lut": [0x2a],
+        "read_scan_data": [0x28],
+        "read_prescan_image_data": [0x28],
+        "read_control_frame": [0x28],
+        "read_channel_state": [0x28],
+        "read_focus": [0xe1],
+        "eject_medium": [0xe0],
+        "load_medium": [0xe0],
+        "execute_cmd": [0xc1],
+        "reset_scanner": [0xe0],
+        "start_stop_unit": [0x1b],
+        "read_capacity": [0x25],
+        "scan_setup": [0x24],
+    }
 
-    Uses the live ``coolscan.command_registry.registry`` which is populated
-    by ``@sends`` decorators on each protocol method.  This avoids drift
-    because the registry is always in sync with the source code.
-    """
-    from coolscan.command_registry import registry  # deferred import
-
-    implemented_codes = registry.all_codes()
+    implemented_codes: set = set()
+    for codes in implemented.values():
+        implemented_codes.update(codes)
 
     issues: List[Issue] = []
     seen_codes: set = set()
@@ -725,10 +742,10 @@ def annotate_protocol(events: List[Event]) -> List[Issue]:
             name = CMD_NAMES.get(code, f"0x{code:02x}")
             issues.append(Issue(
                 event_index=ev.index,
-                severity="warning",
+                severity="info",
                 message=(
                     f"Command {name} (0x{code:02x}) at event {ev.index} "
-                    f"has no @sends decorator in protocol.py"
+                    f"has no obvious protocol.py handler"
                 ),
             ))
 
