@@ -15,6 +15,7 @@
 - Protocol implementation: `coolscan/protocol.py`
 - Replay harness: `coolscan/usb_replay.py`
 - Main hardware test: `test_hardware_full_scan.py` (standalone script, init -> prescan -> full scan -> save image)
+- Capture analyzer: `scripts/analyze_capture.py` (decode, phase detect, error find, diff captures)
 - Recently updated docs: `HARDWARE_DIAGNOSTICS.md`, `.opencode/plans/golden-fixture-sequence-alignment.md`, `docs/protocol.md`, `docs/sane-image-data.md`, `docs/troubleshooting.md`
 
 ## Verification Commands
@@ -28,6 +29,17 @@
 - `make smoke-test-hardware` -- hardware smoke tests (skip gracefully if no scanner)
 - `make generate-golden-fixture` -- regenerate golden fixture from pcapng
 - `make replay-check` -- ad-hoc replay regression check against golden fixture (optional)
+
+## Capture Analysis
+
+`scripts/analyze_capture.py` parses capture files (text or pcapng) and produces a decoded summary:
+
+- **Analyze**: `python3 scripts/analyze_capture.py capture.txt` -- phases, command frequency, errors
+- **JSON**: add `--json` for machine-parseable output; `--verbose` for all events
+- **Diff**: `python3 scripts/analyze_capture.py --diff-a file1.txt --diff-b file2.txt` -- aligns command sequences, reports missing/extra/changed commands
+- **Annotate**: add `--annotate` to flag commands with no obvious `protocol.py` handler
+
+Useful for diagnosing protocol issues: missing commands, invalid sequences, incorrect parameters, unexpected error responses. Context-aware error detection suppresses expected NOT_READY during TUR polling and UNIT_ATTENTION after reset.
 
 ## Test Strategy (Three Tiers)
 

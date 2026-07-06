@@ -573,6 +573,132 @@ class TestHelperContracts:
 
         assert proto._issue_command.call_count == 2
 
+    # -----------------------------------------------------------------------
+    # Error path: set_boundary
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_set_boundary_returns_false_on_error(self):
+        """set_boundary returns False when _issue_command returns ERROR status."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(return_value=(b"", StatusType.ERROR))
+
+        result = proto.set_boundary(params=None)
+        assert result is False
+
+    @pytest.mark.property_test
+    def test_set_boundary_raises_usb_error(self):
+        """set_boundary propagates exceptions from _issue_command."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(side_effect=OSError("device gone"))
+
+        with pytest.raises(OSError, match="device gone"):
+            proto.set_boundary(params=None)
+
+    # -----------------------------------------------------------------------
+    # Error path: set_scan_window
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_set_scan_window_returns_false_on_error(self):
+        """set_scan_window returns False when _issue_command returns ERROR."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(return_value=(b"", StatusType.ERROR))
+
+        result = proto.set_scan_window(window_id=1, scan_type="prescan")
+        assert result is False
+
+    @pytest.mark.property_test
+    def test_set_scan_window_raises_usb_error(self):
+        """set_scan_window propagates exceptions from _issue_command."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(side_effect=OSError("device gone"))
+
+        with pytest.raises(OSError, match="device gone"):
+            proto.set_scan_window(window_id=1, scan_type="prescan")
+
+    # -----------------------------------------------------------------------
+    # Error path: set_window_wdb
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_set_window_wdb_returns_false_on_error(self):
+        """set_window_wdb returns False when MODE_SELECT returns ERROR."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(return_value=(b"", StatusType.ERROR))
+
+        from coolscan.protocol import WindowDescriptorBlock
+
+        result = proto.set_window_wdb(WindowDescriptorBlock())
+        assert result is False
+
+    # -----------------------------------------------------------------------
+    # Error path: upload_identity_luts USBError
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_upload_identity_luts_raises_exception(self):
+        """upload_identity_luts propagates exceptions from _upload_lut."""
+        proto = _make_protocol()
+        proto._upload_lut = Mock(side_effect=OSError("device gone"))
+        proto._generate_identity_lut = Mock(return_value=b"\x00" * 8192)
+
+        with pytest.raises(OSError, match="device gone"):
+            proto.upload_identity_luts(include_ir=False)
+
+    # -----------------------------------------------------------------------
+    # Error path: read_exposure_data exception
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_read_exposure_data_returns_none_on_exception(self):
+        """read_exposure_data catches exceptions from read_scan_data and
+        returns None."""
+        proto = _make_protocol()
+        proto.read_scan_data = Mock(side_effect=RuntimeError("device gone"))
+
+        result = proto.read_exposure_data()
+        assert result is None
+
+    # -----------------------------------------------------------------------
+    # Error path: reserve_unit
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_reserve_unit_returns_false_on_error(self):
+        """reserve_unit returns False when _issue_command returns ERROR."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(return_value=(b"", StatusType.ERROR))
+
+        result = proto.reserve_unit()
+        assert result is False
+
+    # -----------------------------------------------------------------------
+    # Error path: read_channel_state
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_read_channel_state_returns_none_on_error(self):
+        """read_channel_state returns None when _issue_command returns ERROR."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(return_value=(b"", StatusType.ERROR))
+
+        result = proto.read_channel_state(channel=1)
+        assert result is None
+
+    # -----------------------------------------------------------------------
+    # Error path: read_control_frame
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_read_control_frame_returns_none_on_error(self):
+        """read_control_frame returns None when _issue_command returns ERROR."""
+        proto = _make_protocol()
+        proto._issue_command = Mock(return_value=(b"", StatusType.ERROR))
+
+        result = proto.read_control_frame()
+        assert result is None
+
 
 # =========================================================================
 #  TestScenarioContracts — composed scenario method contracts
@@ -766,6 +892,116 @@ class TestScenarioContracts:
         assert proto.upload_identity_luts.call_count == 1
         assert proto.start_scan.call_count == 1
         assert proto.poll_until_ready.call_count == 1
+
+    # -----------------------------------------------------------------------
+    # perform_scan_sequence (deprecated, but documented)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.property_test
+    def test_perform_scan_sequence_call_sequence(self):
+        """perform_scan_sequence (deprecated) composes: scanner_ready ->
+        _check_scanner_alive -> read_capacity -> _check_scanner_alive ->
+        read_control_frame -> 3x TUR -> 3x read_channel_state(1/2/3) ->
+        3x TUR -> 3x set_scan_window(normal) -> get_exposure_values ->
+        TUR -> _check_scanner_alive -> upload_identity_luts -> start_scan ->
+        poll_until_ready."""
+        import warnings
+
+        proto = _make_protocol()
+        proto.scanner_ready = Mock(return_value=True)
+        proto._check_scanner_alive = Mock(return_value=True)
+        proto.read_capacity = Mock(return_value={"status": 0})
+        proto.read_control_frame = Mock(return_value=b"\x00" * 58)
+        proto.test_unit_ready = Mock(return_value=True)
+        proto.read_channel_state = Mock(return_value={"exposure": 0, "raw": b"\x00" * 10})
+        proto.set_scan_window = Mock(return_value=True)
+        proto.get_exposure_values = Mock(return_value={"R": 100, "G": 200, "B": 300})
+        proto.upload_identity_luts = Mock(return_value=True)
+        proto.start_scan = Mock(return_value=True)
+        proto.poll_until_ready = Mock(return_value=True)
+
+        from coolscan.protocol import ScanParameters
+
+        params = ScanParameters()
+
+        with (
+            patch("coolscan.protocol.time.time", side_effect=lambda: 0.0),
+            warnings.catch_warnings(record=True) as w,
+        ):
+            result = proto.perform_scan_sequence(params, timeout=300)
+
+        # Verify deprecation warning
+        assert len(w) == 1
+        assert issubclass(w[0].category, DeprecationWarning)
+        assert "perform_scan_sequence" in str(w[0].message)
+
+        assert result is True
+
+        # Call counts
+        assert proto.scanner_ready.call_count == 1
+        assert proto._check_scanner_alive.call_count == 3
+        assert proto.read_capacity.call_count == 1
+        assert proto.read_control_frame.call_count == 1
+        # 3 TURs before channel state + 3 TURs before set_scan_window + 1 after = 7
+        assert proto.test_unit_ready.call_count == 7
+        # read_channel_state for channels 1, 2, 3
+        assert proto.read_channel_state.call_count == 3
+        channel_calls = [c[0][0] for c in proto.read_channel_state.call_args_list]
+        assert channel_calls == [1, 2, 3]
+        # set_scan_window for windows 1, 2, 3 with "normal" type
+        assert proto.set_scan_window.call_count == 3
+        for c in proto.set_scan_window.call_args_list:
+            assert c[1].get("scan_type") == "normal"
+        assert proto.get_exposure_values.call_count == 1
+        assert proto.upload_identity_luts.call_count == 1
+        assert proto.start_scan.call_count == 1
+        assert proto.poll_until_ready.call_count == 1
+
+    @pytest.mark.property_test
+    def test_perform_scan_sequence_returns_false_on_scanner_not_ready(self):
+        """perform_scan_sequence returns False when scanner_ready fails."""
+        import warnings
+
+        proto = _make_protocol()
+        proto.scanner_ready = Mock(return_value=False)
+
+        from coolscan.protocol import ScanParameters
+
+        params = ScanParameters()
+
+        with warnings.catch_warnings(record=True):
+            result = proto.perform_scan_sequence(params, timeout=300)
+
+        assert result is False
+        assert proto.scanner_ready.call_count == 1
+
+    @pytest.mark.property_test
+    def test_perform_scan_sequence_returns_false_on_scan_window_fail(self):
+        """perform_scan_sequence returns False when set_scan_window fails."""
+        import warnings
+
+        proto = _make_protocol()
+        proto.scanner_ready = Mock(return_value=True)
+        proto._check_scanner_alive = Mock(return_value=True)
+        proto.read_capacity = Mock(return_value={"status": 0})
+        proto.read_control_frame = Mock(return_value=b"\x00" * 58)
+        proto.test_unit_ready = Mock(return_value=True)
+        proto.read_channel_state = Mock(return_value={"exposure": 0, "raw": b"\x00" * 10})
+        # First set_scan_window call fails
+        proto.set_scan_window = Mock(side_effect=[True, False])
+        proto.get_exposure_values = Mock(return_value=None)
+
+        from coolscan.protocol import ScanParameters
+
+        params = ScanParameters()
+
+        with (
+            patch("coolscan.protocol.time.time", side_effect=lambda: 0.0),
+            warnings.catch_warnings(record=True),
+        ):
+            result = proto.perform_scan_sequence(params, timeout=300)
+
+        assert result is False
 
     # -----------------------------------------------------------------------
     # scan_teardown

@@ -22,6 +22,7 @@ except ImportError:
     USB_AVAILABLE = False
 
 from coolscan.usb_replay import ReplayError
+from coolscan.command_registry import sends
 
 
 class PhaseType(Enum):
@@ -840,6 +841,7 @@ class CoolscanProtocol:
             print(f"    ❌ Read error: {e}")
             raise
 
+    @sends(0x00)
     def wait_scanner(
         self,
         max_hard_errors: int = 3,
@@ -996,6 +998,7 @@ class CoolscanProtocol:
 
         return status, {"sense_key": sense_key, "sense_asc": sense_asc, "sense_ascq": sense_ascq}
 
+    @sends(0xd0)
     def _check_phase(self) -> PhaseType:
         """Check the current USB phase."""
         # Send phase check command (0xd0)
@@ -1287,6 +1290,7 @@ class CoolscanProtocol:
         # TODO: Implement SCSI command handling
         raise NotImplementedError("SCSI command handling not yet implemented")
 
+    @sends(0x12)
     def inquiry(self, page: int = -1) -> bytes:
         """
         Send INQUIRY command to get device information.
@@ -1343,6 +1347,7 @@ class CoolscanProtocol:
         """
         return self.wait_scanner(timeout=float(timeout), delay=1.0)
 
+    @sends(0x00)
     def _test_unit_ready_once(self) -> Tuple[StatusType, dict]:
         """Send a single TEST_UNIT_READY and return raw status (no retries).
 
@@ -1367,6 +1372,7 @@ class CoolscanProtocol:
             return True
         return self.poll_until_ready(timeout=timeout, poll_interval=0.1)
 
+    @sends(0x00)
     def test_unit_ready(self) -> bool:
         """
         Test if the scanner is ready.
@@ -1402,6 +1408,7 @@ class CoolscanProtocol:
             # Restore original timeout
             self.usb_device.default_timeout = original_timeout
 
+    @sends(0x16)
     def reserve_unit(self) -> bool:
         """Reserve the scanner unit (like SANE coolscan_grab_scanner)."""
         print("Reserving unit...")
@@ -1412,6 +1419,7 @@ class CoolscanProtocol:
         print(f"Unit reservation: {'SUCCESS' if success else 'FAILED'}")
         return success
 
+    @sends(0x17)
     def release_unit(self) -> bool:
         """Release the scanner unit."""
         print("Releasing unit...")
@@ -1422,6 +1430,7 @@ class CoolscanProtocol:
         print(f"Unit release: {'SUCCESS' if success else 'FAILED'}")
         return success
 
+    @sends(0x1b, 0x17, 0x00)
     def reset_scanner(self) -> bool:
         """
         Reset/cleanup scanner to restore it to a responsive state.
@@ -1539,6 +1548,7 @@ class CoolscanProtocol:
             print(f"  ⚠️  Reset error: {e}")
             return False
 
+    @sends(0x1a)
     def mode_sense(self) -> Optional[int]:
         """Get mode sense data to determine MUD (Measurement Unit Divisor)."""
         print("Getting mode sense...")
@@ -1555,6 +1565,7 @@ class CoolscanProtocol:
             print("Mode sense failed")
             return None
 
+    @sends(0x28)
     def get_internal_info(self) -> Optional[ScannerInfo]:
         """Get internal scanner information (like SANE get_internal_info)."""
         print("Getting internal info...")
@@ -1604,6 +1615,7 @@ class CoolscanProtocol:
             print("Internal info read failed")
             return None
 
+    @sends(0x31)
     def object_position(self, auto_feed: int = 0x00) -> bool:
         """Send OBJECT_POSITION command (like SANE coolscan_object_feed)."""
         print("Sending object position command...")
@@ -1627,6 +1639,7 @@ class CoolscanProtocol:
         print(f"Object position: {'SUCCESS' if success else 'FAILED'}")
         return success
 
+    @sends(0x2a)
     def send_lut(self, lut_data: bytes) -> bool:
         """Send LUT data (like SANE send_LUT).
 
@@ -1681,6 +1694,7 @@ class CoolscanProtocol:
             lut[i * 2 + 1] = i & 0xFF
         return bytes(lut)
 
+    @sends(0x2a)
     def _upload_lut(self, channel: int, lut_data: bytes) -> bool:
         """Upload LUT data for a specific channel (1=R, 2=G, 3=B, 9=IR)."""
         expected_size = 2 * (1 << self.maxbits)
@@ -1736,6 +1750,7 @@ class CoolscanProtocol:
             print(f"  ✅ LUTs uploaded ({ch_list})")
         return True
 
+    @sends(0x2a)
     def set_boundary(
         self,
         params: ScanParameters,
@@ -1946,6 +1961,7 @@ class CoolscanProtocol:
         # simple formula is the best available approximation.
         return [first_y + i * step for i in range(frame_count)]
 
+    @sends(0x2a)
     def set_boundary_for_prescan(self) -> bool:
         """Send BORDER_POSITION before prescan (golden fixture line 203).
 
@@ -1976,6 +1992,7 @@ class CoolscanProtocol:
             print(f"    BORDER_POSITION: {'OK' if ok else 'FAILED'}")
         return ok
 
+    @sends(0x15)
     def set_window_wdb(self, wdb: WindowDescriptorBlock) -> bool:
         """Set the scan window parameters using MODE_SELECT."""
         mode_select_cmd = self._build_6byte_command(
@@ -2102,6 +2119,7 @@ class CoolscanProtocol:
 
         return bytes(wdb)
 
+    @sends(0x24)
     def set_scan_window(
         self,
         window_id: int = 1,
@@ -2224,6 +2242,7 @@ class CoolscanProtocol:
 
         return self.set_window_wdb(wdb)
 
+    @sends(0x1b)
     def start_scan(self, scan_type: ScanType = ScanType.NORMAL) -> bool:
         """Start a scan operation.
 
@@ -2291,6 +2310,7 @@ class CoolscanProtocol:
 
         return False
 
+    @sends(0x28)
     def read_scan_data(self, length: int, datatype: DataType = DataType.IMAGE_DATA) -> bytes:
         """
         Read scan data from the scanner with proper datatype.
@@ -2354,6 +2374,7 @@ class CoolscanProtocol:
             # Restore original timeout
             self.usb_device.default_timeout = original_timeout
 
+    @sends(0x00)
     def poll_until_ready(self, timeout: int = 30, poll_interval: float = 0.1) -> bool:
         """
         Poll scanner with TEST_UNIT_READY until it's ready (not busy/processing).
@@ -2416,6 +2437,7 @@ class CoolscanProtocol:
         print(f"  ⚠️  Last status was PROCESSING - scanner may still be scanning")
         return False
 
+    @sends(0x28)
     def read_prescan_image_data(self) -> bytes:
         """
         Read prescan image data blocks.
@@ -2885,6 +2907,7 @@ class CoolscanProtocol:
         self.scan_teardown()
         print("✅ Batch scan complete")
 
+    @sends(0x28)
     def read_ir_preview_data(self) -> bytes:
         """Read the low-resolution IR preview image data.
 
@@ -2936,6 +2959,7 @@ class CoolscanProtocol:
         self._last_ir_preview_data = bytes(all_data)
         return bytes(all_data)
 
+    @sends(0x28)
     def read_exposure_data(self) -> Optional[dict]:
         """
         Read exposure/calibration data (datatype 0x8e).
@@ -2979,6 +3003,7 @@ class CoolscanProtocol:
             print(f"    ⚠️  Failed to read exposure data: {e}")
             return None
 
+    @sends(0x25)
     def get_window(self, window_id: int) -> Optional[bytes]:
         """
         Read back a Window Descriptor Block (WDB) using GET_WINDOW command.
@@ -3091,6 +3116,7 @@ class CoolscanProtocol:
 
         return exposure_values
 
+    @sends(0x28)
     def read_control_frame(self) -> Optional[bytes]:
         """Read CONTROL_FRAME state (datatype 0x8f, 58 bytes).
 
@@ -3137,6 +3163,7 @@ class CoolscanProtocol:
             print(f"    ⚠️  Error reading CONTROL_FRAME: {e}")
             return None
 
+    @sends(0x1a)
     def read_control_params(self) -> Optional[bytes]:
         """Read control parameters via MODE SENSE.
 
@@ -3185,6 +3212,7 @@ class CoolscanProtocol:
                 print(f"    ⚠️  Error reading control params: {e}")
             return None
 
+    @sends(0x28)
     def read_channel_state(self, channel: int) -> Optional[Dict[str, Any]]:
         """Read per-channel state (datatype 0x8c).
 
@@ -3254,6 +3282,7 @@ class CoolscanProtocol:
         """
         self._calibrated_exposure[channel] = exposure
 
+    @sends(0x1b)
     def stop_scan(self) -> bool:
         """Stop the current scan operation.
 
@@ -3305,12 +3334,14 @@ class CoolscanProtocol:
 
         return False
 
+    @sends(0xc0)
     def cancel_scan(self) -> bool:
         """Cancel the current scan operation."""
         cmd = self._parse_command("c0 00 00 00 00 00")
         _, status = self._issue_command(cmd)
         return status == StatusType.READY
 
+    @sends(0xc1)
     def _execute_command(self) -> bool:
         """Send EXECUTE command (0xc1).
 
@@ -3327,6 +3358,7 @@ class CoolscanProtocol:
             print(f"    EXECUTE: {'OK' if ok else 'FAILED'}")
         return ok
 
+    @sends(0xe1)
     def read_focus(self) -> Optional[int]:
         """Read current focus position from scanner.
 
@@ -3355,6 +3387,7 @@ class CoolscanProtocol:
             print(f"    Focus position: {focus} (0x{focus:04X})")
         return focus
 
+    @sends(0xe1)
     def read_focus_info(self) -> Optional[bytes]:
         """Read focus info via e1/91 (golden fixture line 181).
 
@@ -3377,6 +3410,7 @@ class CoolscanProtocol:
             print(f"    Focus info: {data.hex()}")
         return data
 
+    @sends(0xe0, 0xc1)
     def set_focus_param(self, focus_value: int = 0) -> bool:
         """Set focus parameter on scanner.
 
@@ -3402,6 +3436,7 @@ class CoolscanProtocol:
             print(f"    Set focus param: {'OK' if ok else 'FAILED'}")
         return ok
 
+    @sends(0x00, 0xe1, 0xe0, 0xc1)
     def focus_setup(self) -> Optional[int]:
         """Perform focus setup sequence before prescan.
 
@@ -3472,6 +3507,7 @@ class CoolscanProtocol:
             print(f"  Focus setup complete (position={focus})")
         return focus
 
+    @sends(0xe0, 0xc1)
     def _auto_focus_command(self, focus_x: int = 0, focus_y: int = 0) -> bool:
         """Send the autofocus command and execute it (fixture-matching core).
 
@@ -3497,6 +3533,7 @@ class CoolscanProtocol:
             return False
         return self._execute_command()
 
+    @sends(0xe1, 0xe0, 0xc1)
     def auto_focus(self, focus_x: int = 0, focus_y: int = 0) -> Optional[int]:
         """Perform auto-focus operation.
 
@@ -3532,6 +3569,7 @@ class CoolscanProtocol:
             print(f"    New focus: {new_focus} (0x{new_focus:04X})")
         return new_focus
 
+    @sends(0xe1, 0xe0, 0xc1, 0x00)
     def post_prescan_autofocus(self, focus_x: int = 0, focus_y: int = 0) -> Optional[int]:
         """Perform autofocus after prescan (golden fixture lines 436-461).
 
@@ -3585,6 +3623,7 @@ class CoolscanProtocol:
             print(f"    Post-autofocus focus: {new_focus} (0x{new_focus:04X})")
         return new_focus
 
+    @sends(0xe0, 0xc1)
     def eject_medium(self) -> bool:
         """Eject medium (post-scan cleanup).
 
@@ -3607,6 +3646,7 @@ class CoolscanProtocol:
 
         return self._execute_command()
 
+    @sends(0xe0, 0xc1)
     def reset_params(self) -> bool:
         """Reset scanner parameters (post-eject cleanup).
 
@@ -3677,6 +3717,7 @@ class CoolscanProtocol:
                 print(f"  USB bus reset failed: {e}")
             return False
 
+    @sends(0x00, 0xe0, 0xc1, 0x24)
     def scan_teardown(self) -> bool:
         """Perform post-scan teardown matching golden fixture.
 
@@ -4224,6 +4265,7 @@ class CoolscanProtocol:
         print("  ✅ Batch full-scan setup frame complete")
         return True
 
+    @sends(0x24, 0x28)
     def full_scan_frame(
         self,
         params: Optional[Any] = None,
@@ -4271,6 +4313,7 @@ class CoolscanProtocol:
         print("✅ Full scan frame complete")
         return True
 
+    @sends(0x25)
     def read_capacity(self, window_id: int = 0) -> Optional[dict]:
         """
         Read capacity information (READ_CAPACITY command).
@@ -4309,6 +4352,7 @@ class CoolscanProtocol:
             traceback.print_exc()
             return None
 
+    @sends(0x12, 0x00, 0x16, 0x25, 0x15)
     def initialize_scanner(self) -> bool:
         """
         Initialize scanner with full sequence from USB capture analysis.

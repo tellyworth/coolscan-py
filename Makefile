@@ -11,12 +11,12 @@ lint-fix:
 	@echo "Running black formatter..."
 	black coolscan tests
 
-# Testing
+# Testing (hardware tests are opt-in via `make smoke-test-hardware`)
 test:
-	pytest tests -v
+	pytest tests -v -m "not hardware"
 
 test-fast:
-	pytest tests -v --tb=short -x
+	pytest tests -v --tb=short -x -m "not hardware"
 
 # Property tests only (fixture-agnostic invariant tests)
 test-properties:
@@ -61,3 +61,7 @@ syntax-check:
 	@echo "Checking Python syntax..."
 	@python3 -m py_compile coolscan/protocol.py coolscan/scanner.py coolscan/device.py coolscan/cli.py 2>&1 || (echo "Syntax errors found!" && exit 1)
 	@echo "Syntax check passed!"
+
+# Analyze a capture file (default: golden fixture)
+analyze-capture:
+	python3 scripts/analyze_capture.py reference/golden_single_bw.txt

@@ -2,8 +2,9 @@
 """
 Fixture-independent tests for CoolscanScanner.
 
-Uses FakeCoolscanProtocol to test the scanner layer in isolation from USB
-hardware and capture replays.  No golden fixtures, no pcapng captures.
+Uses a spec'd MagicMock of CoolscanProtocol to test the scanner layer in
+isolation from USB hardware and capture replays.  No golden fixtures, no
+pcapng captures.
 
 Run with: python -m pytest tests/test_scanner.py -v
 """
@@ -23,7 +24,7 @@ from coolscan.scanner import (
     get_scanner_info,
     prescan_scanner,
 )
-from tests.fakes import FakeCoolscanProtocol
+from tests.fakes import configure_mock, make_protocol_mock
 
 
 # ---------------------------------------------------------------------------
@@ -62,11 +63,11 @@ def _make_info(**kwargs) -> ScannerInfo:
     return ScannerInfo(**defaults)
 
 
-def _fake_with_info() -> FakeCoolscanProtocol:
-    """Create a fake that returns a ScannerInfo on get_internal_info."""
-    fake = FakeCoolscanProtocol()
-    fake.set_response("get_internal_info", _make_info())
-    return fake
+def _mock_with_info():
+    """Create a mock that returns a ScannerInfo on get_internal_info."""
+    mock = make_protocol_mock()
+    mock.get_internal_info.return_value = _make_info()
+    return mock
 
 
 # ---------------------------------------------------------------------------
@@ -94,29 +95,29 @@ class TestCoolscanScannerInit:
 
 @pytest.mark.property_test
 class TestCoolscanScannerConnect:
-    """Test connection functionality using FakeCoolscanProtocol."""
+    """Test connection functionality using mocked protocol."""
 
     def test_connect_success(self):
         device = _make_device()
-        fake = _fake_with_info()
+        mock = _mock_with_info()
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             scanner = CoolscanScanner(device)
             result = scanner.connect()
 
         assert result is True
         assert scanner.is_connected is True
-        assert scanner.protocol is fake
+        assert scanner.protocol is mock
         assert scanner.scanner_info is not None
-        assert fake.call_count("initialize_scanner") == 1
-        assert fake.call_count("get_internal_info") == 1
+        assert mock.initialize_scanner.call_count == 1
+        assert mock.get_internal_info.call_count == 1
 
     def test_connect_init_fails(self):
         device = _make_device()
-        fake = FakeCoolscanProtocol()
-        fake.set_response("initialize_scanner", False)
+        mock = make_protocol_mock()
+        mock.initialize_scanner.return_value = False
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             scanner = CoolscanScanner(device)
             result = scanner.connect()
 
@@ -148,15 +149,15 @@ class TestCoolscanScannerDisconnect:
     def test_disconnect_releases_unit(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = _fake_with_info()
-        scanner.protocol = fake
+        mock = _mock_with_info()
+        scanner.protocol = mock
         scanner.is_connected = True
         scanner.scanner_info = _make_info()
 
         scanner.disconnect()
 
-        assert fake.call_count("release_unit") == 1
-        assert fake.call_count("close") == 1
+        assert mock.release_unit.call_count == 1
+        assert mock.close.call_count == 1
         assert scanner.protocol is None
         assert scanner.is_connected is False
         assert scanner.scanner_info is None
@@ -164,28 +165,21 @@ class TestCoolscanScannerDisconnect:
     def test_disconnect_cancels_scan_in_progress(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        scanner.protocol = fake
+        mock = make_protocol_mock()
+        scanner.protocol = mock
         scanner.is_connected = True
         scanner.scan_in_progress = True
 
         scanner.disconnect()
 
-        assert fake.call_count("cancel_scan") == 1
+        assert mock.cancel_scan.call_count == 1
 
     def test_disconnect_handles_release_error(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("release_unit", None)
-        # Make release_unit raise
-        orig_release = fake.release_unit
-
-        def raise_release():
-            raise Exception("Release failed")
-
-        fake.release_unit = raise_release
-        scanner.protocol = fake
+        mock = make_protocol_mock()
+        mock.release_unit.side_effect = Exception("Release failed")
+        scanner.protocol = mock
         scanner.is_connected = True
 
         scanner.disconnect()  # Should not raise
@@ -219,16 +213,16 @@ class TestCoolscanScannerGetDeviceInfo:
     def test_get_device_info_with_inquiry(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
+        mock = make_protocol_mock()
 
         inquiry_data = bytearray(36)
         inquiry_data[8:16] = b"Nikon   "
         inquiry_data[16:32] = b"LS-40 ED        "
         inquiry_data[32:36] = b"1.20"
-        fake.set_response("inquiry", inquiry_data)
+        mock.inquiry.return_value = inquiry_data
 
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
         scanner.scanner_info = _make_info()
 
         info = scanner.get_device_info()
@@ -238,16 +232,16 @@ class TestCoolscanScannerGetDeviceInfo:
         assert info["revision"] == "1.20"
         assert info["ad_bits"] == 14
         assert info["max_resolution"] == 4000
-        assert fake.call_count("inquiry") == 1
+        assert mock.inquiry.call_count == 1
 
     def test_get_device_info_short_inquiry(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("inquiry", bytearray(10))
+        mock = make_protocol_mock()
+        mock.inquiry.return_value = bytearray(10)
 
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         info = scanner.get_device_info()
 
@@ -257,15 +251,11 @@ class TestCoolscanScannerGetDeviceInfo:
     def test_get_device_info_inquiry_error(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-
-        def raise_inquiry(*a, **k):
-            raise Exception("Inquiry failed")
-
-        fake.inquiry = raise_inquiry
+        mock = make_protocol_mock()
+        mock.inquiry.side_effect = Exception("Inquiry failed")
 
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         info = scanner.get_device_info()
 
@@ -300,42 +290,38 @@ class TestCoolscanScannerPrescan:
     def test_prescan_success(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
+        mock = make_protocol_mock()
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         result = scanner.prescan()
 
         assert result is True
-        assert fake.call_count("prescan") == 1
-        assert fake.call_count("reserve_unit") == 0
-        assert fake.call_count("release_unit") == 0
+        assert mock.prescan.call_count == 1
+        assert mock.reserve_unit.call_count == 0
+        assert mock.release_unit.call_count == 0
 
     def test_prescan_failure(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("prescan", False)
+        mock = make_protocol_mock()
+        mock.prescan.return_value = False
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         result = scanner.prescan()
 
         assert result is False
-        assert fake.call_count("prescan") == 1
+        assert mock.prescan.call_count == 1
 
     def test_prescan_handles_error(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-
-        def raise_prescan(*a, **k):
-            raise Exception("Prescan error")
-
-        fake.prescan = raise_prescan
+        mock = make_protocol_mock()
+        mock.prescan.side_effect = Exception("Prescan error")
 
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         result = scanner.prescan()
 
@@ -360,23 +346,23 @@ class TestCoolscanScannerAutoFocus:
     def test_auto_focus_success(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("auto_focus", 42)
+        mock = make_protocol_mock()
+        mock.auto_focus.return_value = 42
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         result = scanner.auto_focus()
 
         assert result == 42  # Scanner returns protocol's int result directly
-        assert fake.call_count("auto_focus") == 1
+        assert mock.auto_focus.call_count == 1
 
     def test_auto_focus_failure(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("auto_focus", None)
+        mock = make_protocol_mock()
+        mock.auto_focus.return_value = None
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         result = scanner.auto_focus()
 
@@ -403,22 +389,22 @@ class TestCoolscanScannerCancelScan:
     def test_cancel_success(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        scanner.protocol = fake
+        mock = make_protocol_mock()
+        scanner.protocol = mock
         scanner.scan_in_progress = True
 
         result = scanner.cancel_scan()
 
         assert result is True
         assert scanner.scan_in_progress is False
-        assert fake.call_count("cancel_scan") == 1
+        assert mock.cancel_scan.call_count == 1
 
     def test_cancel_fails(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("cancel_scan", False)
-        scanner.protocol = fake
+        mock = make_protocol_mock()
+        mock.cancel_scan.return_value = False
+        scanner.protocol = mock
         scanner.scan_in_progress = True
 
         result = scanner.cancel_scan()
@@ -446,16 +432,15 @@ class TestCoolscanScannerWaitForReady:
     def test_wait_success(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
+        mock = make_protocol_mock()
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         result = scanner.wait_for_ready(timeout=60)
 
         assert result is True
-        calls = fake.calls_to("scanner_ready")
-        assert len(calls) == 1
-        assert calls[0][0][0] == 60
+        assert mock.scanner_ready.call_count == 1
+        mock.scanner_ready.assert_called_with(timeout=60)
 
 
 # ---------------------------------------------------------------------------
@@ -477,9 +462,9 @@ class TestCoolscanScannerGetStatus:
     def test_status_ready(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
+        mock = make_protocol_mock()
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
         scanner.scanner_info = _make_info()
 
         status = scanner.get_scanner_status()
@@ -491,10 +476,10 @@ class TestCoolscanScannerGetStatus:
     def test_status_not_ready(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("test_unit_ready", False)
+        mock = make_protocol_mock()
+        mock.test_unit_ready.return_value = False
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         status = scanner.get_scanner_status()
 
@@ -503,15 +488,11 @@ class TestCoolscanScannerGetStatus:
     def test_status_error(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-
-        def raise_tur(*a, **k):
-            raise Exception("Test error")
-
-        fake.test_unit_ready = raise_tur
+        mock = make_protocol_mock()
+        mock.test_unit_ready.side_effect = Exception("Test error")
 
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         status = scanner.get_scanner_status()
 
@@ -529,29 +510,29 @@ class TestCoolscanScannerContextManager:
 
     def test_context_manager_connects(self):
         device = _make_device()
-        fake = _fake_with_info()
+        mock = _mock_with_info()
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             with CoolscanScanner(device) as scanner:
                 assert scanner.is_connected is True
 
     def test_context_manager_disconnects(self):
         device = _make_device()
-        fake = _fake_with_info()
+        mock = _mock_with_info()
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             with CoolscanScanner(device) as scanner:
                 pass
 
-        assert fake.call_count("release_unit") >= 1
-        assert fake.call_count("close") >= 1
+        assert mock.release_unit.call_count >= 1
+        assert mock.close.call_count >= 1
 
     def test_context_manager_connect_fails(self):
         device = _make_device()
-        fake = FakeCoolscanProtocol()
-        fake.set_response("initialize_scanner", False)
+        mock = make_protocol_mock()
+        mock.initialize_scanner.return_value = False
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             with pytest.raises(RuntimeError, match="Failed to connect"):
                 with CoolscanScanner(device):
                     pass
@@ -575,16 +556,16 @@ class TestCoolscanScannerScanPreview:
     def test_scan_preview_creates_params(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("full_scan_frame", False)
+        mock = make_protocol_mock()
+        mock.full_scan_frame.return_value = False
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         scanner.scan_preview("/tmp/test.png", resolution=300)
 
-        calls = fake.calls_to("full_scan_frame")
+        calls = mock.full_scan_frame.call_args_list
         assert len(calls) == 1
-        params = calls[0][1]["params"]
+        params = calls[0][0][0]  # positional arg
         assert params.resolution == 300
         assert params.preview is True
 
@@ -612,18 +593,18 @@ class TestCoolscanScannerScanFull:
     def test_scan_full_creates_params(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("full_scan_frame", False)
+        mock = make_protocol_mock()
+        mock.full_scan_frame.return_value = False
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         scanner.scan_full(
             "/tmp/test.png", resolution=2700, negative=True, infrared=True
         )
 
-        calls = fake.calls_to("full_scan_frame")
+        calls = mock.full_scan_frame.call_args_list
         assert len(calls) == 1
-        params = calls[0][1]["params"]
+        params = calls[0][0][0]  # positional arg
         assert params.resolution == 2700
         assert params.negative is True
         assert params.infrared is True
@@ -637,16 +618,16 @@ class TestCoolscanScannerScanArea:
     def test_scan_area_creates_params(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
-        fake = FakeCoolscanProtocol()
-        fake.set_response("full_scan_frame", False)
+        mock = make_protocol_mock()
+        mock.full_scan_frame.return_value = False
         scanner.is_connected = True
-        scanner.protocol = fake
+        scanner.protocol = mock
 
         scanner.scan_area("/tmp/test.png", 100, 200, 300, 400, resolution=1500)
 
-        calls = fake.calls_to("full_scan_frame")
+        calls = mock.full_scan_frame.call_args_list
         assert len(calls) == 1
-        params = calls[0][1]["params"]
+        params = calls[0][0][0]  # positional arg
         assert params.resolution == 1500
         assert params.x_min == 100
         assert params.y_min == 200
@@ -664,35 +645,35 @@ class TestConvenienceFunctions:
 
     def test_prescan_scanner(self):
         device = _make_device()
-        fake = _fake_with_info()
-        fake.set_response("prescan", True)
+        mock = _mock_with_info()
+        mock.prescan.return_value = True
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             result = prescan_scanner(device)
 
         assert result is True
-        assert fake.call_count("prescan") == 1
+        assert mock.prescan.call_count == 1
 
     def test_auto_focus_scanner(self):
         device = _make_device()
-        fake = _fake_with_info()
-        fake.set_response("auto_focus", 42)
+        mock = _mock_with_info()
+        mock.auto_focus.return_value = 42
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             result = auto_focus_scanner(device)
 
         assert result == 42  # Returns protocol's int result
-        assert fake.call_count("auto_focus") == 1
+        assert mock.auto_focus.call_count == 1
 
     def test_get_scanner_info(self):
         device = _make_device()
-        fake = _fake_with_info()
+        mock = _mock_with_info()
 
         inquiry_data = bytearray(36)
         inquiry_data[8:16] = b"Nikon   "
-        fake.set_response("inquiry", inquiry_data)
+        mock.inquiry.return_value = inquiry_data
 
-        with patch("coolscan.scanner.CoolscanProtocol", return_value=fake):
+        with patch("coolscan.scanner.CoolscanProtocol", return_value=mock):
             result = get_scanner_info(device)
 
         assert result is not None
@@ -816,51 +797,49 @@ class TestParseScanData:
 
 
 # ---------------------------------------------------------------------------
-# FakeCoolscanProtocol self-tests
+# MagicMock protocol defaults verification
 # ---------------------------------------------------------------------------
 
 @pytest.mark.property_test
-class TestFakeCoolscanProtocol:
-    """Verify the fake itself works as expected."""
-
-    def test_records_calls(self):
-        fake = FakeCoolscanProtocol()
-        fake.prescan()
-        fake.prescan()
-
-        assert fake.call_count("prescan") == 2
-        assert len(fake.call_log) == 2
-
-    def test_custom_response(self):
-        fake = FakeCoolscanProtocol()
-        fake.set_response("prescan", False)
-
-        assert fake.prescan() is False
+class TestMagicMockProtocolDefaults:
+    """Verify the mock protocol returns sensible defaults."""
 
     def test_default_bool_true(self):
-        fake = FakeCoolscanProtocol()
-        assert fake.initialize_scanner() is True
-        assert fake.reserve_unit() is True
+        mock = make_protocol_mock()
+        assert mock.initialize_scanner() is True
+        assert mock.reserve_unit() is True
 
     def test_default_bytes_empty(self):
-        fake = FakeCoolscanProtocol()
-        assert fake.read_scan_data(100) == b""
+        mock = make_protocol_mock()
+        assert mock.read_scan_data(100) == b""
 
-    def test_call_log_preserves_args(self):
-        fake = FakeCoolscanProtocol()
-        fake.scanner_ready(timeout=45)
+    def test_records_calls(self):
+        mock = make_protocol_mock()
+        mock.prescan()
+        mock.prescan()
 
-        calls = fake.calls_to("scanner_ready")
-        assert len(calls) == 1
-        assert calls[0][0][0] == 45
+        assert mock.prescan.call_count == 2
+        assert len(mock.mock_calls) == 2
 
-    def test_clear_log(self):
-        fake = FakeCoolscanProtocol()
-        fake.prescan()
-        fake.clear_log()
+    def test_custom_response(self):
+        mock = make_protocol_mock()
+        mock.prescan.return_value = False
+        assert mock.prescan() is False
 
-        assert fake.call_log == []
-        assert fake.call_count("prescan") == 0
+    def test_call_args_preserved(self):
+        mock = make_protocol_mock()
+        mock.scanner_ready(timeout=45)
+
+        assert mock.scanner_ready.call_count == 1
+        mock.scanner_ready.assert_called_with(timeout=45)
+
+    def test_reset_mock_clears(self):
+        mock = make_protocol_mock()
+        mock.prescan()
+        mock.reset_mock()
+
+        assert mock.prescan.call_count == 0
+        assert len(mock.mock_calls) == 0
 
 
 if __name__ == "__main__":

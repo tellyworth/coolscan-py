@@ -24,19 +24,3 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "hardware: tests that require a real LS-40 ED scanner connected",
     )
-
-
-def pytest_collection_modifyitems(
-    session: pytest.Session, config: pytest.Config, items: list[pytest.Item]
-) -> None:
-    """Auto-mark replay tests that aren't already marked."""
-    for item in items:
-        # Auto-mark replay tests
-        if (
-            "usb_replay" in item.module.__name__
-            and not item.get_closest_marker("replay_consistency")
-            and not item.get_closest_marker("property_test")
-            and not item.get_closest_marker("hardware")
-            and not item.get_closest_marker("hardware_correctness")
-        ):
-            item.add_marker(pytest.mark.replay_consistency)
