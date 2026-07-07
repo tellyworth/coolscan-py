@@ -7,7 +7,7 @@ when no scanner is connected.
 Run via ``make smoke-test-hardware`` or:
     pytest tests/test_hardware_smoke.py -v
 
-Markers: ``@pytest.mark.hardware``, ``@pytest.mark.hardware_correctness``
+Markers: ``@pytest.mark.hardware``
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ class _DeviceDescriptor:
 
 
 @pytest.mark.hardware
-@pytest.mark.hardware_correctness
 class TestHardwareSmoke:
     """Smoke tests that require a real LS-40 ED scanner."""
 
@@ -190,7 +189,6 @@ def scanner():
 
 
 @pytest.mark.hardware
-@pytest.mark.hardware_correctness
 class TestHardwareExtended:
     """Extended hardware tests using a session-scoped scanner fixture."""
 

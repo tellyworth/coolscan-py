@@ -25,43 +25,16 @@ from coolscan.protocol import (
     ScanType,
     StatusType,
 )
+from tests.fakes import make_bare_protocol
 
 
 # ---------------------------------------------------------------------------
-# Protocol factory — bypasses __init__ to avoid USB/SCSI setup
+# Protocol factory — delegates to shared fakes module
 # ---------------------------------------------------------------------------
 
 def _make_protocol() -> CoolscanProtocol:
     """Create a CoolscanProtocol with mock device for contract testing."""
-
-    class _MockInterface:
-        value = "usb"
-
-    device = Mock()
-    device.vendor = "Nikon"
-    device.model = "LS-40 ED"
-    device.revision = "1.20"
-    device.interface = _MockInterface()
-    device.device_path = "/dev/usb/scanner0"
-    device.vendor_id = 0x04B0
-    device.product_id = 0x4000
-
-    proto = object.__new__(CoolscanProtocol)
-    proto.device = device
-    proto.verbose = False
-    proto.maxbits = 12
-    proto._calibrated_exposure = {}
-    proto._usb_capture_replay = None
-    proto.usb_device = Mock()
-    proto.usb_device.default_timeout = 30000
-    proto._last_status_raw = bytes(8)
-    proto._last_status_parsed = {"sense_key": 0, "sense_asc": 0, "sense_ascq": 0}
-    proto._usb_inited = False
-    proto._scanner_alive = True
-    proto._usb_error_count = 0
-    proto._last_prescan_image_data = b""
-    proto._last_ir_preview_data = b""
-    return proto
+    return make_bare_protocol()
 
 
 # =========================================================================
@@ -750,10 +723,10 @@ class TestScenarioContracts:
         # Window IDs for channels 1, 2, 3
         window_calls = [c[0][0] for c in proto.read_channel_state.call_args_list]
         assert window_calls == [1, 2, 3]
-        assert proto.set_scan_window.call_count == 3
+        assert proto.set_scan_window.call_count == 4  # channels 1, 2, 3, 9
         assert proto.upload_identity_luts.call_count == 1
         upload_kwargs = proto.upload_identity_luts.call_args[1]
-        assert upload_kwargs.get("include_ir") is False
+        assert upload_kwargs.get("include_ir") is True
         assert proto.start_scan.call_count == 1
         assert proto.poll_until_ready.call_count == 1
 
@@ -785,8 +758,8 @@ class TestScenarioContracts:
         assert page_calls == [0x01, 0xD1, 0xC1, 0xE1, 0xF0, 0xF8]
 
         assert proto.reserve_unit.call_count == 1
-        # read_capacity(0) + 5 for windows [1,2,3,4,9]
-        assert proto.read_capacity.call_count == 6
+        # read_capacity(0) + 4 for windows [1,2,3,9]
+        assert proto.read_capacity.call_count == 5
 
         # MODE_SELECT via _issue_command
         cmd_calls = [c[0][0] for c in proto._issue_command.call_args_list]

@@ -199,33 +199,5 @@ class TestWdbBuilderConsistency:
 
 def _make_protocol(maxbits: int = 12) -> CoolscanProtocol:
     """Create a minimal protocol instance for testing."""
-    from unittest.mock import Mock
-
-    class _MockInterface:
-        value = "usb"
-
-    device = Mock()
-    device.vendor = "Nikon"
-    device.model = "LS-40 ED"
-    device.revision = "1.20"
-    device.interface = _MockInterface()
-    device.device_path = "/dev/usb/scanner0"
-    device.vendor_id = 0x04B0
-    device.product_id = 0x4000
-
-    proto = object.__new__(CoolscanProtocol)
-    proto.device = device
-    proto.verbose = False
-    proto.maxbits = maxbits
-    proto._calibrated_exposure = {}
-    proto._usb_capture_replay = None
-    proto.usb_device = Mock()
-    proto.usb_device.default_timeout = 30000
-    proto._last_status_raw = bytes(8)
-    proto._last_status_parsed = {"sense_key": 0, "sense_asc": 0, "sense_ascq": 0}
-    proto._usb_inited = False
-    proto._scanner_alive = True
-    proto._usb_error_count = 0
-    proto._last_prescan_image_data = b""
-    proto._last_ir_preview_data = b""
-    return proto
+    from tests.fakes import make_bare_protocol
+    return make_bare_protocol(maxbits=maxbits)

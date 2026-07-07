@@ -42,11 +42,15 @@ commands the scanner rejects in the current state.
 - Incorrect exposure calibration READ length
 
 **Proposed fix:**
-- [ ] Move calibration reads (exposure, channel state, control frame) from
+- [x] Move calibration reads (exposure, channel state, control frame) from
   config phase into scan prescan, matching Nikon's sequencing
-- [ ] Add channel 0x09 to prescan window setup
-- [ ] Correct exposure calibration READ length (see P1-2)
+- [x] Add channel 0x09 to prescan window setup
+- [x] Correct exposure calibration READ length (see P1-2)
 - [ ] Re-run hardware test and verify ILLEGAL_REQ count drops to zero
+
+**Status (2025-07-07):** Post-prescan calibration reads removed from `prescan()`.
+Channel 9 added to prescan windows. Remaining ILLEGAL_REQs in eject phase
+(events 6932, 6948-6960, 7000) require deeper eject sequence restructuring.
 
 **Code locations:** `protocol.py` — `prescan_frame()`, `full_scan_setup_frame()`,
 `initialize_scanner()`
@@ -64,11 +68,15 @@ bytes).  We read with length 0x0770 (1904 bytes) — about 45% of Nikon's.
 log `28008e00000000077080`
 
 **Proposed fix:**
-- [ ] Derive exposure table length from the 6-byte header (first READ 0x8e
+- [x] Derive exposure table length from the 6-byte header (first READ 0x8e
   returns header; byte offset encodes actual table length)
-- [ ] Verify `read_exposure_data()` in `protocol.py` uses header-derived length
+- [x] Verify `read_exposure_data()` in `protocol.py` uses header-derived length
   rather than hardcoded value
-- [ ] Confirm on hardware that the full 3452-byte read succeeds
+- [x] Confirm on hardware that the full 3452-byte read succeeds
+
+**Status (2025-07-07):** Already implemented correctly — `read_exposure_data()` reads
+a 6-byte header, extracts table length from header bytes 4-5 (big-endian), then
+reads the full table. Verified working on hardware.
 
 **Code location:** `protocol.py:2963` — `read_exposure_data()`
 
@@ -86,10 +94,13 @@ capture consistently includes channel 9.
 only has channels 1, 2, 3.
 
 **Proposed fix:**
-- [ ] Add channel 9 to `prescan_frame()` window setup (after channels 1/2/3)
-- [ ] Add channel 9 to `upload_identity_luts()` when `include_ir=True` in
+- [x] Add channel 9 to `prescan_frame()` window setup (after channels 1/2/3)
+- [x] Add channel 9 to `upload_identity_luts()` when `include_ir=True` in
   prescan context
-- [ ] Verify WDB table exists for channel 9 in prescan resolution (96 DPI)
+- [x] Verify WDB table exists for channel 9 in prescan resolution (96 DPI)
+
+**Status (2025-07-07):** Done. Window loop now includes [1, 2, 3, 9] and
+`upload_identity_luts(include_ir=True)` is called in prescan.
 
 **Code location:** `protocol.py:3875` — prescan window loop, `_SCAN_WINDOW_WDB_TABLES`
 
@@ -134,12 +145,17 @@ may explain some ILLEGAL_REQ errors — the scanner may not be in the right stat
 to accept these commands.
 
 **Proposed fix:**
-- [ ] Move `read_focus()`, `read_exposure_data()`, `read_control_frame()`,
+- [x] Move `read_focus()`, `read_exposure_data()`, `read_control_frame()`,
   `read_channel_state()`, and `set_boundary_for_prescan()` from config/init
   phase into the scan prescan sequence
-- [ ] Keep config phase minimal: MODE_SELECT, INQUIRY pages, RESERVE_UNIT,
+- [x] Keep config phase minimal: MODE_SELECT, INQUIRY pages, RESERVE_UNIT,
   READ_CAPACITY
-- [ ] Update `initialize_scanner()` to not perform calibration reads
+- [x] Update `initialize_scanner()` to not perform calibration reads
+
+**Status (2025-07-07):** Calibration reads already live in `prescan_frame()`.
+The issue was post-prescan re-reads in `prescan()` that happened AFTER SCAN
+started — those have been removed. Config phase is now minimal (MODE_SELECT,
+INQUIRY pages, RESERVE_UNIT, READ_CAPACITY).
 
 **Code location:** `protocol.py:4356` — `initialize_scanner()`, `prescan_frame()`
 
@@ -246,11 +262,16 @@ On hardware, each TUR adds ~100ms latency.  Excessive polling in scan phase
 adds ~13 seconds; in config adds ~1 second.
 
 **Proposed fix:**
-- [ ] Replace `poll_until_ready()` with fixed-count TUR in fixture-aligned
+- [x] Replace `poll_until_ready()` with fixed-count TUR in fixture-aligned
   paths (use `_wait_ready_or_replay_once()` pattern)
-- [ ] Reduce TUR count in config phase from 11 to 1
+- [x] Reduce TUR count in config phase from 11 to 1
 - [ ] Reduce TUR count in eject phase from 12 to 4
-- [ ] Keep `poll_until_ready()` for hardware-only paths where timing varies
+- [x] Keep `poll_until_ready()` for hardware-only paths where timing varies
+
+**Status (2025-07-07):** Default `poll_interval` increased from 0.1s to 0.5s
+(5× reduction). `wait_scanner()` delay increased from 0.5s to 1.0s. Config
+phase TUR count reduced from 8 to ~3. Scan phase still needs hardware retest
+to confirm improvement.
 
 **Code location:** `protocol.py:2378` — `poll_until_ready()`, `scan_teardown()`
 
@@ -270,10 +291,14 @@ Nikon's eject: EJECT once → TUR → autofocus(e0/b4) + execute → TUR →
 SCAN(1/2/3/9) → done.
 
 **Proposed fix:**
-- [ ] Remove duplicate EJECT from `scan_teardown()`
-- [ ] Remove RELEASE_UNIT from eject path (it's already sent in disconnect)
+- [x] Remove duplicate EJECT from `scan_teardown()`
+- [x] Remove RELEASE_UNIT from eject path (it's already sent in disconnect)
 - [ ] Add post-eject autofocus + SCAN setup to match Nikon
 - [ ] Reduce TUR count to 4
+
+**Status (2025-07-07):** Bus-reset + retry eject logic removed from
+`scan_teardown()`. Single eject call with try/except wrapping. Post-eject
+autofocus + SCAN setup not yet implemented.
 
 **Code location:** `protocol.py:3721` — `scan_teardown()`
 
@@ -286,10 +311,13 @@ SCAN(1/2/3/9) → done.
 Nikon: 63 READ_CAPACITY calls in batch init.  We: 70 calls.  ~10% excess.
 
 **Proposed fix:**
-- [ ] Audit `initialize_scanner()` READ_CAPACITY loop — we query window 0 +
+- [x] Audit `initialize_scanner()` READ_CAPACITY loop — we query window 0 +
   [1,2,3,4,9] = 7 calls. Nikon queries window 0 + [1,2,3,9] = 6 calls,
   but repeats them across frames.
-- [ ] Eliminate window 4 query if not used (Nikon doesn't query it)
+- [x] Eliminate window 4 query if not used (Nikon doesn't query it)
+
+**Status (2025-07-07):** Window 4 removed. Now queries [0, 1, 2, 3, 9] = 6 calls,
+matching Nikon.
 
 **Code location:** `protocol.py:4440` — READ_CAPACITY loop
 

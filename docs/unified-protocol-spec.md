@@ -316,12 +316,12 @@ The prescan performs auto-exposure (AE) at low resolution to determine optimal e
 1. **MODE_SELECT** (`15 10 00 00 14 00`) + 20-byte mode params
 2. **Wait** ~150ms for scanner to process
 3. **TEST_UNIT_READY** - Ensure scanner is ready
-4. **SET_WINDOW** × 3 (windows 1, 2, 3 for RGB, NOT window 9)
-   - Uses prescan WDBs: 96 DPI, scan_kind=0x02
+4. **SET_WINDOW** × 4 (windows 1, 2, 3 for RGB + window 9 for IR)
+    - Uses prescan WDBs: 96 DPI, scan_kind=0x02
 5. **TEST_UNIT_READY** - Required before LUT upload
 6. **WRITE LUT R/G/B** × 3 - Upload identity LUTs
 7. **START_SCAN** (`1b 00 00 00 03 00`) + 3 bytes (`01 02 03`)
-8. **Polling Loop** - `poll_until_ready()` polls with TEST_UNIT_READY every ~100ms
+8. **Polling Loop** - `poll_until_ready()` polls with TEST_UNIT_READY every ~500ms
    - Status `0202040100000000` = PROCESSING (scanner is scanning)
    - Status `0000000000000000` = READY (scan pass complete)
 9. **Read Image Data** - `read_prescan_image_data()` reads:

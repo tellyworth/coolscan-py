@@ -13,13 +13,12 @@ from unittest.mock import Mock, patch
 import pytest
 
 from coolscan.protocol import CoolscanProtocol, ScanType, StatusType
+from tests.fakes import make_bare_protocol
 
 
 def _make_protocol() -> CoolscanProtocol:
     """Create a CoolscanProtocol with mock device for contract testing."""
-    from tests.test_protocol_contracts import _make_protocol as _mp
-
-    return _mp()
+    return make_bare_protocol()
 
 
 @pytest.mark.property_test

@@ -202,7 +202,7 @@ After the prescan `START_SCAN` (`1b0000000300` + `010203`), the capture shows:
 1. **Immediate status / progress reads** using datatype `0x87` (small 6–33 byte blocks)
 2. **Polling loop** using TEST_UNIT_READY (`000000000000`) until the scanner
    transitions from PROCESSING (`0202040100000000`) to READY (`0000000000000000`)
-   - **Implementation**: `poll_until_ready()` method polls every ~100ms
+    - **Implementation**: `poll_until_ready()` method polls every ~500ms
    - **Timing**: ~13 seconds from START_SCAN to READY (dynamic, not fixed)
 3. **Image data transfer** via READ(10) with datatype `0x00`:
    - Two large blocks of 130752 bytes (`28000000000001fec080`)
@@ -225,7 +225,7 @@ using INQUIRY `0xc1` + datatype `0x8e` instead. Both routes ultimately obtain th
 same exposure information that prescan is designed to measure.
 
 **Implementation Methods:**
-- `poll_until_ready(timeout=30, poll_interval=0.1)` - Dynamic polling until ready
+- `poll_until_ready(timeout=30, poll_interval=0.5)` - Dynamic polling until ready
 - `read_prescan_image_data()` - Reads all image data blocks (273024 bytes total)
 - `read_exposure_data()` - Reads exposure header (6 bytes) and table using the length encoded in the header
 

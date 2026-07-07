@@ -2375,7 +2375,7 @@ class CoolscanProtocol:
             self.usb_device.default_timeout = original_timeout
 
     @sends(0x00)
-    def poll_until_ready(self, timeout: int = 30, poll_interval: float = 0.1) -> bool:
+    def poll_until_ready(self, timeout: int = 30, poll_interval: float = 0.5) -> bool:
         """
         Poll scanner with TEST_UNIT_READY until it's ready (not busy/processing).
 
@@ -2384,7 +2384,7 @@ class CoolscanProtocol:
 
         Args:
             timeout: Maximum time to wait in seconds
-            poll_interval: Time between polls in seconds (default 0.1s = 100ms)
+            poll_interval: Time between polls in seconds (default 0.5s to reduce TUR count)
 
         Returns:
             True if scanner becomes ready, False if timeout
@@ -3756,21 +3756,12 @@ class CoolscanProtocol:
             pass
 
         try:
-            # 2. Eject medium
+            # 2. Eject medium (called once per teardown; batch mode calls
+            # scan_teardown() between frames, so we never retry eject to avoid
+            # ILLEGAL_REQ from duplicate eject commands).
             eject_ok = self.eject_medium()
-            if not eject_ok:
-                if self.verbose:
-                    print("  Eject failed, attempting USB bus reset...")
-                # Last resort: USB bus reset on real hardware
-                if self._usb_capture_replay is None:
-                    if self._bus_reset_device():
-                        time.sleep(0.5)
-                        try:
-                            eject_ok = self.eject_medium()
-                        except Exception:
-                            eject_ok = False
-                if not eject_ok and self.verbose:
-                    print("  Eject failed after all retries")
+            if not eject_ok and self.verbose:
+                print("  Eject command returned non-ready status")
         except Exception:
             if self.verbose:
                 print("  Eject step raised exception")
@@ -3829,9 +3820,9 @@ class CoolscanProtocol:
           4. ``test_unit_ready()`` × 3
           5. ``read_channel_state(1, 2, 3)``
           6. ``test_unit_ready()`` × 3
-          7. ``set_scan_window(1/2/3, "prescan")``
+          7. ``set_scan_window(1/2/3/9, "prescan")``
           8. ``test_unit_ready()``
-          9. ``upload_identity_luts(include_ir=False)``
+          9. ``upload_identity_luts(include_ir=True)``
           10. ``start_scan()`` (with REISSUE/ERROR retries)
           11. ``poll_until_ready()``
 
@@ -3871,8 +3862,8 @@ class CoolscanProtocol:
         for _ in range(3):
             self._wait_ready_or_replay_once()
 
-        # 7. Prescan windows at low resolution (96 DPI) for R, G, B (lines 263-277).
-        for win_id in [1, 2, 3]:
+        # 7. Prescan windows at low resolution (96 DPI) for R, G, B, IR.
+        for win_id in [1, 2, 3, 9]:
             if not self.set_scan_window(win_id, scan_type="prescan"):
                 print(f"  ❌ Failed to set prescan window {win_id}")
                 return False
@@ -3880,8 +3871,8 @@ class CoolscanProtocol:
         # 8. TUR before LUT uploads (lines 278-281).
         self._wait_ready_or_replay_once()
 
-        # 9. Identity LUTs for R, G, B (lines 282-296).
-        if not self.upload_identity_luts(include_ir=False):
+        # 9. Identity LUTs for R, G, B, IR (lines 282-296).
+        if not self.upload_identity_luts(include_ir=True):
             return False
 
         # 10. Start scan (lines 297-331, with retries handled internally).
@@ -3974,20 +3965,21 @@ class CoolscanProtocol:
             print("  ❌ No image data read — prescan failed")
             return False
 
-        # Post-scan reads (non-fatal if they fail).
+        # Post-prescan exposure calibration (may fail with ILLEGAL_REQ if
+        # scanner has already transitioned to scan state — that's fine, we
+        # already have the data from prescan_frame()).
         if self._check_scanner_alive():
-            self.read_exposure_data()
-        if self._check_scanner_alive():
-            self.read_control_frame()
-        if self._check_scanner_alive():
-            exposure_values = self.get_exposure_values(colors=[1, 2, 3])
-            if exposure_values:
-                color_to_channel = {"R": 1, "G": 2, "B": 3, "IR": 9}
-                for color, value in exposure_values.items():
-                    if color in color_to_channel:
-                        self._calibrated_exposure[color_to_channel[color]] = value
-                if self.verbose:
-                    print("  ✅ Calibrated exposure updated from post-prescan WDBs")
+            try:
+                exposure_values = self.get_exposure_values(colors=[1, 2, 3])
+                if exposure_values:
+                    color_to_channel = {"R": 1, "G": 2, "B": 3, "IR": 9}
+                    for color, value in exposure_values.items():
+                        if color in color_to_channel:
+                            self._calibrated_exposure[color_to_channel[color]] = value
+                    if self.verbose:
+                        print("  Calibrated exposure updated from post-prescan WDBs")
+            except Exception:
+                pass  # Expected if scanner already moved to scan state
 
         print("✅ Prescan completed")
         return True
@@ -4437,7 +4429,7 @@ class CoolscanProtocol:
             else:
                 print(f"  ⚠️  READ_CAPACITY window 0 failed, continuing anyway...")
 
-            for win_id in [1, 2, 3, 4, 9]:
+            for win_id in [1, 2, 3, 9]:
                 self.read_capacity(window_id=win_id)
 
             # 6. MODE_SELECT - required before SET_WINDOW operations

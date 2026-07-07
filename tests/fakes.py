@@ -1,16 +1,19 @@
 """
-MagicMock-based test double for CoolscanProtocol.
+Test utilities for CoolscanProtocol testing.
 
-Returns sensible defaults (True for bools, b'' for bytes, None for optionals)
-so tests only configure methods relevant to the scenario.  Uses ``spec_set``
-to enforce the real protocol's interface — calling a non-existent method or
-wrong signature raises AttributeError/TypeError immediately.
+Provides:
+- ``make_protocol_mock()`` — spec'd MagicMock for scanner-layer tests
+- ``configure_mock()`` — override defaults on an existing mock
+- ``configure_failure()`` — inject failure at a specific call index
+- ``make_bare_protocol()`` — bypasses __init__ for contract testing
+- ``make_mock_device()`` — mock device descriptor for protocol construction
+- ``MockDevice`` — plain class for UsbCaptureReplay tests
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Union
-from unittest.mock import MagicMock, create_autospec
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from unittest.mock import MagicMock, Mock, create_autospec
 
 from coolscan.protocol import (
     CoolscanProtocol,
@@ -211,3 +214,112 @@ def calls_to(mock: MagicMock, method_name: str) -> List:
     """
     method = getattr(mock, method_name)
     return method.call_args_list
+
+
+def configure_failure(
+    mock: MagicMock,
+    method_name: str,
+    call_index: int,
+    failure_value: Any = False,
+    raise_exc: Optional[Exception] = None,
+) -> MagicMock:
+    """Configure a mock method to fail on its Nth call (0-indexed).
+
+    Before call_index: returns normal default.
+    At call_index: returns failure_value or raises raise_exc.
+    After call_index: returns normal default.
+
+    Usage::
+
+        mock = make_protocol_mock()
+        configure_failure(mock, "read_scan_data", call_index=2, failure_value=b"")
+        # First two calls return b"", third call returns b"", subsequent return b""
+    """
+    original = getattr(mock, method_name)
+    default = original.return_value
+
+    def side_effect(*args: Any, **kwargs: Any):
+        nonlocal call_index
+        call_index -= 1
+        if call_index < 0:
+            if raise_exc is not None:
+                raise raise_exc
+            return failure_value
+        return default
+
+    original.side_effect = side_effect
+    return mock
+
+
+# ---------------------------------------------------------------------------
+# Bare protocol factory — bypasses __init__ for contract testing
+# ---------------------------------------------------------------------------
+
+class MockDevice:
+    """Plain device descriptor for UsbCaptureReplay tests."""
+
+    def __init__(self):
+        self.vendor = "Nikon"
+        self.model = "LS-40 ED"
+        self.revision = "1.20"
+        self.interface = type("IF", (), {"value": "usb"})()
+        self.device_path = "/dev/usb/scanner0"
+        self.vendor_id = 0x04B0
+        self.product_id = 0x4000
+
+
+def make_mock_device(**kwargs: Any) -> Mock:
+    """Create a minimal mock device descriptor for protocol construction."""
+    device = Mock()
+    device.vendor = kwargs.get("vendor", "Nikon")
+    device.model = kwargs.get("model", "LS-40 ED")
+    device.revision = kwargs.get("revision", "1.20")
+    device.interface = type("IF", (), {"value": "usb"})()
+    device.device_path = kwargs.get("device_path", "/dev/usb/scanner0")
+    device.vendor_id = kwargs.get("vendor_id", 0x04B0)
+    device.product_id = kwargs.get("product_id", 0x4000)
+    return device
+
+
+def make_bare_protocol(maxbits: int = 12, **kwargs: Any) -> CoolscanProtocol:
+    """Create a CoolscanProtocol bypassing __init__ (for contract testing).
+
+    Returns a protocol instance with mock device and default state attributes.
+    Override any attribute via kwargs.
+
+    Usage::
+
+        proto = make_bare_protocol()
+        proto._issue_command = Mock(return_value=(b"", StatusType.READY))
+        proto.set_boundary_for_prescan()
+
+        proto = make_bare_protocol(maxbits=8)
+    """
+    device = make_mock_device(**{k: v for k, v in kwargs.items() if k in (
+        "vendor", "model", "revision", "device_path", "vendor_id", "product_id"
+    )})
+
+    proto = object.__new__(CoolscanProtocol)
+    proto.device = device
+    proto.verbose = False
+    proto.maxbits = maxbits
+    proto._calibrated_exposure = {}
+    proto._usb_capture_replay = None
+    proto.usb_device = Mock()
+    proto.usb_device.default_timeout = 30000
+    proto._last_status_raw = bytes(8)
+    proto._last_status_parsed = {"sense_key": 0, "sense_asc": 0, "sense_ascq": 0}
+    proto._usb_inited = False
+    proto._scanner_alive = True
+    proto._usb_error_count = 0
+    proto._last_prescan_image_data = b""
+    proto._last_ir_preview_data = b""
+
+    # Apply any remaining kwargs as attribute overrides
+    for key, value in kwargs.items():
+        if key not in (
+            "vendor", "model", "revision", "device_path", "vendor_id", "product_id"
+        ):
+            setattr(proto, key, value)
+
+    return proto
