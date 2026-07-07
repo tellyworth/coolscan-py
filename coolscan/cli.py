@@ -1,181 +1,653 @@
 """
-Command-line interface for Coolscan Tool.
+Command-line interface for Coolscan film scanner.
 
-This module provides a command-line interface for controlling Nikon Coolscan scanners.
+Provides scan, status, eject, and list subcommands.
 """
 
-import click
-import sys
-from pathlib import Path
+from __future__ import annotations
 
-from .device import find_scanners, list_scanners
-from .scanner import CoolscanScanner, scan_preview, scan_full, get_scanner_info
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import click
+import numpy as np
+from PIL import Image
+
+from .device import find_scanners, list_scanners, ScannerDevice
+from .protocol import CoolscanProtocol, DataType, ScanParameters, ScanType
+from .scanner import CoolscanScanner, LS40_CHANNEL_OFFSETS, _parse_scan_data
+
+
+def _next_sequence_number(output_dir: Path, prefix: str) -> int:
+    """Find the highest existing sequence number and return N+1."""
+    pattern = re.compile(re.escape(prefix) + r"_(\d+)\.tiff")
+    max_num = 0
+    if output_dir.exists():
+        for entry in output_dir.iterdir():
+            m = pattern.match(entry.name)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+    return max_num + 1
+
+
+def _make_output_paths(
+    output_dir: Path, prefix: str, seq: int
+) -> Tuple[Path, Path]:
+    """Return (tiff_path, jpeg_path) for a given sequence number."""
+    return output_dir / f"{prefix}_{seq:03d}.tiff", output_dir / f"{prefix}_{seq:03d}.jpg"
+
+
+def _ensure_dir(path: Path) -> Path:
+    """Ensure directory exists, return absolute path."""
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _setup_usb_logging(protocol: CoolscanProtocol, logs_dir: Path) -> str:
+    """Enable USB capture logging. Returns log filename."""
+    logs_dir = _ensure_dir(logs_dir)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_file = logs_dir / f"scan_{timestamp}.txt"
+    protocol.enable_usb_capture(str(log_file))
+    return log_file.name
+
+
+def _apply_auto_adjust(image_array: np.ndarray) -> np.ndarray:
+    """Apply negative inversion + histogram stretch + gamma correction.
+
+    Returns an 8-bit uint8 array.
+    """
+    arr = image_array.astype(np.float64)
+
+    # Negative inversion
+    arr = 255.0 - arr
+
+    # Histogram stretch per channel
+    for ch in range(arr.shape[2]):
+        ch_min = arr[:, :, ch].min()
+        ch_max = arr[:, :, ch].max()
+        if ch_max > ch_min:
+            arr[:, :, ch] = (arr[:, :, ch] - ch_min) / (ch_max - ch_min) * 255.0
+        else:
+            arr[:, :, ch] = 0
+
+    # Gamma correction (2.2)
+    arr = np.clip(arr, 0, 255)
+    arr = 255.0 * np.power(arr / 255.0, 1.0 / 2.2)
+    return arr.astype(np.uint8)
+
+
+def _build_exif_data(
+    scanner_info: Optional[dict],
+    resolution: int,
+    film_type: str,
+    depth: int,
+    infrared: bool,
+) -> dict:
+    """Build metadata dict for EXIF embedding."""
+    from datetime import datetime
+
+    info = {
+        "Resolution": resolution,
+        "FilmType": film_type,
+        "BitDepth": depth,
+        "InfraredCaptured": infrared,
+        "ScanDate": datetime.now().isoformat(),
+    }
+    if scanner_info:
+        info["ScannerModel"] = scanner_info.get("product", "Unknown")
+        info["ScannerVendor"] = scanner_info.get("vendor", "Unknown")
+    return info
+
+
+def _save_tiff_dual_ifd(
+    rgb_array: np.ndarray,
+    ir_array: Optional[np.ndarray],
+    output_path: Path,
+    compression: str = "zstd",
+    exif_data: Optional[dict] = None,
+) -> None:
+    """Save a TIFF with RGB in main IFD and IR in second IFD.
+
+    Uses Pillow's append mode for the second IFD.
+    """
+    # Determine compression string
+    if compression == "zstd":
+        compress_str = "tiff_zstd"
+    else:
+        compress_str = "tiff_deflate"
+
+    # Save main IFD (RGB)
+    rgb_image = Image.fromarray(rgb_array, "RGB")
+    exif_bytes = None
+    if exif_data:
+        exif_info = Image.Exif()
+        for key, value in exif_data.items():
+            try:
+                exif_info[key] = str(value)
+            except Exception:
+                pass
+        exif_bytes = exif_info.tobytes()
+
+    rgb_image.save(
+        str(output_path),
+        format="TIFF",
+        compression=compress_str,
+        exif=exif_bytes,
+    )
+
+    # Append IR as second IFD
+    if ir_array is not None:
+        ir_image = Image.fromarray(ir_array, "L")
+        ir_image.save(
+            str(output_path),
+            format="TIFF",
+            compression=compress_str,
+            append=True,
+        )
+
+
+def _save_jpeg(
+    image_array: np.ndarray,
+    output_path: Path,
+    exif_data: Optional[dict] = None,
+    orientation: Optional[int] = None,
+) -> None:
+    """Save a JPEG with EXIF metadata."""
+    image = Image.fromarray(image_array, "RGB")
+
+    exif_bytes = None
+    if exif_data:
+        exif_info = Image.Exif()
+        for key, value in exif_data.items():
+            try:
+                exif_info[key] = str(value)
+            except Exception:
+                pass
+        if orientation:
+            exif_info[274] = orientation  # Orientation tag
+        exif_bytes = exif_info.tobytes()
+
+    image.save(str(output_path), format="JPEG", quality=95, exif=exif_bytes)
+
+
+def _detect_orientation(image_array: np.ndarray) -> Optional[int]:
+    """Use check_orientation to detect image orientation.
+
+    Returns EXIF orientation value (1-8) or None.
+    """
+    try:
+        from check_orientation import check
+
+        image = Image.fromarray(image_array, "RGB")
+        result = check(image)
+        if result:
+            return int(result)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return None
+
+
+def _get_scanner(
+    scanners: List[ScannerDevice], scanner_num: Optional[int]
+) -> ScannerDevice:
+    """Select a scanner from the list."""
+    if not scanners:
+        click.echo("No Coolscan scanners found.", err=True)
+        sys.exit(1)
+
+    if scanner_num is None:
+        if len(scanners) == 1:
+            return scanners[0]
+        click.echo("Multiple scanners found. Please specify one with --scanner:")
+        list_scanners()
+        sys.exit(1)
+
+    if scanner_num < 1 or scanner_num > len(scanners):
+        click.echo(f"Invalid scanner number. Available: 1-{len(scanners)}", err=True)
+        sys.exit(1)
+    return scanners[scanner_num - 1]
 
 
 @click.group()
 @click.version_option(version="0.1.0")
 def cli():
-    """Coolscan Tool - Control Nikon Coolscan film scanners."""
+    """Coolscan film scanner control."""
     pass
 
 
-@cli.command()
-def list():
-    """List all available Coolscan scanners."""
+@cli.command("list")
+def cmd_list():
+    """List available Coolscan scanners."""
     list_scanners()
 
 
 @cli.command()
-@click.option("--scanner", "-s", type=int, help="Scanner number (from list command)")
-@click.option("--output", "-o", type=click.Path(), required=True, help="Output file path")
-@click.option("--resolution", "-r", type=int, default=2700, help="Scan resolution in DPI")
-@click.option("--preview", is_flag=True, help="Perform a preview scan")
-@click.option("--negative", is_flag=True, help="Scan as negative film")
-@click.option("--infrared", is_flag=True, help="Include infrared channel")
-def scan(scanner, output, resolution, preview, negative, infrared):
-    """Perform a scan."""
-    # Find available scanners
+@click.option("--scanner", "-s", type=int, default=None, help="Scanner number")
+def status(scanner: Optional[int]):
+    """Report scanner status."""
     scanners = find_scanners()
+    device = _get_scanner(scanners, scanner)
 
-    if not scanners:
-        click.echo("No Coolscan scanners found.", err=True)
-        sys.exit(1)
-
-    # Select scanner
-    if scanner is None:
-        if len(scanners) == 1:
-            selected_scanner = scanners[0]
-        else:
-            click.echo("Multiple scanners found. Please specify one with --scanner:")
-            list_scanners()
-            sys.exit(1)
-    else:
-        if scanner < 1 or scanner > len(scanners):
-            click.echo(f"Invalid scanner number. Available: 1-{len(scanners)}", err=True)
-            sys.exit(1)
-        selected_scanner = scanners[scanner - 1]
-
-    click.echo(f"Using scanner: {selected_scanner}")
-
-    # Validate output path
-    output_path = Path(output)
-    if output_path.suffix.lower() not in [".tiff", ".tif", ".png", ".jpg", ".jpeg"]:
-        click.echo("Output file must have .tiff, .tif, .png, .jpg, or .jpeg extension", err=True)
-        sys.exit(1)
-
-    # Perform scan
+    click.echo(f"Scanner: {device}")
     try:
-        if preview:
-            success = scan_preview(selected_scanner, str(output_path), resolution)
-        else:
-            success = scan_full(selected_scanner, str(output_path), resolution, negative, infrared)
-
-        if success:
-            click.echo(f"Scan completed successfully: {output_path}")
-        else:
-            click.echo("Scan failed", err=True)
-            sys.exit(1)
-
-    except Exception as e:
-        click.echo(f"Error during scan: {e}", err=True)
-        sys.exit(1)
-
-
-@cli.command()
-@click.option("--scanner", "-s", type=int, help="Scanner number (from list command)")
-def info(scanner):
-    """Get detailed information about a scanner."""
-    # Find available scanners
-    scanners = find_scanners()
-
-    if not scanners:
-        click.echo("No Coolscan scanners found.", err=True)
-        sys.exit(1)
-
-    # Select scanner
-    if scanner is None:
-        if len(scanners) == 1:
-            selected_scanner = scanners[0]
-        else:
-            click.echo("Multiple scanners found. Please specify one with --scanner:")
-            list_scanners()
-            sys.exit(1)
-    else:
-        if scanner < 1 or scanner > len(scanners):
-            click.echo(f"Invalid scanner number. Available: 1-{len(scanners)}", err=True)
-            sys.exit(1)
-        selected_scanner = scanners[scanner - 1]
-
-    click.echo(f"Scanner: {selected_scanner}")
-    click.echo()
-
-    # Get detailed info
-    try:
-        info = get_scanner_info(selected_scanner)
-
-        click.echo("Device Information:")
-        click.echo(f"  Vendor: {info.get('vendor', 'Unknown')}")
-        click.echo(f"  Product: {info.get('product', 'Unknown')}")
-        click.echo(f"  Revision: {info.get('revision', 'Unknown')}")
-        click.echo(f"  Interface: {info.get('interface', 'Unknown')}")
-        click.echo(f"  Device Path: {info.get('device_path', 'Unknown')}")
-
-        if "error" in info:
-            click.echo(f"  Error: {info['error']}")
-
-    except Exception as e:
-        click.echo(f"Error getting scanner info: {e}", err=True)
-        sys.exit(1)
-
-
-@cli.command()
-@click.option("--scanner", "-s", type=int, help="Scanner number (from list command)")
-def test(scanner):
-    """Test scanner connection and basic functionality."""
-    # Find available scanners
-    scanners = find_scanners()
-
-    if not scanners:
-        click.echo("No Coolscan scanners found.", err=True)
-        sys.exit(1)
-
-    # Select scanner
-    if scanner is None:
-        if len(scanners) == 1:
-            selected_scanner = scanners[0]
-        else:
-            click.echo("Multiple scanners found. Please specify one with --scanner:")
-            list_scanners()
-            sys.exit(1)
-    else:
-        if scanner < 1 or scanner > len(scanners):
-            click.echo(f"Invalid scanner number. Available: 1-{len(scanners)}", err=True)
-            sys.exit(1)
-        selected_scanner = scanners[scanner - 1]
-
-    click.echo(f"Testing scanner: {selected_scanner}")
-    click.echo()
-
-    try:
-        with CoolscanScanner(selected_scanner) as scanner_obj:
-            click.echo("✓ Connected to scanner")
-
-            # Test device info
+        with CoolscanScanner(device) as scanner_obj:
             info = scanner_obj.get_device_info()
-            click.echo(f"✓ Device info retrieved: {info.get('product', 'Unknown')}")
+            click.echo(f"  Vendor: {info.get('vendor', 'Unknown')}")
+            click.echo(f"  Product: {info.get('product', 'Unknown')}")
+            click.echo(f"  Revision: {info.get('revision', 'Unknown')}")
 
-            # Test ready state
-            if scanner_obj.wait_for_ready(timeout=10):
-                click.echo("✓ Scanner is ready")
-            else:
-                click.echo("⚠ Scanner not ready (this might be normal)")
-
-            click.echo()
-            click.echo("Scanner test completed successfully!")
-
+            ready = scanner_obj.wait_for_ready(timeout=10)
+            click.echo(f"  Ready: {'yes' if ready else 'no'}")
+            click.echo(f"  Scan in progress: {'yes' if scanner_obj.scan_in_progress else 'no'}")
     except Exception as e:
-        click.echo(f"✗ Scanner test failed: {e}", err=True)
+        click.echo(f"  Status: error ({e})", err=True)
         sys.exit(1)
+
+
+@cli.command()
+@click.option("--scanner", "-s", type=int, default=None, help="Scanner number")
+def eject(scanner: Optional[int]):
+    """Eject film and reset scanner."""
+    scanners = find_scanners()
+    device = _get_scanner(scanners, scanner)
+
+    click.echo(f"Ejecting film from {device}...")
+    try:
+        with CoolscanScanner(device) as scanner_obj:
+            if scanner_obj.protocol.eject_medium():
+                click.echo("Film ejected successfully")
+                if scanner_obj.protocol.reset_params():
+                    click.echo("Scanner parameters reset")
+            else:
+                click.echo("Eject command failed", err=True)
+                sys.exit(1)
+    except Exception as e:
+        click.echo(f"Eject failed: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Output directory")
+@click.option("--prefix", "-p", default="img_", help="Filename prefix (default: img_)")
+@click.option("--resolution", "-r", default=2700, type=int, help="Scan resolution in DPI")
+@click.option("--depth", default=8, type=click.Choice(["8", "12"]), help="Bit depth")
+@click.option(
+    "--film-type",
+    default="negative",
+    type=click.Choice(["positive", "negative", "auto"]),
+    help="Film type",
+)
+@click.option("--infrared", "-i", is_flag=True, help="Capture IR channel for DFR")
+@click.option("--batch", "-b", is_flag=True, help="Batch mode (multi-frame)")
+@click.option("--frames", "-n", default=6, type=int, help="Number of frames in batch mode")
+@click.option("--auto-adjust", "-a", is_flag=True, help="Apply auto-adjustment to JPEG")
+@click.option("--preview", is_flag=True, help="Preview only (prescan)")
+@click.option("--scanner", "-s", type=int, default=None, help="Scanner number")
+@click.option("--logs-dir", type=click.Path(), default="logs", help="USB log directory")
+def scan(
+    output_dir: str,
+    prefix: str,
+    resolution: int,
+    depth: int,
+    film_type: str,
+    infrared: bool,
+    batch: bool,
+    frames: int,
+    auto_adjust: bool,
+    preview: bool,
+    scanner: Optional[int],
+    logs_dir: str,
+):
+    """Scan film frames to TIFF + JPEG."""
+    depth_int = int(depth)
+    output_path = _ensure_dir(Path(output_dir))
+    logs_path = _ensure_dir(Path(logs_dir))
+
+    scanners = find_scanners()
+    device = _get_scanner(scanners, scanner)
+
+    click.echo(f"Using scanner: {device}")
+    click.echo(f"Output directory: {output_path}")
+    click.echo(f"Resolution: {resolution} DPI, depth: {depth_int}-bit")
+    click.echo(f"Film type: {film_type}, IR: {'yes' if infrared else 'no'}")
+    if batch:
+        click.echo(f"Batch mode: {frames} frames")
+
+    negative = film_type in ("negative", "auto")
+
+    try:
+        with CoolscanScanner(device) as scanner_obj:
+            protocol = scanner_obj.protocol
+            assert protocol is not None
+
+            # USB logging
+            log_name = _setup_usb_logging(protocol, logs_path)
+            click.echo(f"USB log: {log_name}")
+
+            # Wait for scanner ready
+            click.echo("Waiting for scanner...")
+            if not scanner_obj.wait_for_ready(timeout=30):
+                click.echo("Scanner not ready", err=True)
+                sys.exit(1)
+            click.echo("Scanner ready")
+
+            # Gather scanner info for metadata
+            scanner_info = scanner_obj.get_device_info()
+
+            if preview:
+                _do_preview(
+                    scanner_obj, output_path, prefix, resolution, scanner_info
+                )
+            elif batch:
+                _do_batch_scan(
+                    scanner_obj,
+                    output_path,
+                    prefix,
+                    resolution,
+                    depth_int,
+                    negative,
+                    infrared,
+                    frames,
+                    auto_adjust,
+                    scanner_info,
+                )
+            else:
+                _do_single_scan(
+                    scanner_obj,
+                    output_path,
+                    prefix,
+                    resolution,
+                    depth_int,
+                    negative,
+                    infrared,
+                    auto_adjust,
+                    scanner_info,
+                )
+
+    except KeyboardInterrupt:
+        click.echo("\nScan cancelled by user")
+        sys.exit(130)
+    except Exception as e:
+        click.echo(f"Scan failed: {e}", err=True)
+        sys.exit(1)
+
+
+def _do_preview(
+    scanner_obj: CoolscanScanner,
+    output_dir: Path,
+    prefix: str,
+    resolution: int,
+    scanner_info: dict,
+) -> None:
+    """Perform prescan-only mode."""
+    click.echo("Running prescan...")
+    if not scanner_obj.prescan():
+        click.echo("Prescan failed", err=True)
+        sys.exit(1)
+
+    protocol = scanner_obj.protocol
+    assert protocol is not None
+    if protocol._last_prescan_image_data:
+        seq = _next_sequence_number(output_dir, prefix)
+        tiff_path, jpeg_path = _make_output_paths(output_dir, prefix, seq)
+
+        prescan_data = protocol._last_prescan_image_data
+        prescan_width = 96
+        prescan_pixels = len(prescan_data) // (2 * 3)
+        prescan_height = prescan_pixels // prescan_width
+
+        arr, _ = _parse_scan_data(
+            bytearray(prescan_data),
+            width=prescan_width,
+            height=prescan_height,
+            num_channels=3,
+            depth=12,
+            format="plane",
+            channel_offsets=(0, 0, 1),
+        )
+
+        exif_data = _build_exif_data(scanner_info, resolution, "preview", 12, False)
+
+        _save_tiff_dual_ifd(arr, None, tiff_path, exif_data=exif_data)
+        _save_jpeg(arr, jpeg_path, exif_data=exif_data)
+
+        click.echo(f"Prescan saved: {tiff_path}, {jpeg_path}")
+    else:
+        click.echo("Prescan completed but no image data available")
+
+
+def _do_single_scan(
+    scanner_obj: CoolscanScanner,
+    output_dir: Path,
+    prefix: str,
+    resolution: int,
+    depth: int,
+    negative: bool,
+    infrared: bool,
+    auto_adjust: bool,
+    scanner_info: dict,
+) -> None:
+    """Perform a single-frame scan."""
+    protocol = scanner_obj.protocol
+    assert protocol is not None
+
+    # Focus setup
+    click.echo("Focus setup...")
+    focus = protocol.focus_setup()
+    if focus is not None:
+        click.echo(f"Focus position: {focus} (0x{focus:04X})")
+    else:
+        click.echo("Focus setup failed, using scanner default")
+
+    # Prescan
+    click.echo("Running prescan...")
+    if not protocol.prescan():
+        click.echo("Prescan failed", err=True)
+        sys.exit(1)
+
+    # Full scan setup
+    click.echo("Starting full scan...")
+    params = ScanParameters(
+        resolution=resolution,
+        preview=False,
+        negative=negative,
+        infrared=infrared,
+        depth=depth,
+        x_min=0,
+        y_min=0,
+        x_max=0,
+        y_max=0,
+    )
+
+    if not protocol.full_scan_frame(params):
+        click.echo("Scan setup failed", err=True)
+        sys.exit(1)
+
+    # Read scan data
+    click.echo("Reading scan data...")
+    width = 2880
+    height = 3888
+    num_channels = 4 if infrared else 3
+    bytes_per_channel = 2 if depth > 8 else 1
+    total_bytes = width * height * num_channels * bytes_per_channel
+    chunk_size = 0x3F480
+
+    scan_data = bytearray()
+    bytes_read = 0
+
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
+
+    with tqdm(total=total_bytes, unit="B", unit_scale=True, desc="Reading") as bar:
+        while bytes_read < total_bytes:
+            remaining = total_bytes - bytes_read
+            request_length = min(chunk_size, remaining)
+            chunk = protocol.read_scan_data(request_length, DataType.IMAGE_DATA)
+            if not chunk:
+                click.echo(f"Empty read at {bytes_read}/{total_bytes}, stopping", err=True)
+                break
+            scan_data.extend(chunk)
+            bytes_read += len(chunk)
+            if tqdm and bar:
+                bar.update(len(chunk))
+
+    if not scan_data:
+        click.echo("No scan data received", err=True)
+        sys.exit(1)
+
+    # Parse scan data
+    click.echo("Processing image...")
+    channel_offsets = LS40_CHANNEL_OFFSETS
+    img_arr, trailing = _parse_scan_data(
+        scan_data, width, height, num_channels, depth, "plane", channel_offsets
+    )
+
+    # Split RGB and IR
+    if infrared and num_channels == 4:
+        rgb_arr = img_arr[:, :, 0:3]
+        ir_arr = img_arr[:, :, 3]
+    else:
+        rgb_arr = img_arr[:, :, 0:3] if img_arr.shape[2] >= 3 else img_arr
+        ir_arr = None
+
+    # Save outputs
+    seq = _next_sequence_number(output_dir, prefix)
+    tiff_path, jpeg_path = _make_output_paths(output_dir, prefix, seq)
+
+    film_type_str = "negative" if negative else "positive"
+    exif_data = _build_exif_data(scanner_info, resolution, film_type_str, depth, infrared)
+
+    # TIFF (raw archival)
+    click.echo(f"Saving TIFF: {tiff_path}")
+    _save_tiff_dual_ifd(rgb_arr, ir_arr, tiff_path, exif_data=exif_data)
+
+    # JPEG (viewing copy)
+    if auto_adjust:
+        jpeg_arr = _apply_auto_adjust(rgb_arr if rgb_arr.dtype != np.uint8 else rgb_arr)
+    else:
+        jpeg_arr = rgb_arr if rgb_arr.dtype == np.uint8 else (rgb_arr >> 4).astype(np.uint8)
+
+    # Orientation detection
+    orientation = _detect_orientation(jpeg_arr)
+    if orientation:
+        exif_data["Orientation"] = orientation
+
+    click.echo(f"Saving JPEG: {jpeg_path}")
+    _save_jpeg(jpeg_arr, jpeg_path, exif_data=exif_data, orientation=orientation)
+
+    click.echo(f"Scan complete: seq {seq}")
+
+
+def _do_batch_scan(
+    scanner_obj: CoolscanScanner,
+    output_dir: Path,
+    prefix: str,
+    resolution: int,
+    depth: int,
+    negative: bool,
+    infrared: bool,
+    frame_count: int,
+    auto_adjust: bool,
+    scanner_info: dict,
+) -> None:
+    """Perform batch scan with auto-advance."""
+    protocol = scanner_obj.protocol
+    assert protocol is not None
+
+    click.echo(f"Starting batch scan ({frame_count} frames)...")
+
+    seq = _next_sequence_number(output_dir, prefix)
+    film_type_str = "negative" if negative else "positive"
+
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
+
+    frame_iter = protocol.batch_scan_to_frames(
+        frame_count=frame_count,
+        first_y=30,
+        frame_height=4332,
+        step=4330,
+        focus_x=0x059B,
+        negative=negative,
+        depth=depth,
+        save_previews=True,
+    )
+
+    with tqdm(total=frame_count, desc="Frames") as bar:
+        for frame_idx, full_res_data, previews in frame_iter:
+            click.echo(f"\nFrame {frame_idx + 1}/{frame_count}: processing...")
+
+            # Parse full-res data
+            batch_width = 2880
+            batch_height = len(full_res_data) // (batch_width * 3)
+            channel_offsets = LS40_CHANNEL_OFFSETS
+
+            img_arr, _ = _parse_scan_data(
+                bytearray(full_res_data),
+                width=batch_width,
+                height=batch_height,
+                num_channels=3,
+                depth=depth,
+                format="plane",
+                channel_offsets=channel_offsets,
+            )
+
+            rgb_arr = img_arr[:, :, 0:3]
+            ir_arr = None
+
+            # IR from Stage A preview (4 channels: R, G, B, IR)
+            if infrared and "stage_a" in previews and previews["stage_a"]:
+                stage_a = previews["stage_a"]
+                stage_w = 288
+                stage_h = 433
+                stage_arr, _ = _parse_scan_data(
+                    bytearray(stage_a),
+                    width=stage_w,
+                    height=stage_h,
+                    num_channels=4,
+                    depth=12,
+                    format="plane",
+                    channel_offsets=(0, 1, 2, 0),
+                )
+                ir_arr = stage_arr[:, :, 3]
+
+            current_seq = seq + frame_idx
+            tiff_path, jpeg_path = _make_output_paths(output_dir, prefix, current_seq)
+
+            exif_data = _build_exif_data(
+                scanner_info, resolution, film_type_str, depth, infrared
+            )
+            exif_data["FrameIndex"] = frame_idx + 1
+
+            _save_tiff_dual_ifd(rgb_arr, ir_arr, tiff_path, exif_data=exif_data)
+
+            if auto_adjust:
+                jpeg_arr = _apply_auto_adjust(rgb_arr)
+            else:
+                jpeg_arr = rgb_arr if rgb_arr.dtype == np.uint8 else (rgb_arr >> 4).astype(np.uint8)
+
+            orientation = _detect_orientation(jpeg_arr)
+            if orientation:
+                exif_data["Orientation"] = orientation
+
+            _save_jpeg(jpeg_arr, jpeg_path, exif_data=exif_data, orientation=orientation)
+
+            click.echo(f"  Saved: {tiff_path}, {jpeg_path}")
+            if tqdm and bar:
+                bar.update(1)
+
+    click.echo(f"Batch scan complete: {frame_count} frames, seq {seq}-{seq + frame_count - 1}")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,9 @@
 pyusb>=1.2.1          # USB communication
 numpy>=1.21.0          # Numerical operations for image processing
 Pillow>=9.0.0          # Image processing and saving
+click>=8.0.0           # CLI framework
+tqdm>=4.64.0           # Progress bars
+check-orientation>=1.2.0  # Auto-rotate detection
 
 # Development dependencies
 pytest>=7.0.0          # Testing framework
@@ -15,4 +18,3 @@ mypy>=1.0.0            # Type checking
 # Optional dependencies
 # matplotlib>=3.5.0    # Image visualization (optional)
 # opencv-python>=4.6.0 # Advanced image processing (optional)
-# tqdm>=4.64.0         # Progress bars (optional)

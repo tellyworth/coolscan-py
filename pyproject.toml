@@ -1,3 +1,29 @@
+[project]
+name = "coolscan"
+version = "0.1.0"
+description = "Nikon Coolscan film scanner control"
+requires-python = ">=3.9"
+dependencies = [
+    "pyusb>=1.2.1",
+    "numpy>=1.21.0",
+    "Pillow>=9.0.0",
+    "click>=8.0.0",
+    "tqdm>=4.64.0",
+    "check-orientation>=1.2.0",
+]
+
+[project.scripts]
+coolscan = "coolscan.cli:cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "flake8>=5.0.0",
+    "mypy>=1.0.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
