@@ -127,25 +127,27 @@ def _parse_scan_data(
 class CoolscanScanner:
     """High-level interface for Coolscan scanner operations."""
 
-    def __init__(self, device: ScannerDevice):
+    def __init__(self, device: ScannerDevice, usb_log_file: Optional[str] = None):
         self.device = device
+        self.usb_log_file = usb_log_file
         self.protocol = None
         self.is_connected = False
         self.scan_in_progress = False
         self.scanner_info = None
 
-    def connect(self) -> bool:
+    def connect(self, usb_log_file: Optional[str] = None) -> bool:
         """Connect to the scanner using enhanced SANE sequence."""
         try:
             print("Connecting to scanner...")
             self.protocol = CoolscanProtocol(self.device)
 
+            # Enable USB capture before any USB traffic
+            if usb_log_file:
+                self.protocol.enable_usb_capture(usb_log_file)
+
             # Initialize scanner with full SANE sequence
             if not self.protocol.initialize_scanner():
                 raise RuntimeError("Scanner initialization failed")
-
-            # Get scanner info
-            self.scanner_info = self.protocol.get_internal_info()
 
             self.is_connected = True
             print("Scanner connected successfully")
@@ -182,58 +184,32 @@ class CoolscanScanner:
         if not self.is_connected:
             raise RuntimeError("Scanner not connected")
 
-        try:
-            # Get standard inquiry data
-            inquiry_data = self.protocol.inquiry()
+        # Use device descriptor info (already available) instead of sending
+        # another INQUIRY that disrupts scanner state.
+        info = {
+            "vendor": self.device.vendor,
+            "product": self.device.model,
+            "revision": self.device.revision,
+            "interface": self.device.interface.value,
+            "device_path": self.device.device_path,
+        }
 
-            if len(inquiry_data) >= 36:
-                vendor = inquiry_data[8:16].decode("ascii", errors="ignore").strip()
-                product = inquiry_data[16:32].decode("ascii", errors="ignore").strip()
-                revision = inquiry_data[32:36].decode("ascii", errors="ignore").strip()
-
-                info = {
-                    "vendor": vendor,
-                    "product": product,
-                    "revision": revision,
-                    "interface": self.device.interface.value,
-                    "device_path": self.device.device_path,
+        # Add scanner info if available
+        if self.scanner_info:
+            info.update(
+                {
+                    "ad_bits": self.scanner_info.ad_bits,
+                    "output_bits": self.scanner_info.output_bits,
+                    "max_resolution": self.scanner_info.max_resolution,
+                    "x_max_pixels": self.scanner_info.x_max_pixels,
+                    "y_max_pixels": self.scanner_info.y_max_pixels,
+                    "auto_feeder": bool(self.scanner_info.auto_feeder),
+                    "analog_gamma": bool(self.scanner_info.analog_gamma),
+                    "device_errors": self.scanner_info.device_errors,
                 }
+            )
 
-                # Add scanner info if available
-                if self.scanner_info:
-                    info.update(
-                        {
-                            "ad_bits": self.scanner_info.ad_bits,
-                            "output_bits": self.scanner_info.output_bits,
-                            "max_resolution": self.scanner_info.max_resolution,
-                            "x_max_pixels": self.scanner_info.x_max_pixels,
-                            "y_max_pixels": self.scanner_info.y_max_pixels,
-                            "auto_feeder": bool(self.scanner_info.auto_feeder),
-                            "analog_gamma": bool(self.scanner_info.analog_gamma),
-                            "device_errors": self.scanner_info.device_errors,
-                        }
-                    )
-
-                return info
-            else:
-                return {
-                    "vendor": self.device.vendor,
-                    "product": self.device.model,
-                    "revision": self.device.revision,
-                    "interface": self.device.interface.value,
-                    "device_path": self.device.device_path,
-                }
-
-        except Exception as e:
-            print(f"Error getting device info: {e}")
-            return {
-                "vendor": self.device.vendor,
-                "product": self.device.model,
-                "revision": self.device.revision,
-                "interface": self.device.interface.value,
-                "device_path": self.device.device_path,
-                "error": str(e),
-            }
+        return info
 
     def scan_preview(
         self,
@@ -560,7 +536,7 @@ class CoolscanScanner:
 
     def __enter__(self):
         """Context manager entry."""
-        if not self.connect():
+        if not self.connect(self.usb_log_file):
             raise RuntimeError("Failed to connect to scanner")
         return self
 

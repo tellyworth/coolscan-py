@@ -3820,9 +3820,9 @@ class CoolscanProtocol:
           4. ``test_unit_ready()`` × 3
           5. ``read_channel_state(1, 2, 3)``
           6. ``test_unit_ready()`` × 3
-          7. ``set_scan_window(1/2/3/9, "prescan")``
+          7. ``set_scan_window(1/2/3, "prescan")``
           8. ``test_unit_ready()``
-          9. ``upload_identity_luts(include_ir=True)``
+          9. ``upload_identity_luts(include_ir=False)``
           10. ``start_scan()`` (with REISSUE/ERROR retries)
           11. ``poll_until_ready()``
 
@@ -3862,8 +3862,8 @@ class CoolscanProtocol:
         for _ in range(3):
             self._wait_ready_or_replay_once()
 
-        # 7. Prescan windows at low resolution (96 DPI) for R, G, B, IR.
-        for win_id in [1, 2, 3, 9]:
+        # 7. Prescan windows at low resolution (96 DPI) for R, G, B only.
+        for win_id in [1, 2, 3]:
             if not self.set_scan_window(win_id, scan_type="prescan"):
                 print(f"  ❌ Failed to set prescan window {win_id}")
                 return False
@@ -3871,8 +3871,8 @@ class CoolscanProtocol:
         # 8. TUR before LUT uploads (lines 278-281).
         self._wait_ready_or_replay_once()
 
-        # 9. Identity LUTs for R, G, B, IR (lines 282-296).
-        if not self.upload_identity_luts(include_ir=True):
+        # 9. Identity LUTs for R, G, B only (lines 282-296).
+        if not self.upload_identity_luts(include_ir=False):
             return False
 
         # 10. Start scan (lines 297-331, with retries handled internally).
@@ -3964,6 +3964,36 @@ class CoolscanProtocol:
         if len(image_data) == 0:
             print("  ❌ No image data read — prescan failed")
             return False
+
+        # Post-prescan transition sequence.
+        # After the prescan image read the scanner returns a transitional
+        # 02063f03 status.  Both golden fixtures (single-bw and batch) then
+        # poll through it, re-read INQUIRY page 0xc1, re-read the exposure
+        # calibration table (0x8e), and poll READY before accepting the next
+        # CONTROL_FRAME command.  Skipping this transition causes the scanner
+        # to reject set_boundary with ILLEGAL REQUEST / COMMAND SEQUENCE ERROR
+        # (sense 0x052c).
+        print("  Post-prescan transition...")
+        if not self.poll_until_ready(timeout=10, poll_interval=0.1):
+            print("  ⚠️  Scanner not ready after prescan image read, continuing...")
+
+        try:
+            self.inquiry(page=0xC1)
+        except Exception as e:
+            self._replay_reraise_if_needed(e)
+            if self.verbose:
+                print(f"    ⚠️  Post-prescan INQUIRY 0xc1 failed: {e}")
+
+        self._wait_ready_or_replay_once()
+
+        try:
+            self.read_exposure_data()
+        except Exception as e:
+            self._replay_reraise_if_needed(e)
+            if self.verbose:
+                print(f"    ⚠️  Post-prescan exposure read failed: {e}")
+
+        self._wait_ready_or_replay_once()
 
         # Post-prescan exposure calibration (may fail with ILLEGAL_REQ if
         # scanner has already transitioned to scan state — that's fine, we

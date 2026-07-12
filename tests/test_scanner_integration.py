@@ -285,7 +285,9 @@ class TestStateManagement:
 
         assert scanner.is_connected is True
         assert scanner.protocol is mock
-        assert scanner.scanner_info is not None
+        # connect() intentionally leaves scanner_info unset to avoid extra
+        # command traffic after initialization.
+        assert scanner.scanner_info is None
 
     def test_disconnect_resets_state(self):
         """disconnect() resets all state."""

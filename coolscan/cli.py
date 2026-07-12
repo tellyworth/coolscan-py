@@ -6,10 +6,12 @@ Provides scan, status, eject, and list subcommands.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -122,27 +124,42 @@ def _save_tiff_dual_ifd(
         compress_str = "tiff_deflate"
 
     # Save main IFD (RGB)
-    rgb_image = Image.fromarray(rgb_array, "RGB")
-    exif_bytes = None
+    rgb_image = Image.fromarray(np.ascontiguousarray(rgb_array), "RGB")
+    tiff_info: dict = {}
     if exif_data:
-        exif_info = Image.Exif()
-        for key, value in exif_data.items():
+        # Embed metadata as TIFF tags.  Pillow's Image.Exif() is intended for
+        # JPEG EXIF and crashes with our custom string keys when writing TIFF,
+        # so we use standard TIFF tags instead.
+        tiff_info[270] = json.dumps(exif_data, default=str)  # ImageDescription
+        if exif_data.get("ScannerVendor"):
+            tiff_info[271] = exif_data["ScannerVendor"]  # Make
+        if exif_data.get("ScannerModel"):
+            tiff_info[272] = exif_data["ScannerModel"]  # Model
+        if exif_data.get("ScanDate"):
+            # TIFF DateTime wants "YYYY:MM:DD HH:MM:SS"
+            dt = exif_data["ScanDate"]
+            if isinstance(dt, str) and "T" in dt:
+                dt = dt.replace("T", " ", 1).split(".")[0].split("+")[0]
+            tiff_info[306] = dt  # DateTime
+        if exif_data.get("Resolution"):
             try:
-                exif_info[key] = str(value)
-            except Exception:
+                res = int(exif_data["Resolution"])
+                tiff_info[282] = res  # XResolution
+                tiff_info[283] = res  # YResolution
+                tiff_info[296] = 2  # ResolutionUnit = inch
+            except (ValueError, TypeError):
                 pass
-        exif_bytes = exif_info.tobytes()
 
     rgb_image.save(
         str(output_path),
         format="TIFF",
         compression=compress_str,
-        exif=exif_bytes,
+        info=tiff_info,
     )
 
     # Append IR as second IFD
     if ir_array is not None:
-        ir_image = Image.fromarray(ir_array, "L")
+        ir_image = Image.fromarray(np.ascontiguousarray(ir_array), "L")
         ir_image.save(
             str(output_path),
             format="TIFF",
@@ -158,14 +175,34 @@ def _save_jpeg(
     orientation: Optional[int] = None,
 ) -> None:
     """Save a JPEG with EXIF metadata."""
-    image = Image.fromarray(image_array, "RGB")
+    image = Image.fromarray(np.ascontiguousarray(image_array), "RGB")
 
     exif_bytes = None
     if exif_data:
         exif_info = Image.Exif()
-        for key, value in exif_data.items():
+        # Standard EXIF tags use integer IDs.  Put the full custom metadata
+        # dict in UserComment as JSON, and map a few common fields to
+        # standard tags.
+        try:
+            exif_info[37510] = json.dumps(exif_data, default=str)  # UserComment
+        except Exception:
+            pass
+        if exif_data.get("ScannerVendor"):
             try:
-                exif_info[key] = str(value)
+                exif_info[271] = exif_data["ScannerVendor"]  # Make
+            except Exception:
+                pass
+        if exif_data.get("ScannerModel"):
+            try:
+                exif_info[272] = exif_data["ScannerModel"]  # Model
+            except Exception:
+                pass
+        if exif_data.get("ScanDate"):
+            try:
+                dt = exif_data["ScanDate"]
+                if isinstance(dt, str) and "T" in dt:
+                    dt = dt.replace("T", " ", 1).split(".")[0].split("+")[0]
+                exif_info[306] = dt  # DateTime
             except Exception:
                 pass
         if orientation:
@@ -375,7 +412,8 @@ def scan(
         click.echo("\nScan cancelled by user")
         sys.exit(130)
     except Exception as e:
-        click.echo(f"Scan failed: {e}", err=True)
+        click.echo(f"\nScan failed: {e}", err=True)
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -513,10 +551,10 @@ def _do_single_scan(
 
     # Split RGB and IR
     if infrared and num_channels == 4:
-        rgb_arr = img_arr[:, :, 0:3]
-        ir_arr = img_arr[:, :, 3]
+        rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
+        ir_arr = np.ascontiguousarray(img_arr[:, :, 3])
     else:
-        rgb_arr = img_arr[:, :, 0:3] if img_arr.shape[2] >= 3 else img_arr
+        rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3] if img_arr.shape[2] >= 3 else img_arr)
         ir_arr = None
 
     # Save outputs
@@ -532,9 +570,10 @@ def _do_single_scan(
 
     # JPEG (viewing copy)
     if auto_adjust:
-        jpeg_arr = _apply_auto_adjust(rgb_arr if rgb_arr.dtype != np.uint8 else rgb_arr)
+        jpeg_arr = _apply_auto_adjust(rgb_arr)
     else:
         jpeg_arr = rgb_arr if rgb_arr.dtype == np.uint8 else (rgb_arr >> 4).astype(np.uint8)
+    jpeg_arr = np.ascontiguousarray(jpeg_arr)
 
     # Orientation detection
     orientation = _detect_orientation(jpeg_arr)
@@ -591,6 +630,8 @@ def _do_batch_scan(
             # Parse full-res data
             batch_width = 2880
             batch_height = len(full_res_data) // (batch_width * 3)
+            if batch_height < 100:
+                click.echo(f"  ⚠️  Suspicious data size: {len(full_res_data)} bytes (height={batch_height})", err=True)
             channel_offsets = LS40_CHANNEL_OFFSETS
 
             img_arr, _ = _parse_scan_data(
@@ -603,7 +644,7 @@ def _do_batch_scan(
                 channel_offsets=channel_offsets,
             )
 
-            rgb_arr = img_arr[:, :, 0:3]
+            rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
             ir_arr = None
 
             # IR from Stage A preview (4 channels: R, G, B, IR)
@@ -620,7 +661,7 @@ def _do_batch_scan(
                     format="plane",
                     channel_offsets=(0, 1, 2, 0),
                 )
-                ir_arr = stage_arr[:, :, 3]
+                ir_arr = np.ascontiguousarray(stage_arr[:, :, 3])
 
             current_seq = seq + frame_idx
             tiff_path, jpeg_path = _make_output_paths(output_dir, prefix, current_seq)
@@ -636,6 +677,7 @@ def _do_batch_scan(
                 jpeg_arr = _apply_auto_adjust(rgb_arr)
             else:
                 jpeg_arr = rgb_arr if rgb_arr.dtype == np.uint8 else (rgb_arr >> 4).astype(np.uint8)
+            jpeg_arr = np.ascontiguousarray(jpeg_arr)
 
             orientation = _detect_orientation(jpeg_arr)
             if orientation:

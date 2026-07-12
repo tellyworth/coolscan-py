@@ -723,10 +723,10 @@ class TestScenarioContracts:
         # Window IDs for channels 1, 2, 3
         window_calls = [c[0][0] for c in proto.read_channel_state.call_args_list]
         assert window_calls == [1, 2, 3]
-        assert proto.set_scan_window.call_count == 4  # channels 1, 2, 3, 9
+        assert proto.set_scan_window.call_count == 3  # channels 1, 2, 3 only
         assert proto.upload_identity_luts.call_count == 1
         upload_kwargs = proto.upload_identity_luts.call_args[1]
-        assert upload_kwargs.get("include_ir") is True
+        assert upload_kwargs.get("include_ir") is False
         assert proto.start_scan.call_count == 1
         assert proto.poll_until_ready.call_count == 1
 

@@ -108,9 +108,11 @@ class TestCoolscanScannerConnect:
         assert result is True
         assert scanner.is_connected is True
         assert scanner.protocol is mock
-        assert scanner.scanner_info is not None
+        # connect() no longer calls get_internal_info() to avoid extra
+        # traffic after initialization; scanner_info stays None until set.
+        assert scanner.scanner_info is None
         assert mock.initialize_scanner.call_count == 1
-        assert mock.get_internal_info.call_count == 1
+        assert mock.get_internal_info.call_count == 0
 
     def test_connect_init_fails(self):
         device = _make_device()
@@ -210,16 +212,10 @@ class TestCoolscanScannerGetDeviceInfo:
         with pytest.raises(RuntimeError, match="Scanner not connected"):
             scanner.get_device_info()
 
-    def test_get_device_info_with_inquiry(self):
+    def test_get_device_info_uses_device_descriptor(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
         mock = make_protocol_mock()
-
-        inquiry_data = bytearray(36)
-        inquiry_data[8:16] = b"Nikon   "
-        inquiry_data[16:32] = b"LS-40 ED        "
-        inquiry_data[32:36] = b"1.20"
-        mock.inquiry.return_value = inquiry_data
 
         scanner.is_connected = True
         scanner.protocol = mock
@@ -232,13 +228,14 @@ class TestCoolscanScannerGetDeviceInfo:
         assert info["revision"] == "1.20"
         assert info["ad_bits"] == 14
         assert info["max_resolution"] == 4000
-        assert mock.inquiry.call_count == 1
+        # get_device_info() no longer issues an INQUIRY; it uses cached
+        # descriptor info from the ScannerDevice.
+        assert mock.inquiry.call_count == 0
 
-    def test_get_device_info_short_inquiry(self):
+    def test_get_device_info_without_scanner_info(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
         mock = make_protocol_mock()
-        mock.inquiry.return_value = bytearray(10)
 
         scanner.is_connected = True
         scanner.protocol = mock
@@ -247,20 +244,7 @@ class TestCoolscanScannerGetDeviceInfo:
 
         assert info["vendor"] == "Nikon"
         assert info["product"] == "LS-40 ED"
-
-    def test_get_device_info_inquiry_error(self):
-        device = _make_device()
-        scanner = CoolscanScanner(device)
-        mock = make_protocol_mock()
-        mock.inquiry.side_effect = Exception("Inquiry failed")
-
-        scanner.is_connected = True
-        scanner.protocol = mock
-
-        info = scanner.get_device_info()
-
-        assert "error" in info
-        assert info["vendor"] == "Nikon"
+        assert "ad_bits" not in info
 
 
 # ---------------------------------------------------------------------------
