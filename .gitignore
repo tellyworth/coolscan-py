@@ -188,3 +188,6 @@ usb_capture_timing.txt
 scan*.png
 *_capture.txt
 *.raw
+/logs
+hardware_scan_output*
+*.log.txt
