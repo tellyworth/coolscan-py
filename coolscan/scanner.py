@@ -6,7 +6,7 @@ This module provides easy-to-use functions for common scanning operations.
 
 import os
 import time
-from typing import Optional, Tuple, Literal
+from typing import List, Optional, Tuple, Literal
 from PIL import Image
 import numpy as np
 
@@ -533,6 +533,42 @@ class CoolscanScanner:
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+    def selective_batch_scan(
+        self,
+        frame_positions: List[int],
+        scan_frames: Optional[List[int]] = None,
+        output_dir: str = "scans",
+        resolution: int = 2900,
+        depth: int = 8,
+    ) -> bool:
+        """Selective batch scan: preview all, scan selected frames.
+
+        This method runs the workflow observed in ``ls40-batch-session.pcapng``:
+        autofocus + preview for every frame, then main scan only for
+        frames listed in ``scan_frames``.
+
+        Args:
+            frame_positions: Carriage Y positions for each frame
+                (~4300 units apart, from autofocus tracking).
+            scan_frames: Indices into ``frame_positions`` for main scanning.
+                If None, all frames are scanned.
+            output_dir: Directory for saved scan images.
+            resolution: Scan resolution in DPI.
+            depth: Bit depth (8 or 12).
+
+        Returns:
+            True if the scan completed successfully.
+        """
+        if not self.is_connected:
+            raise RuntimeError("Scanner not connected")
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        return self.protocol.selective_batch_scan(
+            frame_positions=frame_positions,
+            scan_frames=scan_frames,
+        )
 
     def __enter__(self):
         """Context manager entry."""

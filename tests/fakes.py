@@ -71,6 +71,17 @@ _BOOL_METHODS = frozenset([
     "_check_scanner_alive",
     "wait_scanner",
     "_wait_ready_or_replay_once",
+    # New vendor command helpers
+    "vendor_e0",
+    "vendor_e0_b4",
+    "vendor_e0_b0",
+    "vendor_e0_a0",
+    "vendor_e0_c1",
+    "vendor_e0_d0",
+    "selective_batch_scan",
+    "_preview_scan_frame",
+    "_main_scan_frame",
+    "_send_short_out",
 ])
 
 # Methods that return bytes -> b"" by default
@@ -88,6 +99,10 @@ _BYTES_METHODS = frozenset([
     "_pack_word",
     "_pack_long",
     "_generate_identity_lut",
+    # New vendor command helpers
+    "vendor_e1",
+    "vendor_e1_c1",
+    "vendor_e1_91",
 ])
 
 # Methods that return Optional[T] -> None by default

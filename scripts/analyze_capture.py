@@ -113,14 +113,46 @@ DATA_TYPE_NAMES: Dict[int, str] = {
 
 E0_SUBCODE_NAMES: Dict[int, str] = {
     0x80: "reset",
+    0xa0: "autofocus",
+    0xb0: "calibrate",
+    0xb4: "ice_setup",
+    0xc1: "frame_select",
     0xd0: "eject",
     0xd1: "load",
-    0xc1: "focus",
-    0xa0: "autofocus",
 }
 
 E1_SUBCODE_NAMES: Dict[int, str] = {
+    0x91: "densitometry",
     0xc1: "get_focus",
+}
+
+# Channel name lookup
+CHANNEL_NAMES: Dict[int, str] = {
+    0: "default",
+    1: "R",
+    2: "G",
+    3: "B",
+    4: "reserved",
+    9: "IR",
+}
+
+# WDB mode names (58-byte capture format, bytes 32-33)
+_WDB_MODE_NAMES: Dict[int, str] = {
+    0x0002: "prescan",
+    0x0005: "preview/main",
+}
+
+# WDB transfer byte names (58-byte capture format, byte 34)
+_WDB_TRANSFER_NAMES: Dict[int, str] = {
+    0x08: "prescan/main",
+    0x0C: "low-res preview",
+}
+
+# WDB film/preview flag names (58-byte capture format, byte 49)
+_WDB_FILM_NAMES: Dict[int, str] = {
+    0x00: "main",
+    0x80: "IR preview",
+    0x81: "prescan/low-res",
 }
 
 
@@ -279,6 +311,88 @@ def load_capture(path: str) -> List[Event]:
 
 
 # ---------------------------------------------------------------------------
+# Decoding helpers
+# ---------------------------------------------------------------------------
+
+
+def _decode_wdb_58(data: bytes) -> Dict[str, Any]:
+    """Decode a 58-byte capture WDB payload."""
+    if len(data) < 58:
+        return {}
+    import struct as _struct
+
+    channel = data[8]
+    ch_name = CHANNEL_NAMES.get(channel, f"ch{channel}")
+
+    x_res = _struct.unpack(">H", data[10:12])[0]
+    y_res = _struct.unpack(">H", data[12:14])[0]
+
+    frame_offset = _struct.unpack(">I", data[18:22])[0]
+    width = _struct.unpack(">I", data[22:26])[0]
+    line_count = _struct.unpack(">H", data[30:32])[0]
+
+    mode = _struct.unpack(">H", data[32:34])[0]
+    mode_name = _WDB_MODE_NAMES.get(mode, f"0x{mode:04x}")
+
+    transfer_byte = data[34]
+    transfer_name = _WDB_TRANSFER_NAMES.get(transfer_byte, f"0x{transfer_byte:02x}")
+
+    film_flag = data[49]
+    film_name = _WDB_FILM_NAMES.get(film_flag, f"0x{film_flag:02x}")
+
+    sub_mode = data[50]
+    exposure = _struct.unpack(">I", data[54:58])[0]
+
+    return {
+        "channel": f"{ch_name}({channel})",
+        "resolution": f"{x_res}x{y_res}",
+        "frame_offset": f"0x{frame_offset:08x}",
+        "width": width,
+        "lines": line_count,
+        "mode": mode_name,
+        "transfer": transfer_name,
+        "film": film_name,
+        "sub_mode": sub_mode,
+        "exposure": f"0x{exposure:08x}",
+    }
+
+
+def _decode_frame_table(data: bytes) -> Dict[str, Any]:
+    """Decode a 52-byte frame-position table (WRITE 0x8f payload)."""
+    if len(data) < 52:
+        return {}
+    import struct as _struct
+
+    entries = []
+    for i in range(3):
+        base = 4 + i * 16
+        y_start = _struct.unpack(">I", data[base:base + 4])[0]
+        x1 = _struct.unpack(">I", data[base + 4:base + 8])[0]
+        y_end = _struct.unpack(">I", data[base + 8:base + 12])[0]
+        x2 = _struct.unpack(">I", data[base + 12:base + 16])[0]
+        entries.append(
+            f"e{i}:y={y_start}/x1=0x{x1:08x}/ye={y_end}"
+        )
+
+    return {"entries": entries}
+
+
+def _decode_channel_list(raw: bytes) -> DecodedInfo:
+    """Decode SHORT_OUT channel list payloads."""
+    channel_names = []
+    for b in raw:
+        name = CHANNEL_NAMES.get(b, str(b))
+        if b == 9:
+            name += "(IR)"
+        channel_names.append(name)
+    return DecodedInfo(
+        cmd_name="SHORT_OUT",
+        cmd_hex=raw.hex(),
+        params={"channels": raw.hex(), "names": channel_names},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Decoding
 # ---------------------------------------------------------------------------
 
@@ -295,10 +409,38 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
     # Large payloads (>10 bytes) are data transfers (LUT, scan params, etc.),
     # not commands. The actual command was sent earlier.
     if len(raw) > 10:
+        params: Dict[str, Any] = {"size": len(raw)}
+
+        # Detect 58-byte WDB payloads (from SCAN commands)
+        if len(raw) == 58:
+            wdb_info = _decode_wdb_58(raw)
+            if wdb_info:
+                params.update(wdb_info)
+                return DecodedInfo(
+                    cmd_name="DATA_OUT(WDB58)",
+                    cmd_hex=f"{len(raw)}B",
+                    params=params,
+                )
+
+        # Detect 52-byte frame table (WRITE 0x8f payload)
+        if len(raw) == 52:
+            ft_info = _decode_frame_table(raw)
+            if ft_info:
+                params.update(ft_info)
+                return DecodedInfo(
+                    cmd_name="DATA_OUT(frame_table)",
+                    cmd_hex=f"{len(raw)}B",
+                    params=params,
+                )
+
+        # Detect 8192-byte LUT payloads
+        if len(raw) == 8192:
+            params["type"] = "LUT"
+
         return DecodedInfo(
             cmd_name="DATA_OUT",
             cmd_hex=f"{len(raw)}B",
-            params={"size": len(raw)},
+            params=params,
         )
 
     if len(raw) >= 6:
@@ -341,6 +483,9 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
             params["datatype"] = f"0x{raw[2]:02x}"
             if len(raw) >= 10:
                 params["length"] = (raw[7] << 16) | (raw[8] << 8) | raw[9]
+                # Flag WRITE 0x8f as frame table
+                if raw[2] == 0x8f:
+                    params["purpose"] = "frame_table"
         elif cmd == 0xe0:
             # VENDOR: subcode in byte 2
             if len(raw) >= 10:
@@ -353,13 +498,32 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
                 sub_name = E1_SUBCODE_NAMES.get(subcode, "unknown")
                 params["subcode"] = f"0x{subcode:02x} ({sub_name})"
         elif cmd == 0x25:
-            # READ_CAPACITY
-            params["channel"] = raw[4]
+            # READ_CAPACITY: channel in byte 1 and byte 5
+            ch = raw[1] if len(raw) > 1 else 0
+            ch_name = CHANNEL_NAMES.get(ch, f"ch{ch}")
+            params["channel"] = f"{ch_name}({ch})"
+            if ch == 9:
+                params["channel"] += " [IR]"
 
         return DecodedInfo(
             cmd_name=name,
             cmd_hex=raw[:min(6, len(raw))].hex(),
             params=params,
+        )
+
+    # Short payloads (2-10 bytes) — could be SHORT_OUT channel lists
+    if len(raw) >= 2:
+        ch_names = [CHANNEL_NAMES.get(b, str(b)) for b in raw]
+        if any(b == 9 for b in raw):
+            return DecodedInfo(
+                cmd_name="SHORT_OUT",
+                cmd_hex=raw.hex(),
+                params={"channels": raw.hex(), "names": ch_names, "has_ir": True},
+            )
+        return DecodedInfo(
+            cmd_name="SHORT_OUT",
+            cmd_hex=raw.hex(),
+            params={"channels": raw.hex(), "names": ch_names},
         )
 
     return DecodedInfo(

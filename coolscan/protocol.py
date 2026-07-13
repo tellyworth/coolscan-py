@@ -56,6 +56,30 @@ class StatusType(Enum):
 
 
 # Data type codes from SANE backend
+# Channel identifiers used in WDB and scan commands
+CHANNEL_RED = 1
+CHANNEL_GREEN = 2
+CHANNEL_BLUE = 3
+CHANNEL_IR = 9
+
+# WDB mode constants (58-byte capture format, bytes 32-33)
+WDB_MODE_PRESCAN = 0x0002
+WDB_MODE_PREVIEW_MAIN = 0x0005
+
+# WDB transfer byte constants (58-byte capture format, byte 34)
+WDB_TRANSFER_PRESCAN_MAIN = 0x08
+WDB_TRANSFER_LOW_RES_PREVIEW = 0x0C
+
+# WDB film/preview flag constants (58-byte capture format, byte 49)
+WDB_FILM_PRESCAN = 0x81
+WDB_FILM_IR_PREVIEW = 0x80
+WDB_FILM_MAIN_SCAN = 0x00
+
+# WDB sub-mode constants (58-byte capture format, byte 50)
+WDB_SUBMODE_PRESCAN_MAIN = 0x01
+WDB_SUBMODE_LOW_RES_96DPI = 0x02
+
+
 class DataType(Enum):
     """Data type codes for READ/SEND commands."""
 
@@ -116,6 +140,14 @@ class WindowDescriptorBlock:
     offset_r: int = 0
     offset_g: int = 0
     offset_b: int = 0
+    # 58-byte capture WDB fields (not present in SANE 117-byte format)
+    channel: int = 1  # Channel: 1=R, 2=G, 3=B, 9=IR
+    frame_offset: int = 0  # Frame/boundary offset from WRITE 0x8f table
+    wdb_mode: int = 0x0005  # 0x0002=prescan, 0x0005=preview/main
+    transfer_byte: int = 0x08  # 0x08=prescan/main, 0x0C=low-res preview
+    status_byte: int = 0x00  # 0x00=normal, 0x03=post-eject ch1
+    film_flag: int = 0x00  # 0x81=prescan/low-res preview, 0x80=IR preview, 0x00=main
+    sub_mode: int = 0x01  # 0x01=prescan/main, 0x02=low-res 96 DPI preview
 
     def to_bytes(self) -> bytes:
         """Convert WDB to bytes."""
@@ -231,6 +263,143 @@ class WindowDescriptorBlock:
 
         # Bytes 54–57: 32-bit big-endian exposure (10ns units)
         wdb.exposure = struct.unpack(">I", data[0x54:0x58])[0]
+
+        return wdb
+
+    def to_bytes_58(self) -> bytes:
+        """Build the 58-byte capture-aligned WDB from dataclass fields.
+
+        Layout (from pcapng-derived plan):
+
+            Bytes  0-3:  ``00000000`` (reserved)
+            Bytes  4-7:  ``00000032`` (window id 50)
+            Byte   8:    channel (1=R, 2=G, 3=B, 9=IR)
+            Byte   9:    ``00`` (reserved)
+            Bytes 10-11: X resolution (big-endian DPI)
+            Bytes 12-13: Y resolution (big-endian DPI)
+            Bytes 14-17: ``00000000`` (reserved)
+            Bytes 18-21: frame/boundary offset (big-endian)
+            Bytes 22-25: image width in pixels (big-endian)
+            Bytes 26-29: ``00000000`` (reserved)
+            Bytes 30-31: line count (big-endian)
+            Bytes 32-33: mode (0x0002=prescan, 0x0005=preview/main)
+            Byte   34:   transfer/mode byte (0x08=prescan/main, 0x0C=low-res)
+            Bytes 35-47: zeros
+            Byte   48:   status/post-eject variation (0x00 normal, 0x03 post-eject)
+            Byte   49:   film/preview flag (0x81=prescan/low-res, 0x80=IR, 0x00=main)
+            Byte   50:   sub-mode (0x01=prescan/main, 0x02=low-res 96 DPI)
+            Bytes 51-53: ``02 02 ff`` (constant tail)
+            Bytes 54-57: exposure (32-bit big-endian, 10ns units)
+
+        Returns:
+            58-byte WDB suitable for SET_WINDOW (SCAN) commands.
+        """
+        data = bytearray(58)
+
+        # Bytes 0-3: reserved zeros
+        # Bytes 4-7: window id (always 0x00000032 = 50)
+        data[4:8] = struct.pack(">I", 0x00000032)
+
+        # Byte 8: channel
+        data[8] = self.channel
+
+        # Byte 9: reserved
+        # Bytes 10-11: X resolution
+        data[10:12] = struct.pack(">H", self.x_resolution)
+
+        # Bytes 12-13: Y resolution
+        data[12:14] = struct.pack(">H", self.y_resolution)
+
+        # Bytes 14-17: reserved zeros
+
+        # Bytes 18-21: frame/boundary offset
+        data[18:22] = struct.pack(">I", self.frame_offset)
+
+        # Bytes 22-25: image width in pixels
+        data[22:26] = struct.pack(">I", self.width)
+
+        # Bytes 26-29: reserved zeros
+
+        # Bytes 30-31: line count
+        data[30:32] = struct.pack(">H", self.length)
+
+        # Bytes 32-33: mode
+        data[32:34] = struct.pack(">H", self.wdb_mode)
+
+        # Byte 34: transfer/mode byte
+        data[34] = self.transfer_byte
+
+        # Bytes 35-47: zeros
+
+        # Byte 48: status/post-eject variation
+        data[48] = self.status_byte
+
+        # Byte 49: film/preview flag
+        data[49] = self.film_flag
+
+        # Byte 50: sub-mode
+        data[50] = self.sub_mode
+
+        # Bytes 51-53: constant tail
+        data[51] = 0x02
+        data[52] = 0x02
+        data[53] = 0xFF
+
+        # Bytes 54-57: exposure (32-bit big-endian)
+        data[54:58] = struct.pack(">I", self.exposure)
+
+        return bytes(data)
+
+    @classmethod
+    def from_bytes_58(cls, data: bytes) -> "WindowDescriptorBlock":
+        """Parse a 58-byte capture-aligned WDB into a dataclass instance.
+
+        Args:
+            data: 58 bytes from a SET_WINDOW/SCAN command payload.
+
+        Returns:
+            WindowDescriptorBlock with fields populated from the 58-byte layout.
+        """
+        if len(data) < 58:
+            raise ValueError(f"WDB58 data too short: {len(data)} bytes")
+
+        wdb = cls()
+
+        # Byte 8: channel
+        wdb.channel = data[8]
+
+        # Bytes 10-11: X resolution
+        wdb.x_resolution = struct.unpack(">H", data[10:12])[0]
+
+        # Bytes 12-13: Y resolution
+        wdb.y_resolution = struct.unpack(">H", data[12:14])[0]
+
+        # Bytes 18-21: frame/boundary offset
+        wdb.frame_offset = struct.unpack(">I", data[18:22])[0]
+
+        # Bytes 22-25: image width
+        wdb.width = struct.unpack(">I", data[22:26])[0]
+
+        # Bytes 30-31: line count
+        wdb.length = struct.unpack(">H", data[30:32])[0]
+
+        # Bytes 32-33: mode
+        wdb.wdb_mode = struct.unpack(">H", data[32:34])[0]
+
+        # Byte 34: transfer/mode byte
+        wdb.transfer_byte = data[34]
+
+        # Byte 48: status/post-eject variation
+        wdb.status_byte = data[48]
+
+        # Byte 49: film/preview flag
+        wdb.film_flag = data[49]
+
+        # Byte 50: sub-mode
+        wdb.sub_mode = data[50]
+
+        # Bytes 54-57: exposure
+        wdb.exposure = struct.unpack(">I", data[54:58])[0]
 
         return wdb
 
@@ -3670,6 +3839,167 @@ class CoolscanProtocol:
 
         return self._execute_command()
 
+    # ------------------------------------------------------------------
+    # VENDOR_E0 command family (10-byte CDB + 9-byte OUT + EXECUTE)
+    # ------------------------------------------------------------------
+
+    @sends(0xe0, 0xc1)
+    def vendor_e0(self, subcode: int, data: bytes) -> bool:
+        """Generic VENDOR_E0 command: send CDB, 9-byte data, EXECUTE.
+
+        Args:
+            subcode: Subcommand byte (byte 2 of CDB).
+            data: 9-byte payload sent via bulk OUT.
+
+        Returns:
+            True if both the command and execute succeed.
+        """
+        cmd = bytes([0xE0, 0x00, subcode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00])
+        if len(data) != 9:
+            raise ValueError(f"vendor_e0 requires 9-byte data, got {len(data)}")
+        _, status = self._issue_command(cmd, data_out=data)
+        if status != StatusType.READY:
+            return False
+        return self._execute_command()
+
+    @sends(0xe0, 0xc1)
+    def vendor_e0_b4(self, data: Optional[bytes] = None) -> bool:
+        """ICE/densitometry setup (VENDOR_E0 subcode 0xb4).
+
+        Default payload matches the initial-prescan value from captures:
+        ``0000000e1000000001``.  Pass a different 9-byte payload for
+        post-eject or other variants.
+
+        Args:
+            data: 9-byte payload (default: initial prescan value).
+
+        Returns:
+            True if both the command and execute succeed.
+        """
+        if data is None:
+            data = bytes.fromhex("0000000e1000000001")
+        return self.vendor_e0(0xB4, data)
+
+    @sends(0xe0, 0xc1)
+    def vendor_e0_b0(self) -> bool:
+        """Calibrate (VENDOR_E0 subcode 0xb0).
+
+        Seen in batch-neg capture. Sends all-zero 9-byte payload.
+
+        Returns:
+            True if both the command and execute succeed.
+        """
+        return self.vendor_e0(0xB0, b"\x00" * 9)
+
+    @sends(0xe0, 0xc1)
+    def vendor_e0_a0(self, position: int = 0) -> bool:
+        """Autofocus (VENDOR_E0 subcode 0xa0).
+
+        Builds the 9-byte payload with the carriage position in bytes 7-8
+        (big-endian).  Bytes 3-4 are fixed at ``05 9b``.
+
+        The position encodes the Y-axis carriage position for each image
+        in the carrier (see plan autofocus-position-tracking data).
+
+        Args:
+            position: Carriage Y position (0–65535).
+
+        Returns:
+            True if both the command and execute succeed.
+        """
+        pos_bytes = struct.pack(">H", position)
+        # Payload: 00 00 00 00 05 9b 00 00 <pos_hi> <pos_lo>
+        # That's 10 bytes, but we need exactly 9.
+        # The capture shows: 00 00 00 05 9b 00 00 XX YY (9 bytes)
+        # Actually the plan says bytes 3-4 are 05 9b, position in 7-8.
+        # Layout: [0][1][2][3][4][5][6][7][8]
+        #        00  00  00  05  9b  00  00  XX  YY
+        data = bytes([0x00, 0x00, 0x00, 0x05, 0x9b, 0x00, 0x00]) + pos_bytes
+        return self.vendor_e0(0xA0, data)
+
+    @sends(0xe0, 0xc1)
+    def vendor_e0_c1(self, frame_offset: int = 0) -> bool:
+        """Frame select (VENDOR_E0 subcode 0xc1).
+
+        Positions the carriage for selective batch scanning.
+        The offset goes in byte 5 of the 9-byte payload.
+        The offset is a single byte (0-255) in the capture-derived format.
+
+        Args:
+            frame_offset: Single-byte frame offset (0-255).
+
+        Returns:
+            True if both the command and execute succeed.
+
+        Raises:
+            ValueError: If frame_offset is outside 0-255.
+        """
+        if not 0 <= frame_offset <= 255:
+            raise ValueError(f"frame_offset must be 0-255, got {frame_offset}")
+        data = bytes([0x00, 0x00, 0x00, 0x00, 0x00, frame_offset, 0x00, 0x00, 0x00])
+        return self.vendor_e0(0xC1, data)
+
+    @sends(0xe0, 0xc1)
+    def vendor_e0_d0(self, data: Optional[bytes] = None) -> bool:
+        """Eject medium (VENDOR_E0 subcode 0xd0).
+
+        Accepts an optional 9-byte payload.  Defaults to the most common
+        variant from captures: ``000000001000000000``.
+
+        Args:
+            data: 9-byte payload (default: common eject variant).
+
+        Returns:
+            True if both the command and execute succeed.
+        """
+        if data is None:
+            data = bytes.fromhex("000000001000000000")
+        return self.vendor_e0(0xD0, data)
+
+    # ------------------------------------------------------------------
+    # VENDOR_E1 command family (10-byte CDB, IN response, no OUT data)
+    # ------------------------------------------------------------------
+
+    @sends(0xe1)
+    def vendor_e1(self, subcode: int) -> Optional[bytes]:
+        """Generic VENDOR_E1 command: send CDB, read 9-byte IN response.
+
+        Args:
+            subcode: Subcommand byte (byte 2 of CDB).
+
+        Returns:
+            9-byte response, or None on failure.
+        """
+        cmd = bytes([0xE1, 0x00, subcode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00])
+        data, status = self._issue_command(cmd, data_in_length=9)
+        if status != StatusType.READY or len(data) < 9:
+            return None
+        return data
+
+    @sends(0xe1)
+    def vendor_e1_c1(self) -> Optional[bytes]:
+        """Get focus (VENDOR_E1 subcode 0xc1).
+
+        Returns the full 9-byte focus response from the scanner.
+
+        Returns:
+            9-byte response, or None on failure.
+        """
+        return self.vendor_e1(0xC1)
+
+    @sends(0xe1)
+    def vendor_e1_91(self) -> Optional[bytes]:
+        """Densitometry/status gate (VENDOR_E1 subcode 0x91).
+
+        Seen in single-bw, single-negs, batch-neg, batch-session captures.
+        Always returns ``000000000100000000`` in captures, suggesting a
+        status or capability check.
+
+        Returns:
+            9-byte response, or None on failure.
+        """
+        return self.vendor_e1(0x91)
+
     def _drain_buffered_scan_data(self) -> int:
         """Drain any residual image data buffered in the scanner.
 
@@ -4909,6 +5239,249 @@ class CoolscanProtocol:
         print("✅ Batch scan complete")
         return True
 
+    def selective_batch_scan(
+        self,
+        frame_positions: List[int],
+        scan_frames: Optional[List[int]] = None,
+        params: Optional[Any] = None,
+        timeout: int = 1200,
+    ) -> bool:
+        """Selective batch scan: preview all frames, scan only selected ones.
+
+        Matches the selective scanning workflow observed in ``ls40-batch-session.pcapng``:
+
+          1. Initial prescan (already done before calling this method)
+          2. Per-frame loop for each position in ``frame_positions``:
+              a. ``vendor_e0_a0(position)`` — autofocus at frame position
+              b. ``vendor_e1_c1()`` — read focus result
+              c. Preview scan with IR (channels 9,1,2,3)
+              d. LUT upload for IR+RGB (4 channels)
+              e. ``start_scan(BATCH)`` + short OUT (09010203)
+              f. ``read_capacity`` for channels 9,1,2,3
+              g. Read preview image data
+          3. For frames in ``scan_frames`` (subset of positions):
+              a. ``vendor_e0_c1(frame_offset)`` — position carriage
+              b. Main scan RGB (channels 1,2,3)
+              c. LUT upload for RGB (3 channels)
+              d. ``start_scan()`` + short OUT (010203)
+              e. ``read_capacity`` for channels 1,2,3
+              f. Read main scan image data
+          4. ``vendor_e0_d0()`` — eject
+          5. TUR polling
+          6. ``vendor_e0_b4(post_eject)`` — post-eject ICE setup
+          7. Post-eject prescan
+
+        Args:
+            frame_positions: List of carriage Y positions for each frame
+                (from autofocus tracking, ~4300 units apart).
+            scan_frames: Optional list of indices into ``frame_positions``
+                indicating which frames to main-scan.  If None, all frames
+                are main-scanned (non-selective mode).
+            params: Optional scan parameters for setup frames.
+            timeout: Total timeout budget in seconds.
+
+        Returns:
+            True if the scan completed successfully.
+        """
+        if scan_frames is None:
+            scan_frames = list(range(len(frame_positions)))
+
+        print(
+            f"Starting selective batch scan: "
+            f"{len(frame_positions)} frames, "
+            f"{len(scan_frames)} to main-scan"
+        )
+
+        deadline = time.time() + timeout
+
+        # Phase 1: Preview all frames
+        for i, pos in enumerate(frame_positions):
+            remaining = max(1, int(deadline - time.time()))
+            if remaining <= 0:
+                print(f"  ❌ Selective batch timeout before frame {i + 1}")
+                return False
+
+            print(f"  Preview frame {i + 1}/{len(frame_positions)} (pos=0x{pos:04x})...")
+
+            # a. Autofocus
+            if not self.vendor_e0_a0(pos):
+                print(f"  ❌ Autofocus failed for frame {i + 1}")
+                return False
+
+            # b. Read focus result
+            focus_data = self.vendor_e1_c1()
+            if focus_data and self.verbose:
+                print(f"    Focus result: {focus_data.hex()}")
+
+            # c-g. Preview scan (IR+RGB, 4 channels)
+            if not self._preview_scan_frame(include_ir=True):
+                print(f"  ❌ Preview scan failed for frame {i + 1}")
+                return False
+
+        # Phase 2: Main scan selected frames
+        for idx in scan_frames:
+            if idx >= len(frame_positions):
+                print(f"  ⚠️  scan_frames index {idx} out of range, skipping")
+                continue
+
+            remaining = max(1, int(deadline - time.time()))
+            if remaining <= 0:
+                print(f"  ❌ Selective batch timeout before main scan frame {idx + 1}")
+                return False
+
+            pos = frame_positions[idx]
+            print(f"  Main scan frame {idx + 1} (pos=0x{pos:04x})...")
+
+            # a. Frame select (position carriage)
+            if not self.vendor_e0_c1(pos):
+                print(f"  ❌ Frame select failed for frame {idx + 1}")
+                return False
+
+            # b-f. Main scan (RGB only, 3 channels)
+            if not self._main_scan_frame():
+                print(f"  ❌ Main scan failed for frame {idx + 1}")
+                return False
+
+        # Phase 3: Eject and post-eject
+        print("  Ejecting carrier...")
+        if not self.vendor_e0_d0():
+            print("  ⚠️  Eject command failed")
+
+        # TUR polling after eject
+        for _ in range(3):
+            try:
+                self.test_unit_ready()
+            except Exception:
+                pass
+            time.sleep(1.0)
+
+        # Post-eject ICE setup
+        print("  Post-eject ICE setup...")
+        post_eject_data = bytes.fromhex("000000025800000001")
+        if not self.vendor_e0_b4(post_eject_data):
+            print("  ⚠️  Post-eject ICE setup failed")
+
+        print("✅ Selective batch scan complete")
+        return True
+
+    def _preview_scan_frame(
+        self,
+        include_ir: bool = True,
+    ) -> bool:
+        """Run a preview scan (IR+RGB or RGB only).
+
+        Args:
+            include_ir: If True, scan 4 channels (IR, R, G, B).
+
+        Returns:
+            True if the preview scan completed successfully.
+        """
+        channels = [9, 1, 2, 3] if include_ir else [1, 2, 3]
+        num_channels = len(channels)
+
+        # Set scan windows for each channel
+        for ch in channels:
+            if not self.set_scan_window(ch, scan_type="batch"):
+                return False
+
+        # Upload LUTs
+        if not self.upload_identity_luts(include_ir=include_ir):
+            return False
+
+        # Start scan
+        if not self.start_scan(scan_type=ScanType.BATCH):
+            return False
+
+        # Send channel list (SHORT_OUT)
+        ch_data = bytes(channels)
+        if not self._send_short_out(ch_data):
+            return False
+
+        # Read capacity for each channel
+        for ch in channels:
+            self.read_capacity(window_id=ch)
+
+        # Read preview image data
+        # The preview is smaller than full res; read until short read
+        data = bytearray()
+        for _ in range(50):
+            chunk = self.read_scan_data(0x3F480, DataType.IMAGE_DATA)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(chunk) < 0x3F480:
+                break
+
+        if self.verbose:
+            print(f"    Preview data: {len(data)} bytes")
+
+        return True
+
+    def _main_scan_frame(self) -> bool:
+        """Run a main scan (RGB only, 3 channels).
+
+        Returns:
+            True if the main scan completed successfully.
+        """
+        channels = [1, 2, 3]
+
+        # Set scan windows
+        for ch in channels:
+            if not self.set_scan_window(ch, scan_type="batch"):
+                return False
+
+        # Upload LUTs
+        if not self.upload_identity_luts(include_ir=False):
+            return False
+
+        # Start scan
+        if not self.start_scan():
+            return False
+
+        # Send channel list (SHORT_OUT)
+        ch_data = bytes(channels)
+        if not self._send_short_out(ch_data):
+            return False
+
+        # Read capacity for each channel
+        for ch in channels:
+            self.read_capacity(window_id=ch)
+
+        # Read main scan image data
+        data = bytearray()
+        for _ in range(50):
+            chunk = self.read_scan_data(0x3F480, DataType.IMAGE_DATA)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(chunk) < 0x3F480:
+                break
+
+        if self.verbose:
+            print(f"    Main scan data: {len(data)} bytes")
+
+        return True
+
+    def _send_short_out(self, data: bytes) -> bool:
+        """Send a SHORT_OUT payload (channel list, etc.).
+
+        In the capture, SHORT_OUT payloads are sent as small bulk OUT
+        transfers (2-4 bytes) after START_STOP_UNIT commands.
+
+        Args:
+            data: The bytes to send (typically channel list like 09010203).
+
+        Returns:
+            True if the send succeeded.
+        """
+        try:
+            self._usb_write_bulk(data)
+            return True
+        except Exception as e:
+            if self.verbose:
+                print(f"    SHORT_OUT send failed: {e}")
+            return False
+
     def close(self):
         """Close the connection to the scanner."""
         # Disable USB capture if active
@@ -4919,18 +5492,23 @@ class CoolscanProtocol:
             return
 
         if self.usb_device:
+            dev = self.usb_device
+            # Break the reference immediately so that pyusb's Device finalizer
+            # cannot run later (e.g. during interpreter shutdown) and attempt a
+            # second libusb_unref_device on macOS.
+            self.usb_device = None
             try:
                 # Release interface before disposing
                 try:
-                    usb.util.release_interface(self.usb_device, 0)
+                    usb.util.release_interface(dev, 0)
                 except (usb.core.USBError, AttributeError):
                     # Interface might not be claimed, that's OK
                     pass
 
                 # Reattach kernel driver if it was detached (mostly for Linux)
                 try:
-                    if hasattr(self.usb_device, "attach_kernel_driver"):
-                        self.usb_device.attach_kernel_driver(0)
+                    if hasattr(dev, "attach_kernel_driver"):
+                        dev.attach_kernel_driver(0)
                 except (usb.core.USBError, NotImplementedError, AttributeError):
                     # Not supported on macOS, that's OK
                     pass
@@ -4939,5 +5517,10 @@ class CoolscanProtocol:
                 # Ignore errors during cleanup
                 pass
             finally:
-                usb.util.dispose_resources(self.usb_device)
+                try:
+                    usb.util.dispose_resources(dev)
+                except Exception:
+                    # Ignore cleanup errors; on macOS this can race with
+                    # process shutdown.
+                    pass
         # TODO: Close SCSI connection if needed
