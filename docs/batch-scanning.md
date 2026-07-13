@@ -31,32 +31,50 @@ Batch mode introduces two additional scan types beyond the single-scan types
 | `batch` | 290 DPI | 9, 1, 2, 3 | Initial 290 DPI configuration after prescan |
 | `batch_between` | 290 DPI | 1, 2, 3 | Lightweight reconfig between full-res frames |
 
-Both use `scan_kind=0x02`, `scan_mode=0x02`, `image_comp=0x05` (RGB full),
+Both use `scan_kind=0x01` (normal), `scan_mode=0x02`, `image_comp=0x05` (RGB full),
 `bpp=0x0c` (12-bit). Y offset and height are parameterized per frame.
 
 ### WDB Byte 50-51 Clarification
 
-From the batch capture, both `batch` and `single_bw` types have byte 50 = 0x02
-and byte 51 = 0x02. The prescan type has byte 50 = 0x01. This suggests:
-- Byte 50 (scan_kind): 0x01 = prescan, 0x02 = full capture (not "normal" as previously documented)
-- Byte 51 (scan_mode): 0x02 in all observed cases (may not distinguish single vs multi on wire)
+Byte 50 (scan_kind) and byte 51 (scan_mode) are consistent across all 5 analyzed
+captures (single-bw, batch, batch-neg, single-negs, batch-session):
+
+- **Byte 50 (scan_kind)**: `0x01` = normal/full-scan, `0x02` = prescan
+- **Byte 51 (scan_mode)**: `0x02` in all observed cases
+
+Prescan WDBs (96 DPI) always have byte 50 = `0x02`. All full-scan WDBs
+(290 DPI setup, 2900 DPI capture) have byte 50 = `0x01`. This is consistent
+across single-scan and batch mode. The `docs/unified-protocol-spec.md` mapping
+(0x01=normal, 0x02=prescan) is confirmed correct.
+
+**Initial WDBs sent during init**: The scanner sends 4 WDBs (windows 1/2/3/9) at
+2900 DPI with `scan_kind=0x01` during initialization, before prescan. These appear
+to configure the scanner's full-scan parameters in advance. They are NOT prescan
+WDBs -- prescan WDBs follow later at 96 DPI with `scan_kind=0x02`.
 
 ## CONTROL_FRAME Payload (0x8f, 52 bytes)
 
 The CONTROL_FRAME command (`2a 00 8f 00 00 03 00 00 34 00`) writes frame boundary
-information. Batch mode sends it twice: once during initialization (after e0/b4 reset),
-once after prescan. Single-scan mode sends it once (after prescan).
+information. Sent multiple times per session:
+
+- **single-bw**: 1 set (after prescan)
+- **batch**: 2 sets (init placeholder + post-prescan)
+- **batch-neg**: 5 sets (4 placeholder + 1 real)
+- **single-negs**: 20 sets (one per slide/adjustment)
+- **batch-session**: 2 sets (init placeholder + post-prescan)
 
 ### Header (4 bytes)
 
 ```
 Bytes 0-1: 0x0032 (50) -- meaning unclear, not payload length (actual = 52)
-Byte  2:   0x06     -- number of frames (6 in both single and batch captures)
+Byte  2:   0x06     -- scanner's max frame capacity (from INQUIRY page 0xc1)
 Byte  3:   0x00     -- purpose unknown
 ```
 
-**Note:** Both single-BW and batch payloads have byte 2 = 0x06, but single-BW
-scans only 1 image and batch scans 5-6. The meaning of this field needs clarification.
+Byte 2 is the scanner's maximum frame capacity (6 for LS-40 ED), NOT the number of
+entries in the payload. The payload always contains exactly 3 entries (48 bytes of
+entry data + 4-byte header = 52 bytes total). This value is constant across all
+captures regardless of how many frames are actually scanned.
 
 ### Per-Frame Entries (16 bytes each, 3 entries)
 
@@ -83,9 +101,16 @@ Bytes 12-15: X-related field (pattern: frame_index * 8 + constant, meaning uncle
 | 2 | 9280 | 13550 | 4270 |
 | 3 | 17930 | 22200 | 4270 |
 
-The Y positions define 3 scan regions, not 6. The 6 full-res segments in the batch
-capture use Y offsets that step through the strip at regular intervals. The relationship
-between the 3 CONTROL_FRAME entries and 6 actual scan segments is not yet understood.
+The Y positions define 3 scan regions. In batch mode with 6 frames, each region covers
+2 frames (region 1: frames 0-1, region 2: frames 2-3, region 3: frames 4-5). The
+scanner steps through these regions sequentially, scanning each frame within a region
+before moving to the next.
+
+CONTROL_FRAME is sent multiple times per session with updated boundaries. The first
+transmission (during init) often has placeholder values (y_start=0, y_end=4332).
+Subsequent transmissions refine boundaries based on prescan analysis. In multi-slide
+captures (single-negs), CONTROL_FRAME is sent anew for each slide with adjusted y_start
+values while y_end remains constant.
 
 **X-related fields** (bytes 4-7 and 12-15) follow a pattern of `frame_index * 8 + constant`
 but the meaning is unknown. Values are large (65546-2.6M for single-BW, 6-2.6M for batch)
@@ -325,12 +350,13 @@ autofocus call.
 
 ## Open Questions
 
-1. **CONTROL_FRAME entry count vs actual segments**: 3 entries define 3 regions, but
-   6 segments are scanned. Does each region get scanned twice?
-2. **Byte 2 of CONTROL_FRAME header**: Value is 6 in both single and batch, but single
-   scans 1 image and batch scans 5-6. What does this field mean?
-3. **X-related fields in per-frame entries**: Pattern is `frame_index * 8 + constant` but
+~~1. **CONTROL_FRAME entry count vs actual segments**: 3 entries define 3 regions, but~~
+~~   6 segments are scanned. [Resolved: each region covers 2 frames.]~~
+2. **X-related fields in per-frame entries**: Pattern is `frame_index * 8 + constant` but
    meaning is unknown.
+3. **Why multiple CONTROL_FRAME transmissions**: The scanner accepts the same CONTROL_FRAME
+   payload multiple times with varying boundaries. Is this required for the firmware state
+   machine, or does the scanner use only the last transmission?
 4. **Dynamic frame detection**: Fixed Y spacing suggests no frame border detection from
    prescan data, but this needs confirmation from SANE source analysis.
 5. **Purpose of Stage A/B (290 DPI intermediate scans)**: Every segment (except the

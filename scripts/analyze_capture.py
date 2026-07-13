@@ -5,13 +5,14 @@ Parses text-format or pcapng capture files, decodes each USB transfer into
 named commands with parameters, groups events into protocol phases, detects
 errors and issues, and outputs a human-readable summary or JSON.
 
-Supports diffing two captures and annotating commands against protocol.py.
+Supports diffing two captures, structural extraction of WDBs and control
+frames, generic event filtering, and protocol annotation.
 """
 
 import argparse
 import json
 import sys
-import hashlib
+import struct
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -201,6 +202,60 @@ class PhaseGroup:
     issues: List[str] = field(default_factory=list)
 
 
+@dataclass
+class WdbRow:
+    """Decoded Window Descriptor Block row."""
+    line_num: int
+    timestamp: float
+    window_id: int
+    x_res: int
+    y_res: int
+    offset_x: int
+    offset_y: int
+    size_x: int
+    size_y: int
+    scan_kind: str
+    exposure: int
+    raw_hex: str
+
+
+@dataclass
+class CtrlFrameEntry:
+    """Single frame position entry within a CONTROL_FRAME payload."""
+    entry_index: int
+    y_start: int
+    y_end: int
+    height: int
+
+
+@dataclass
+class CtrlFrameRow:
+    """Decoded CONTROL_FRAME row."""
+    line_num: int
+    timestamp: float
+    entry_index: int
+    frame_index: int
+    y_start: int
+    y_end: int
+    height: int
+    raw_hex: str = ""
+
+
+@dataclass
+class ReadCapRow:
+    """Decoded READ_CAPACITY response row."""
+    line_num: int
+    timestamp: float
+    window_id: int
+    x_res: int
+    y_res: int
+    offset_x: int
+    offset_y: int
+    size_x: int
+    size_y: int
+    raw_hex: str
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -267,7 +322,6 @@ def parse_pcapng(path: str) -> List[Event]:
         packets = _extract_packets(file_path)
         if not packets:
             return []
-        # packets: (frame_num, direction, endpoint, data, timestamp)
         events: List[Event] = []
         for idx, (frame_num, direction, endpoint, data, ts) in enumerate(packets):
             events.append(Event(
@@ -279,7 +333,6 @@ def parse_pcapng(path: str) -> List[Event]:
             ))
         return events
     except ImportError:
-        # Fallback: try parse_pcapng.extract_usb_traffic (no timestamps)
         try:
             from parse_pcapng import extract_usb_traffic
             packets = extract_usb_traffic(str(file_path))
@@ -402,12 +455,9 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
     if not raw:
         return DecodedInfo(cmd_name="EMPTY", cmd_hex="")
 
-    # 1-byte phase check
     if len(raw) == 1 and raw[0] == 0xd0:
         return DecodedInfo(cmd_name="PHASE_CHECK", cmd_hex="d0")
 
-    # Large payloads (>10 bytes) are data transfers (LUT, scan params, etc.),
-    # not commands. The actual command was sent earlier.
     if len(raw) > 10:
         params: Dict[str, Any] = {"size": len(raw)}
 
@@ -449,37 +499,29 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
         params: Dict[str, Any] = {}
 
         if cmd in (0x00, 0x16, 0x17, 0xc1):
-            # Simple 6-byte commands, no interesting params
             pass
         elif cmd == 0x12:
-            # INQUIRY: 12 00/01 page alloc control
             params["page"] = f"0x{raw[1]:02x}"
             params["param2"] = f"0x{raw[2]:02x}"
             params["alloc_len"] = raw[4]
             params["control"] = f"0x{raw[5]:02x}"
         elif cmd == 0x15:
-            # MODE_SELECT
             params["page"] = f"0x{raw[1]:02x}"
             params["alloc_len"] = raw[4]
         elif cmd == 0x1a:
-            # MODE_SENSE
             params["page"] = f"0x{raw[2]:02x}"
             params["alloc_len"] = raw[4]
         elif cmd == 0x1b:
-            # START_STOP (also used for color sequence)
             params["num_colors"] = raw[4]
         elif cmd == 0x24:
-            # SCAN (10 bytes): 24 00 00 00 00 00 00 00 3a XX
             if len(raw) >= 10:
                 params["data_len"] = raw[8]
                 params["scan_type"] = f"0x{raw[9]:02x}"
         elif cmd == 0x28:
-            # READ(10): 28 00 XX 00 ... len ...
             params["datatype"] = f"0x{raw[2]:02x}"
             if len(raw) >= 10:
                 params["length"] = (raw[7] << 16) | (raw[8] << 8) | raw[9]
         elif cmd == 0x2a:
-            # WRITE(10): 2a 00 XX 00 ...
             params["datatype"] = f"0x{raw[2]:02x}"
             if len(raw) >= 10:
                 params["length"] = (raw[7] << 16) | (raw[8] << 8) | raw[9]
@@ -487,7 +529,6 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
                 if raw[2] == 0x8f:
                     params["purpose"] = "frame_table"
         elif cmd == 0xe0:
-            # VENDOR: subcode in byte 2
             if len(raw) >= 10:
                 subcode = raw[2]
                 sub_name = E0_SUBCODE_NAMES.get(subcode, "unknown")
@@ -537,7 +578,6 @@ def decode_in_response(raw: bytes) -> DecodedInfo:
     if not raw:
         return DecodedInfo(cmd_name="EMPTY", cmd_hex="")
 
-    # 1 byte: phase check response
     if len(raw) == 1:
         phase_name = PHASE_TYPE_NAMES.get(
             raw[0], f"unknown_0x{raw[0]:02x}"
@@ -548,7 +588,6 @@ def decode_in_response(raw: bytes) -> DecodedInfo:
             params={"phase": phase_name},
         )
 
-    # 8 bytes: status response
     if len(raw) == 8:
         sense_key = raw[1] & 0x0F
         sense_name = SENSE_KEY_NAMES.get(
@@ -556,7 +595,6 @@ def decode_in_response(raw: bytes) -> DecodedInfo:
         )
         is_error = sense_key not in (0x00, 0x01, 0x09)
 
-        # Special: vendor REISSUE
         if sense_key == 0x09 and raw[2] == 0x80 and raw[3] == 0x06:
             aux = raw[4] if len(raw) > 4 else 0
             if aux in (0x00, 0x01):
@@ -582,7 +620,6 @@ def decode_in_response(raw: bytes) -> DecodedInfo:
             error_detail=error_detail,
         )
 
-    # >= 4 bytes starting with 0x06: data response (inquiry page, LUT header, etc.)
     if len(raw) >= 4 and raw[0] == 0x06:
         params: Dict[str, Any] = {
             "page": f"0x{raw[1]:02x}",
@@ -602,7 +639,6 @@ def decode_in_response(raw: bytes) -> DecodedInfo:
             params=params,
         )
 
-    # Large data block (image data, LUT data, etc.)
     return DecodedInfo(
         cmd_name="DATA_BLOCK",
         cmd_hex=f"{len(raw)}B",
@@ -616,16 +652,7 @@ def decode_in_response(raw: bytes) -> DecodedInfo:
 
 
 def detect_phases(events: List[Event]) -> List[Event]:
-    """Walk through events and assign phase labels.
-
-    Phase transitions:
-    - INIT → READY_WAIT: 3+ consecutive TUR commands
-    - INIT/READY_WAIT → CONFIG: MODE_SELECT, WRITE, or START_STOP
-    - CONFIG/READY_WAIT → PRESCAN: first SCAN command
-    - PRESCAN → SCAN: second SCAN command (after prescan data reads)
-    - SCAN/CONFIG → EJECT: VENDOR e0/d0 eject subcode
-    - EJECT → INIT: VENDOR e0/80 reset subcode
-    """
+    """Walk through events and assign phase labels."""
     current_phase = Phase.INIT
     tur_count = 0
     seen_scan = False
@@ -642,16 +669,13 @@ def detect_phases(events: List[Event]) -> List[Event]:
 
         first_byte = ev.raw[0]
 
-        # Track TUR sequences
         if first_byte == 0x00:
             tur_count += 1
             if tur_count >= 3 and current_phase == Phase.INIT:
                 current_phase = Phase.READY_WAIT
         elif first_byte == 0x12:
-            # INQUIRY is part of init, don't transition
             tur_count = 0
         elif first_byte == 0x24:
-            # SCAN command
             tur_count = 0
             if not seen_scan:
                 current_phase = Phase.PRESCAN
@@ -662,7 +686,6 @@ def detect_phases(events: List[Event]) -> List[Event]:
         elif first_byte == 0x28 and current_phase in (Phase.PRESCAN, Phase.SCAN):
             scan_data_read = True
         elif first_byte in (0x2a, 0x15, 0x1b):
-            # MODE_SELECT, WRITE, START_STOP → CONFIG
             if current_phase in (Phase.INIT, Phase.READY_WAIT):
                 current_phase = Phase.CONFIG
             tur_count = 0
@@ -676,7 +699,6 @@ def detect_phases(events: List[Event]) -> List[Event]:
                 current_phase = Phase.EJECT
                 tur_count = 0
         elif first_byte in (0x16, 0x17, 0x1a):
-            # RESERVE, RELEASE, MODE_SENSE stay in INIT or transition READY_WAIT→CONFIG
             if current_phase == Phase.INIT:
                 tur_count = 0
             elif current_phase == Phase.READY_WAIT:
@@ -696,28 +718,18 @@ def detect_phases(events: List[Event]) -> List[Event]:
 
 
 def detect_issues(events: List[Event]) -> List[Issue]:
-    """Detect protocol errors and anomalies.
-
-    Context-aware: NOT_READY after TUR is expected (scanner becoming ready).
-    UNIT_ATTENTION after reset/inquiry is normal. Short data payloads after
-    READ commands are legitimate protocol behavior.
-    """
+    """Detect protocol errors and anomalies."""
     issues: List[Issue] = []
-
-    # Build a lookup: for each IN event, find the preceding OUT command
-    last_out_cmd = None  # first byte of last OUT command (6+ byte cmds only)
+    last_out_cmd = None
 
     for ev in events:
         if not ev.decoded:
             continue
 
         if ev.direction == "out":
-            # Track the last significant OUT command (skip phase checks and
-            # short data payloads which are arguments to preceding commands)
             if ev.raw and ev.raw[0] != 0xd0 and len(ev.raw) >= 6:
                 last_out_cmd = ev.raw[0]
 
-            # Unknown command codes (only for actual commands, not data payloads)
             if "UNKNOWN" in ev.decoded.cmd_name and ev.decoded.cmd_name != "DATA_OUT":
                 issues.append(Issue(
                     event_index=ev.index,
@@ -725,19 +737,15 @@ def detect_issues(events: List[Event]) -> List[Issue]:
                     message=f"Unknown command 0x{ev.raw[0]:02x} at event {ev.index}",
                 ))
         else:
-            # IN response - context-aware error detection
             if ev.decoded.is_error and ev.decoded.params:
                 sense = ev.decoded.params.get("sense", "")
-                asc = ev.decoded.params.get("asc", "")
-                ascq = ev.decoded.params.get("ascq", "")
-                # NOT_READY (becoming ready, ASC=04/ASCQ=01) after TUR is expected
-                if (sense == SenseKey.NOT_READY
-                        and last_out_cmd == 0x00
-                        and asc == "0x04" and ascq == "0x01"):
-                    continue
-                # UNIT_ATTENTION after reset/inquiry/TUR is normal
+
+                if sense == SenseKey.NOT_READY:
+                    if last_out_cmd == 0x00:
+                        continue
+
                 if sense == SenseKey.UNIT_ATTENTION:
-                    if last_out_cmd in (0xe0, 0x12, 0x00, None):
+                    if last_out_cmd in (0x12, 0x00, 0xe0):
                         continue
 
                 issues.append(Issue(
@@ -760,7 +768,7 @@ def build_command_signature(ev: Event) -> Optional[str]:
     if ev.direction != "out" or not ev.raw:
         return None
     if ev.raw[0] == 0x00:
-        return "TUR"  # Normalize TUR for diff
+        return "TUR"
     return ev.raw[:min(10, len(ev.raw))].hex()
 
 
@@ -769,7 +777,6 @@ def diff_events(events_a: List[Event], events_b: List[Event]) -> List[Dict[str, 
     sigs_a = [(ev, build_command_signature(ev)) for ev in events_a]
     sigs_b = [(ev, build_command_signature(ev)) for ev in events_b]
 
-    # Filter to OUT commands with signatures
     cmds_a = [(ev, sig) for ev, sig in sigs_a if sig and sig != "TUR"]
     cmds_b = [(ev, sig) for ev, sig in sigs_b if sig and sig != "TUR"]
 
@@ -780,7 +787,6 @@ def diff_events(events_a: List[Event], events_b: List[Event]) -> List[Dict[str, 
         ev_b, sig_b = cmds_b[j]
 
         if sig_a == sig_b:
-            # Check for parameter differences
             if ev_a.raw != ev_b.raw:
                 diffs.append({
                     "type": "changed",
@@ -794,7 +800,6 @@ def diff_events(events_a: List[Event], events_b: List[Event]) -> List[Dict[str, 
             i += 1
             j += 1
         else:
-            # Try to find match ahead in B
             found_b: Optional[int] = None
             for k in range(j, min(j + 20, len(cmds_b))):
                 if cmds_b[k][1] == sig_a:
@@ -802,7 +807,6 @@ def diff_events(events_a: List[Event], events_b: List[Event]) -> List[Dict[str, 
                     break
 
             if found_b is not None:
-                # Events extra in B
                 for m in range(j, found_b):
                     ev_m, sig_m = cmds_b[m]
                     diffs.append({
@@ -813,7 +817,6 @@ def diff_events(events_a: List[Event], events_b: List[Event]) -> List[Dict[str, 
                 j = found_b + 1
                 i += 1
             else:
-                # Try to find match ahead in A
                 found_a: Optional[int] = None
                 for k in range(i, min(i + 20, len(cmds_a))):
                     if cmds_a[k][1] == sig_b:
@@ -841,7 +844,6 @@ def diff_events(events_a: List[Event], events_b: List[Event]) -> List[Dict[str, 
                     i += 1
                     j += 1
 
-    # Remaining events
     while i < len(cmds_a):
         ev, sig = cmds_a[i]
         diffs.append({"type": "missing_in_b", "event": ev.index, "sig": sig})
@@ -891,12 +893,11 @@ def annotate_protocol(events: List[Event]) -> List[Issue]:
     seen_codes: set = set()
     for ev in events:
         if ev.direction != "out" or not ev.raw or len(ev.raw) < 6:
-            continue  # Skip data payloads, only check actual commands
-        # Skip DATA_OUT and SHORT_OUT (data transfers, not commands)
+            continue
         if ev.decoded and ev.decoded.cmd_name in ("DATA_OUT", "EMPTY"):
             continue
         if ev.raw[0] == 0xd0:
-            continue  # Phase check is handled inline
+            continue
         code = ev.raw[0]
         if code in seen_codes:
             continue
@@ -956,7 +957,6 @@ def group_phases(events: List[Event]) -> List[PhaseGroup]:
         else:
             current_in += 1
 
-    # Final group
     groups.append(PhaseGroup(
         name=current_name,
         start_index=current_start,
@@ -972,8 +972,687 @@ def group_phases(events: List[Event]) -> List[PhaseGroup]:
 
 
 # ---------------------------------------------------------------------------
+# WDB / CONTROL_FRAME / READ_CAPACITY extraction
+# ---------------------------------------------------------------------------
+
+
+def _find_data_transfer_after_cmd(
+    events: List[Event],
+    cmd_index: int,
+    direction: str,
+) -> Optional[Event]:
+    """Given a command event index, find the data transfer event that follows.
+
+    After an OUT command, the typical sequence is:
+      OUT cmd -> PHASE_CHECK(d0) OUT -> PHASE_RESP(02) IN -> DATA_OUT OUT -> STATUS IN
+    After an IN-read command:
+      OUT cmd -> PHASE_CHECK(d0) OUT -> PHASE_RESP(03) IN -> DATA_BLOCK IN -> STATUS IN
+
+    This skips the phase handshake and status, returning the data event.
+    """
+    n = len(events)
+    idx = cmd_index + 1
+
+    while idx < n:
+        ev = events[idx]
+        decoded = ev.decoded
+
+        # Phasthr
+        if decoded and decoded.cmd_name in ("PHASE_CHECK", "PHASE_RESP"):
+            idx += 1
+            continue
+
+        # STATUS (8 bytes) -- stop if we hit a non-data status
+        if decoded and decoded.cmd_name == "STATUS":
+            return None
+
+        # DATA_OUT on OUT direction, or DATA_BLOCK/DATA_RESP on IN direction
+        if direction == "out" and decoded and decoded.cmd_name == "DATA_OUT":
+            return ev
+        if direction == "in" and decoded and decoded.cmd_name in ("DATA_BLOCK", "DATA_RESP"):
+            return ev
+
+        # For READ commands, also accept large IN payloads that are DATA_BLOCK
+        if direction == "in" and ev.direction == "in" and len(ev.raw) > 16:
+            return ev
+
+        idx += 1
+
+    return None
+
+
+def _parse_wdb_from_bytes(data: bytes) -> Optional[WdbRow]:
+    """Parse a 58-byte WDB payload into structured fields."""
+    if len(data) < 58:
+        return None
+
+    window_id = data[0x08]
+    x_res = struct.unpack(">H", data[0x0A:0x0C])[0]
+    y_res = struct.unpack(">H", data[0x0C:0x0E])[0]
+    offset_x = struct.unpack(">L", data[0x0E:0x12])[0]
+    offset_y = struct.unpack(">L", data[0x12:0x16])[0]
+    size_x = struct.unpack(">L", data[0x16:0x1A])[0]
+    size_y = struct.unpack(">L", data[0x1A:0x1E])[0]
+    scan_kind_byte = data[0x32] if len(data) > 0x32 else 0
+    scan_kind_map = {0x01: "normal", 0x02: "prescan", 0x20: "AE", 0x40: "AE_WB"}
+    scan_kind = scan_kind_map.get(scan_kind_byte, f"0x{scan_kind_byte:02x}")
+    exposure = struct.unpack(">I", data[0x36:0x3A])[0] if len(data) >= 0x3A else 0
+
+    return WdbRow(
+        line_num=0,
+        timestamp=0.0,
+        window_id=window_id,
+        x_res=x_res,
+        y_res=y_res,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        size_x=size_x,
+        size_y=size_y,
+        scan_kind=scan_kind,
+        exposure=exposure,
+        raw_hex=data.hex(),
+    )
+
+
+def _looks_like_wdb(data: bytes) -> bool:
+    """Heuristic: does this payload look like a WDB?"""
+    if len(data) != 58:
+        return False
+    # WDB has recognizable field at byte 7 (length=0x32=50), and resolution
+    # at bytes 10-13
+    if data[0x07] != 0x32:
+        return False
+    x_res = struct.unpack(">H", data[0x0A:0x0C])[0]
+    y_res = struct.unpack(">H", data[0x0C:0x0E])[0]
+    # Valid resolutions: 96-4800 DPI range (plausible values)
+    if x_res < 96 or x_res > 4800:
+        return False
+    return True
+
+
+def _looks_like_control_frame(data: bytes) -> bool:
+    """Heuristic: does this payload look like a CONTROL_FRAME?"""
+    if len(data) != 52:
+        return False
+    if data[0:2] != b'\x00\x32':
+        return False
+    return True
+
+
+def extract_wdbs(events: List[Event]) -> List[WdbRow]:
+    """Extract all WINDOW Descriptor Blocks from SET_WINDOW (0x24) commands."""
+    rows: List[WdbRow] = []
+
+    for ev in events:
+        if ev.direction != "out" or not ev.raw:
+            continue
+        if len(ev.raw) < 10 or ev.raw[0] != 0x24:
+            continue
+
+        data_ev = _find_data_transfer_after_cmd(events, ev.index, "out")
+        if not data_ev:
+            continue
+
+        wdb = _parse_wdb_from_bytes(data_ev.raw)
+        if wdb:
+            wdb.line_num = data_ev.index
+            wdb.timestamp = data_ev.timestamp
+            rows.append(wdb)
+
+    return rows
+
+
+def extract_control_frames(events: List[Event]) -> List[CtrlFrameRow]:
+    """Extract CONTROL_FRAME entries from WRITE(0x8F) commands."""
+    rows: List[CtrlFrameRow] = []
+
+    for ev in events:
+        if ev.direction != "out" or not ev.raw:
+            continue
+        if len(ev.raw) < 10 or ev.raw[0] != 0x2a or ev.raw[2] != 0x8F:
+            continue
+
+        data_ev = _find_data_transfer_after_cmd(events, ev.index, "out")
+        if not data_ev:
+            continue
+
+        payload = data_ev.raw
+        if _looks_like_control_frame(payload):
+            # Header: 4 bytes, then 16-byte entries
+            num_entries = payload[2] if len(payload) > 2 else 3
+            entry_count = (len(payload) - 4) // 16
+            for ei in range(entry_count):
+                base = 4 + ei * 16
+                if base + 16 > len(payload):
+                    break
+                y_start = struct.unpack(">L", payload[base:base + 4])[0]
+                y_end = struct.unpack(">L", payload[base + 8:base + 12])[0]
+                height = y_end - y_start
+
+                rows.append(CtrlFrameRow(
+                    line_num=data_ev.index,
+                    timestamp=data_ev.timestamp,
+                    entry_index=ei,
+                    frame_index=ei,
+                    y_start=y_start,
+                    y_end=y_end,
+                    height=height,
+                    raw_hex=payload.hex(),
+                ))
+        else:
+            # Still emit a row for non-standard payloads
+            rows.append(CtrlFrameRow(
+                line_num=data_ev.index,
+                timestamp=data_ev.timestamp,
+                entry_index=0,
+                frame_index=0,
+                y_start=0,
+                y_end=0,
+                height=len(payload),
+                raw_hex=payload.hex(),
+            ))
+
+    return rows
+
+
+def extract_read_capacity(events: List[Event]) -> List[ReadCapRow]:
+    """Extract READ_CAPACITY (0x25) responses."""
+    rows: List[ReadCapRow] = []
+
+    for ev in events:
+        if ev.direction != "out" or not ev.raw:
+            continue
+        if len(ev.raw) < 10 or ev.raw[0] != 0x25:
+            continue
+
+        data_ev = _find_data_transfer_after_cmd(events, ev.index, "in")
+        if not data_ev:
+            continue
+
+        payload = data_ev.raw
+        if len(payload) < 34:
+            continue
+
+        window_id = payload[0x08] if len(payload) > 0x08 else 0
+        x_res = struct.unpack(">H", payload[0x0A:0x0C])[0] if len(payload) > 0x0B else 0
+        y_res = struct.unpack(">H", payload[0x0C:0x0E])[0] if len(payload) > 0x0D else 0
+        offset_x = struct.unpack(">I", payload[0x0E:0x12])[0] if len(payload) > 0x11 else 0
+        offset_y = struct.unpack(">I", payload[0x12:0x16])[0] if len(payload) > 0x15 else 0
+        size_x = struct.unpack(">I", payload[0x16:0x1A])[0] if len(payload) > 0x19 else 0
+        size_y = struct.unpack(">I", payload[0x1A:0x1E])[0] if len(payload) > 0x1D else 0
+
+        rows.append(ReadCapRow(
+            line_num=data_ev.index,
+            timestamp=data_ev.timestamp,
+            window_id=window_id,
+            x_res=x_res,
+            y_res=y_res,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            size_x=size_x,
+            size_y=size_y,
+            raw_hex=payload.hex(),
+        ))
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Structural diff helpers
+# ---------------------------------------------------------------------------
+
+
+def diff_wdbs(rows_a: List[WdbRow], rows_b: List[WdbRow]) -> List[Dict[str, Any]]:
+    """Diff two WDB row lists by sequence position. Returns per-field changes."""
+    diffs: List[Dict[str, Any]] = []
+    fields = [
+        "window_id", "x_res", "y_res", "offset_x", "offset_y",
+        "size_x", "size_y", "scan_kind", "exposure",
+    ]
+
+    max_len = max(len(rows_a), len(rows_b))
+    for i in range(max_len):
+        wa = rows_a[i] if i < len(rows_a) else None
+        wb = rows_b[i] if i < len(rows_b) else None
+
+        if wa is None:
+            diffs.append({"seq": i, "type": "extra_in_b", "row": asdict(wb)})
+            continue
+        if wb is None:
+            diffs.append({"seq": i, "type": "missing_in_b", "row": asdict(wa)})
+            continue
+
+        changed: Dict[str, str] = {}
+        for f in fields:
+            va = getattr(wa, f)
+            vb = getattr(wb, f)
+            if va != vb:
+                if isinstance(va, int) and isinstance(vb, int):
+                    changed[f] = f"{va} != {vb}"
+                else:
+                    changed[f] = f"{va} != {vb}"
+
+        if changed:
+            diffs.append({
+                "seq": i,
+                "type": "changed",
+                "window_a": wa.window_id,
+                "window_b": wb.window_id,
+                "changes": changed,
+            })
+
+    return diffs
+
+
+def diff_control_frames(
+    rows_a: List[CtrlFrameRow],
+    rows_b: List[CtrlFrameRow],
+) -> List[Dict[str, Any]]:
+    """Diff two control-frame row lists by sequence position."""
+    diffs: List[Dict[str, Any]] = []
+    fields = ["entry_index", "y_start", "y_end", "height"]
+
+    max_len = max(len(rows_a), len(rows_b))
+    for i in range(max_len):
+        ra = rows_a[i] if i < len(rows_a) else None
+        rb = rows_b[i] if i < len(rows_b) else None
+
+        if ra is None:
+            diffs.append({"seq": i, "type": "extra_in_b", "entry": asdict(rb)})
+            continue
+        if rb is None:
+            diffs.append({"seq": i, "type": "missing_in_b", "entry": asdict(ra)})
+            continue
+
+        changed: Dict[str, str] = {}
+        for f in fields:
+            va = getattr(ra, f)
+            vb = getattr(rb, f)
+            if va != vb:
+                changed[f] = f"{va} != {vb}"
+
+        if changed:
+            diffs.append({
+                "seq": i,
+                "type": "changed",
+                "entry_a": asdict(ra),
+                "entry_b": asdict(rb),
+                "changes": changed,
+            })
+
+    return diffs
+
+
+# ---------------------------------------------------------------------------
+# Generic filter engine
+# ---------------------------------------------------------------------------
+
+
+class _FilterAST:
+    """Minimal AST for filter expressions."""
+    pass
+
+
+class _FilterField(_FilterAST):
+    name: str
+    op: str
+    value: Any  # str, int, float
+
+
+class _FilterAnd(_FilterAST):
+    left: _FilterAST
+    right: _FilterAST
+
+
+class _FilterOr(_FilterAST):
+    left: _FilterAST
+    right: _FilterAST
+
+
+def _resolve_event_field(event: Event, name: str) -> Optional[Any]:
+    """Resolve a filter field name to an event attribute/value."""
+    dec = event.decoded
+    if name == "cmd":
+        return dec.cmd_name if dec else None
+    if name == "cmd_hex":
+        return dec.cmd_hex if dec else None
+    if name == "data_type":
+        if dec and "datatype" in dec.params:
+            raw = dec.params["datatype"]
+            if isinstance(raw, str) and raw.startswith("0x"):
+                return int(raw, 16)
+        return None
+    if name == "endpoint":
+        raw_ep = event.endpoint
+        return raw_ep
+    if name == "length":
+        return len(event.raw)
+    if name == "phase":
+        return event.phase
+    if name == "direction":
+        return event.direction
+    if name == "size":
+        return len(event.raw)
+    if name == "index":
+        return event.index
+    # Check decoded params as fallback
+    if dec and name in dec.params:
+        return dec.params[name]
+    return None
+
+
+def _parse_value(tok: str) -> Any:
+    """Parse a filter value token."""
+    tok = tok.strip()
+    if tok.startswith('"') and tok.endswith('"'):
+        return tok[1:-1]
+    if tok.startswith("'") and tok.endswith("'"):
+        return tok[1:-1]
+    if tok.startswith("0x") or tok.startswith("0X"):
+        return int(tok, 16)
+    try:
+        return int(tok)
+    except ValueError:
+        pass
+    try:
+        return float(tok)
+    except ValueError:
+        pass
+    return tok
+
+
+def _tokenize_expr(expr: str) -> List[str]:
+    """Tokenize a filter expression into words and operators."""
+    tokens: List[str] = []
+    i = 0
+    while i < len(expr):
+        if expr[i].isspace():
+            i += 1
+            continue
+        # Quoted string
+        if expr[i] in ('"', "'"):
+            q = expr[i]
+            j = expr.index(q, i + 1)
+            tokens.append(expr[i:j + 1])
+            i = j + 1
+            continue
+        # Two-char operators
+        if expr[i:i + 2] in ("!=", ">=", "<="):
+            tokens.append(expr[i:i + 2])
+            i += 2
+            continue
+        # Single-char operator
+        if expr[i] in ("=", ">", "<"):
+            tokens.append(expr[i])
+            i += 1
+            continue
+        # Word
+        j = i
+        while j < len(expr) and not expr[j].isspace() and expr[j] not in ('=', '!', '>', '<', '"', "'"):
+            j += 1
+        tokens.append(expr[i:j])
+        i = j
+    return tokens
+
+
+def _parse_or(tokens: List[str], pos: int) -> Tuple[_FilterAST, int]:
+    left, pos = _parse_and(tokens, pos)
+    while pos < len(tokens) and tokens[pos] == "or":
+        right, pos = _parse_and(tokens, pos + 1)
+        node = _FilterOr()
+        node.left = left
+        node.right = right
+        left = node
+    return left, pos
+
+
+def _parse_and(tokens: List[str], pos: int) -> Tuple[_FilterAST, int]:
+    left, pos = _parse_field(tokens, pos)
+    while pos < len(tokens) and tokens[pos] == "and":
+        right, pos = _parse_field(tokens, pos + 1)
+        node = _FilterAnd()
+        node.left = left
+        node.right = right
+        left = node
+    return left, pos
+
+
+def _parse_field(tokens: List[str], pos: int) -> Tuple[_FilterAST, int]:
+    if pos >= len(tokens):
+        raise ValueError(f"Unexpected end of expression at token {pos}")
+    name = tokens[pos]
+    pos += 1
+
+    if pos < len(tokens) and tokens[pos] in ("=", "!=", ">", "<", ">=", "<="):
+        op = tokens[pos]
+        pos += 1
+        if pos >= len(tokens):
+            raise ValueError(f"Expected value after '{op}'")
+        value = _parse_value(tokens[pos])
+        pos += 1
+        node = _FilterField()
+        node.name = name
+        node.op = "==" if op == "=" else op
+        node.value = value
+        return node, pos
+    else:
+        # Bare field name like "out" means truthiness check
+        node = _FilterField()
+        node.name = name
+        node.op = "=="
+        node.value = True
+        return node, pos
+
+
+def parse_filter_expr(expr: str) -> _FilterAST:
+    """Parse a filter expression string into an AST."""
+    tokens = _tokenize_expr(expr)
+    if not tokens:
+        raise ValueError("Empty filter expression")
+    ast, pos = _parse_or(tokens, 0)
+    return ast
+
+
+def _compare(val: Any, op: str, target: Any) -> bool:
+    """Compare two values with an operator."""
+    # Try numeric comparison
+    try:
+        a = float(val) if not isinstance(val, (int, float)) else val
+        b = float(target) if not isinstance(target, (int, float)) else target
+        if op == "==":
+            return a == b
+        if op == "!=":
+            return a != b
+        if op == ">":
+            return a > b
+        if op == "<":
+            return a < b
+        if op == ">=":
+            return a >= b
+        if op == "<=":
+            return a <= b
+    except (TypeError, ValueError):
+        pass
+
+    # String comparison
+    sa = str(val)
+    sb = str(target)
+    if op == "==":
+        return sa == sb
+    if op == "!=":
+        return sa != sb
+    if op == ">" or op == ">=":
+        return sa > sb if op == ">" else sa >= sb
+    if op == "<" or op == "<=":
+        return sa < sb if op == "<" else sa <= sb
+    return False
+
+
+def event_matches(event: Event, ast: _FilterAST) -> bool:
+    """Evaluate whether an event matches a filter AST."""
+    if isinstance(ast, _FilterField):
+        val = _resolve_event_field(event, ast.name)
+        if val is None:
+            return False
+        return _compare(val, ast.op, ast.value)
+    if isinstance(ast, _FilterAnd):
+        return event_matches(event, ast.left) and event_matches(event, ast.right)
+    if isinstance(ast, _FilterOr):
+        return event_matches(event, ast.left) or event_matches(event, ast.right)
+    return False
+
+
+def filter_events(events: List[Event], ast: _FilterAST) -> List[Event]:
+    """Return events that match the filter AST, re-indexed sequentially."""
+    result = [ev for ev in events if event_matches(ev, ast)]
+    for i, ev in enumerate(result):
+        ev.index = i
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Payload inline detection (for event listing)
+# ---------------------------------------------------------------------------
+
+
+def _decode_inline_payload(ev: Event) -> Optional[str]:
+    """Try to decode a DATA_OUT / DATA_BLOCK payload into inline description."""
+    raw = ev.raw
+    if ev.decoded and ev.decoded.cmd_name == "DATA_OUT" and _looks_like_wdb(raw):
+        w = _parse_wdb_from_bytes(raw)
+        if w:
+            return (
+                f"WDB win={w.window_id} "
+                f"res={w.x_res}x{w.y_res} "
+                f"off=({w.offset_x},{w.offset_y}) "
+                f"size=({w.size_x}x{w.size_y}) "
+                f"kind={w.scan_kind} "
+                f"exposure=0x{w.exposure:08x}"
+            )
+    if ev.decoded and ev.decoded.cmd_name == "DATA_OUT" and _looks_like_control_frame(raw):
+        num_entries = raw[2] if len(raw) > 2 else 3
+        entry_count = (len(raw) - 4) // 16
+        entries = []
+        for ei in range(entry_count):
+            base = 4 + ei * 16
+            if base + 16 > len(raw):
+                break
+            ys = struct.unpack(">L", raw[base:base + 4])[0]
+            ye = struct.unpack(">L", raw[base + 8:base + 12])[0]
+            entries.append(f"[{ys}-{ye}]")
+        return f"CONTROL_FRAME entries={entry_count}: {' '.join(entries)}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
+
+
+def _print_tsv_wdbs(rows: List[WdbRow], label: str = ""):
+    """Print WDB rows as TSV."""
+    prefix = f"[{label}] " if label else ""
+    print(f"\n{prefix}WDB extraction ({len(rows)} entries):")
+    cols = [
+        "line_num", "timestamp", "window_id", "x_res", "y_res",
+        "offset_x", "offset_y", "size_x", "size_y",
+        "scan_kind", "exposure", "raw_hex",
+    ]
+    print("\t".join(cols))
+    for r in rows:
+        vals = [
+            str(r.line_num),
+            f"{r.timestamp:.6f}",
+            str(r.window_id),
+            str(r.x_res),
+            str(r.y_res),
+            str(r.offset_x),
+            str(r.offset_y),
+            str(r.size_x),
+            str(r.size_y),
+            r.scan_kind,
+            f"0x{r.exposure:08x}",
+            r.raw_hex,
+        ]
+        print("\t".join(vals))
+
+
+def _print_tsv_control_frames(rows: List[CtrlFrameRow], label: str = ""):
+    """Print CONTROL_FRAME rows as TSV."""
+    prefix = f"[{label}] " if label else ""
+    print(f"\n{prefix}CONTROL_FRAME extraction ({len(rows)} entries):")
+    cols = ["line_num", "timestamp", "entry_index", "frame_index", "y_start", "y_end", "height"]
+    print("\t".join(cols))
+    for r in rows:
+        print("\t".join([
+            str(r.line_num),
+            f"{r.timestamp:.6f}",
+            str(r.entry_index),
+            str(r.frame_index),
+            str(r.y_start),
+            str(r.y_end),
+            str(r.height),
+        ]))
+
+
+def _print_tsv_read_cap(rows: List[ReadCapRow], label: str = ""):
+    """Print READ_CAPACITY rows as TSV."""
+    prefix = f"[{label}] " if label else ""
+    print(f"\n{prefix}READ_CAPACITY extraction ({len(rows)} entries):")
+    cols = [
+        "line_num", "timestamp", "window_id", "x_res", "y_res",
+        "offset_x", "offset_y", "size_x", "size_y", "raw_hex",
+    ]
+    print("\t".join(cols))
+    for r in rows:
+        print("\t".join([
+            str(r.line_num),
+            f"{r.timestamp:.6f}",
+            str(r.window_id),
+            str(r.x_res),
+            str(r.y_res),
+            str(r.offset_x),
+            str(r.offset_y),
+            str(r.size_x),
+            str(r.size_y),
+            r.raw_hex,
+        ]))
+
+
+def _print_wdb_diff(diffs: List[Dict[str, Any]], label_a: str = "A", label_b: str = "B"):
+    """Print WDB structural diff."""
+    if not diffs:
+        print("\nWDB diff: no differences")
+        return
+    print(f"\nWDB diff ({len(diffs)} differences):")
+    for d in diffs:
+        if d["type"] == "changed":
+            changes = ", ".join(f"{k}: {v}" for k, v in d["changes"].items())
+            print(f"  seq={d['seq']} win_a={d['window_a']} win_b={d['window_b']}: {changes}")
+        elif d["type"] == "missing_in_b":
+            r = d["row"]
+            print(f"  seq={d['seq']} missing_in_b: win={r['window_id']} res={r['x_res']}x{r['y_res']}")
+        elif d["type"] == "extra_in_b":
+            r = d["row"]
+            print(f"  seq={d['seq']} extra_in_b: win={r['window_id']} res={r['x_res']}x{r['y_res']}")
+
+
+def _print_cf_diff(diffs: List[Dict[str, Any]], label_a: str = "A", label_b: str = "B"):
+    """Print CONTROL_FRAME structural diff."""
+    if not diffs:
+        print("\nCONTROL_FRAME diff: no differences")
+        return
+    print(f"\nCONTROL_FRAME diff ({len(diffs)} differences):")
+    for d in diffs:
+        if d["type"] == "changed":
+            changes = ", ".join(f"{k}: {v}" for k, v in d["changes"].items())
+            print(f"  seq={d['seq']}: {changes}")
+        elif d["type"] == "missing_in_b":
+            e = d["entry"]
+            print(f"  seq={d['seq']} missing_in_b: entry={e['entry_index']} y={e['y_start']}-{e['y_end']}")
+        elif d["type"] == "extra_in_b":
+            e = d["entry"]
+            print(f"  seq={d['seq']} extra_in_b: entry={e['entry_index']} y={e['y_start']}-{e['y_end']}")
 
 
 def print_summary(
@@ -981,6 +1660,7 @@ def print_summary(
     phases: List[PhaseGroup],
     issues: List[Issue],
     verbose: bool = False,
+    max_events: int = 10000,
 ) -> None:
     """Print human-readable summary."""
     out_count = sum(1 for e in events if e.direction == "out")
@@ -1039,20 +1719,29 @@ def print_summary(
         print()
 
     # Per-event detail
-    max_events = len(events) if verbose else 200
+    display_count = max_events if not verbose else len(events)
     print(
         f"{'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} "
         f"{'Phase':<12} Description"
     )
     print("-" * 90)
-    for ev in events[:max_events]:
+    for ev in events[:display_count]:
         dec = ev.decoded
         desc = ""
         if dec:
-            params_str = " ".join(f"{k}={v}" for k, v in dec.params.items())
-            desc = dec.cmd_name
-            if params_str:
-                desc += f" ({params_str})"
+            # Inline payload decoding for DATA_OUT / DATA_BLOCK
+            inline = False
+            if dec.cmd_name in ("DATA_OUT", "DATA_BLOCK"):
+                decoded_payload = _decode_inline_payload(ev)
+                if decoded_payload:
+                    desc = f"{dec.cmd_name} {decoded_payload}"
+                    inline = True
+
+            if not inline:
+                params_str = " ".join(f"{k}={v}" for k, v in dec.params.items())
+                desc = dec.cmd_name
+                if params_str:
+                    desc += f" ({params_str})"
             if dec.is_error:
                 desc += f" *** {dec.error_detail}"
         else:
@@ -1063,8 +1752,113 @@ def print_summary(
             f"{len(ev.raw):4d} {ev.phase:<12} {desc}"
         )
 
-    if len(events) > max_events:
-        print(f"\n... ({len(events) - max_events} more events, use --verbose for all)")
+    if len(events) > display_count:
+        print(f"\n... ({len(events) - display_count} more events, use --verbose for all)")
+
+
+def print_grouped_by_phase(
+    events: List[Event],
+    phases: List[PhaseGroup],
+    issues: List[Issue],
+    max_events: int = 10000,
+) -> None:
+    """Print events grouped by phase with per-phase summary."""
+    display_count = max_events
+    out_count = sum(1 for e in events if e.direction == "out")
+    in_count = sum(1 for e in events if e.direction == "in")
+    total_time = events[-1].timestamp if events else 0
+
+    print()
+    print("=" * 70)
+    print("CAPTURE ANALYSIS (GROUPED BY PHASE)")
+    print("=" * 70)
+    print(f"Total events: {len(events)} ({out_count} OUT, {in_count} IN)")
+    print(f"Duration: {total_time:.2f}s")
+    print(f"Phases: {len(phases)}")
+    print()
+
+    print(
+        f"{'Phase':<15} {'Events':>6} {'OUT':>5} {'IN':>5} "
+        f"{'Start':>8} {'End':>8} {'Duration':>8}"
+    )
+    print("-" * 70)
+    for ph in phases:
+        dur = ph.end_time - ph.start_time
+        print(
+            f"{ph.name:<15} {ph.event_count:6d} {ph.out_count:5d} "
+            f"{ph.in_count:5d} {ph.start_time:8.3f} {ph.end_time:8.3f} "
+            f"{dur:8.3f}"
+        )
+    print()
+
+    # Collect issues per phase
+    phase_issues: Dict[str, List[Issue]] = defaultdict(list)
+    for iss in issues:
+        ev = events[iss.event_index] if iss.event_index < len(events) else None
+        if ev:
+            phase_issues[ev.phase].append(iss)
+
+    for ph in phases:
+        print(f"\n{'=' * 70}")
+        print(f"Phase: {ph.name}")
+        print(f"  Events: {ph.event_count} ({ph.out_count} OUT, {ph.in_count} IN)")
+        dur = ph.end_time - ph.start_time
+        print(f"  Time: {ph.start_time:.3f} - {ph.end_time:.3f} ({dur:.3f}s)")
+
+        phase_issue_list = phase_issues.get(ph.name, [])
+        if phase_issue_list:
+            print(f"  Issues: {len(phase_issue_list)}")
+            for iss in phase_issue_list:
+                marker = {"error": "!!", "warning": "~>", "info": "  "}[iss.severity]
+                print(f"  {marker} Event {iss.event_index}: {iss.message}")
+
+        # Command frequency for this phase
+        phase_cmds: Counter = Counter()
+        for ev in events:
+            if ev.phase == ph.name and ev.direction == "out" and ev.decoded:
+                phase_cmds[ev.decoded.cmd_name] += 1
+
+        if phase_cmds:
+            print("  Commands:")
+            for name, count in phase_cmds.most_common():
+                print(f"    {name:<25} {count:4d}")
+
+        # Events (truncated)
+        phase_events = [
+            ev for ev in events
+            if ph.start_index <= ev.index <= ph.end_index
+            and ev.index < display_count
+        ]
+        if phase_events:
+            print(
+                f"  {'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} Description"
+            )
+            for ev in phase_events[:display_count]:
+                dec = ev.decoded
+                desc = ""
+                if dec:
+                    inline = False
+                    if dec.cmd_name in ("DATA_OUT", "DATA_BLOCK"):
+                        decoded_payload = _decode_inline_payload(ev)
+                        if decoded_payload:
+                            desc = f"{dec.cmd_name} {decoded_payload}"
+                            inline = True
+                    if not inline:
+                        params_str = " ".join(
+                            f"{k}={v}" for k, v in dec.params.items()
+                        )
+                        desc = dec.cmd_name
+                        if params_str:
+                            desc += f" ({params_str})"
+                    if dec.is_error:
+                        desc += f" *** {dec.error_detail}"
+                else:
+                    desc = f"raw {len(ev.raw)}B"
+
+                print(
+                    f"  {ev.index:5d} {ev.timestamp:8.3f} {ev.direction:>3} "
+                    f"{len(ev.raw):4d} {desc}"
+                )
 
 
 def json_output(
@@ -1072,9 +1866,10 @@ def json_output(
     phases: List[PhaseGroup],
     issues: List[Issue],
     verbose: bool = False,
+    max_events: int = 10000,
 ) -> Dict[str, Any]:
     """Build JSON-serializable output."""
-    max_events = len(events) if verbose else 200
+    display_count = len(events) if verbose else max_events
     return {
         "summary": {
             "total_events": len(events),
@@ -1099,7 +1894,7 @@ def json_output(
                 "phase": e.phase,
                 "decoded": asdict(e.decoded) if e.decoded else None,
             }
-            for e in events[:max_events]
+            for e in events[:display_count]
         ],
     }
 
@@ -1140,24 +1935,105 @@ def main() -> int:
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
-        help="Show all events (not just first 200)",
+        help="Show all events (not just first N)",
+    )
+    parser.add_argument(
+        "--max-events", type=int, default=10000,
+        help="Max events in output (default 10000, 0=unlimited)",
+    )
+    parser.add_argument(
+        "--extract-wdbs", action="store_true",
+        help="Extract and tabulate SET_WINDOW (0x24) WDB payloads",
+    )
+    parser.add_argument(
+        "--extract-control-frames", action="store_true",
+        help="Extract and tabulate CONTROL_FRAME (0x8F) payloads",
+    )
+    parser.add_argument(
+        "--extract-read-capacity", action="store_true",
+        help="Extract and tabulate READ_CAPACITY (0x25) responses",
+    )
+    parser.add_argument(
+        "--filter", metavar="EXPR",
+        help="Filter events: e.g. --filter 'cmd=SCAN' or --filter 'data_type=0x8f and length>50'",
+    )
+    parser.add_argument(
+        "--diff-wdbs", action="store_true",
+        help="Structural diff of WDBs between two captures (with --diff-a/--diff-b)",
+    )
+    parser.add_argument(
+        "--diff-control-frames", action="store_true",
+        help="Structural diff of CONTROL_FRAMES (with --diff-a/--diff-b)",
+    )
+    parser.add_argument(
+        "--group-by-phase", action="store_true",
+        help="Output events grouped by phase with per-phase stats",
     )
 
     args = parser.parse_args()
 
+    max_events = args.max_events if args.max_events > 0 else 1000000
+
+    # -----------------------------------------------------------------------
+    # Filter AST
+    # -----------------------------------------------------------------------
+    filter_ast: Optional[_FilterAST] = None
+    if args.filter:
+        try:
+            filter_ast = parse_filter_expr(args.filter)
+        except ValueError as e:
+            print(f"Filter error: {e}", file=sys.stderr)
+            return 1
+
+    # -----------------------------------------------------------------------
+    # Diff mode
+    # -----------------------------------------------------------------------
     if args.diff_a and args.diff_b:
-        # Diff mode
         events_a = load_capture(args.diff_a)
         events_b = load_capture(args.diff_b)
         _decode_all(events_a)
         _decode_all(events_b)
         events_a = detect_phases(events_a)
         events_b = detect_phases(events_b)
+
+        if filter_ast:
+            events_a = filter_events(events_a, filter_ast)
+            events_b = filter_events(events_b, filter_ast)
+
+        if args.extract_wdbs:
+            _print_tsv_wdbs(extract_wdbs(events_a), args.diff_a)
+            _print_tsv_wdbs(extract_wdbs(events_b), args.diff_b)
+
+        if args.extract_control_frames:
+            _print_tsv_control_frames(extract_control_frames(events_a), args.diff_a)
+            _print_tsv_control_frames(extract_control_frames(events_b), args.diff_b)
+
+        if args.extract_read_capacity:
+            _print_tsv_read_cap(extract_read_capacity(events_a), args.diff_a)
+            _print_tsv_read_cap(extract_read_capacity(events_b), args.diff_b)
+
+        if args.diff_wdbs:
+            _print_wdb_diff(
+                diff_wdbs(extract_wdbs(events_a), extract_wdbs(events_b)),
+                args.diff_a, args.diff_b,
+            )
+
+        if args.diff_control_frames:
+            _print_cf_diff(
+                diff_control_frames(
+                    extract_control_frames(events_a),
+                    extract_control_frames(events_b),
+                ),
+                args.diff_a, args.diff_b,
+            )
+
+        # Standard diff
         diffs = diff_events(events_a, events_b)
 
         if args.json:
             print(json.dumps({"differences": diffs, "count": len(diffs)}, indent=2))
-        else:
+        elif not (args.extract_wdbs or args.extract_control_frames or
+                  args.diff_wdbs or args.diff_control_frames):
             print(f"Differences: {len(diffs)}")
             for d in diffs:
                 if d["type"] == "changed":
@@ -1176,6 +2052,9 @@ def main() -> int:
                     )
         return 0 if not diffs else 1
 
+    # -----------------------------------------------------------------------
+    # Single-file mode
+    # -----------------------------------------------------------------------
     if not args.file:
         parser.print_help()
         return 1
@@ -1185,28 +2064,37 @@ def main() -> int:
         print(f"No events found in {args.file}", file=sys.stderr)
         return 1
 
-    # Decode
     _decode_all(events)
-
-    # Detect phases
     events = detect_phases(events)
 
-    # Group phases
-    phases = group_phases(events)
+    if filter_ast:
+        events = filter_events(events, filter_ast)
 
-    # Detect issues
+    phases = group_phases(events)
     issues = detect_issues(events)
 
     if args.annotate:
         annotation_issues = annotate_protocol(events)
         issues.extend(annotation_issues)
 
+    # Extraction outputs
+    if args.extract_wdbs:
+        _print_tsv_wdbs(extract_wdbs(events))
+
+    if args.extract_control_frames:
+        _print_tsv_control_frames(extract_control_frames(events))
+
+    if args.extract_read_capacity:
+        _print_tsv_read_cap(extract_read_capacity(events))
+
     # Output
     if args.json:
-        output = json_output(events, phases, issues, verbose=args.verbose)
+        output = json_output(events, phases, issues, verbose=args.verbose, max_events=max_events)
         print(json.dumps(output, indent=2, default=str))
+    elif args.group_by_phase:
+        print_grouped_by_phase(events, phases, issues, max_events=max_events)
     else:
-        print_summary(events, phases, issues, verbose=args.verbose)
+        print_summary(events, phases, issues, verbose=args.verbose, max_events=max_events)
 
     return 0
 

@@ -32,14 +32,54 @@
 
 ## Capture Analysis
 
-`scripts/analyze_capture.py` parses capture files (text or pcapng) and produces a decoded summary:
+`scripts/analyze_capture.py` parses capture files (text or pcapng) and produces decoded
+summaries, structural extractions, and diffs. WDB and CONTROL_FRAME payloads are decoded
+inline in event listings (no raw hex blobs).
 
-- **Analyze**: `python3 scripts/analyze_capture.py capture.txt` -- phases, command frequency, errors
-- **JSON**: add `--json` for machine-parseable output; `--verbose` for all events
-- **Diff**: `python3 scripts/analyze_capture.py --diff-a file1.txt --diff-b file2.txt` -- aligns command sequences, reports missing/extra/changed commands
-- **Annotate**: add `--annotate` to flag commands with no obvious `protocol.py` handler
+**Basic analysis**:
 
-Useful for diagnosing protocol issues: missing commands, invalid sequences, incorrect parameters, unexpected error responses. Context-aware error detection suppresses expected NOT_READY during TUR polling and UNIT_ATTENTION after reset.
+- `python3 scripts/analyze_capture.py capture.txt` -- phases, command frequency, errors
+- Add `--json` for machine-parseable output; `--verbose` for all events
+- Add `--group-by-phase` to surface per-phase stats + event lists
+- Add `--max-events N` to limit output (default 10000, was 200)
+
+**Structured extraction** (TSV output, works with `--diff-a`/`--diff-b` too):
+
+- `--extract-wdbs` -- SET_WINDOW (0x24) payloads: window_id, resolution, offsets, size, scan_kind, exposure
+- `--extract-control-frames` -- WRITE(0x8F) payloads: per-frame y_start, y_end, height
+- `--extract-read-capacity` -- READ_CAPACITY (0x25) responses: per-window scanner state
+
+**Filtering**:
+
+- `--filter "cmd=SCAN"` -- select SCAN commands
+- `--filter "data_type=0x8f and length>50"` -- compound expressions with `and`/`or`
+- Supported fields: `cmd`, `data_type`, `endpoint`, `length`, `phase`, `direction`
+
+**Diff mode** (`--diff-a A --diff-b B`):
+
+- Default: aligns command sequences, reports missing/extra/changed commands
+- `--diff-wdbs` -- structural WDB diff by sequence position (per-field deltas, e.g. `offset_y: 0 != 590`)
+- `--diff-control-frames` -- structural CF diff by sequence position
+- `--annotate` -- flag commands with no obvious `protocol.py` handler
+
+**Typical debugging workflow**:
+
+```bash
+# Compare hardware capture against golden fixture with full structured diff
+python3 scripts/analyze_capture.py \
+  --diff-a hardware_scan_output_capture.txt \
+  --diff-b reference/golden_single_bw.txt \
+  --extract-wdbs --extract-control-frames \
+  --diff-wdbs --diff-control-frames
+
+# List all WDBs with their scan parameters
+python3 scripts/analyze_capture.py reference/golden_single_bw.txt --extract-wdbs
+
+# Find all CONTROL_FRAME writes
+python3 scripts/analyze_capture.py capture.txt --filter "cmd=WRITE and data_type=0x8f"
+```
+
+Context-aware error detection suppresses expected NOT_READY during TUR polling and UNIT_ATTENTION after reset.
 
 ## Test Strategy (Three Tiers)
 
