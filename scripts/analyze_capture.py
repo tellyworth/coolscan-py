@@ -1007,7 +1007,7 @@ def _find_data_transfer_after_cmd(
             return None
 
         # DATA_OUT on OUT direction, or DATA_BLOCK/DATA_RESP on IN direction
-        if direction == "out" and decoded and decoded.cmd_name == "DATA_OUT":
+        if direction == "out" and decoded and decoded.cmd_name.startswith("DATA_OUT"):
             return ev
         if direction == "in" and decoded and decoded.cmd_name in ("DATA_BLOCK", "DATA_RESP"):
             return ev
