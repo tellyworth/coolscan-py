@@ -352,7 +352,12 @@ def parse_pcapng(path: str) -> List[Event]:
 
 
 def load_capture(path: str) -> List[Event]:
-    """Load events from either text or pcapng file."""
+    """Load events from either text or pcapng file.
+
+    Returns raw events without decoding.  Call ``_decode_all()`` before
+    using extraction functions (``extract_wdbs``, ``extract_control_frames``,
+    etc.) or any function that inspects ``ev.decoded``.
+    """
     p = Path(path)
     if not p.exists():
         print(f"Error: file not found: {path}", file=sys.stderr)
@@ -361,6 +366,17 @@ def load_capture(path: str) -> List[Event]:
         return parse_pcapng(str(p))
     else:
         return parse_text_capture(str(p))
+
+
+def load_capture_decoded(path: str) -> List[Event]:
+    """Load and decode events from a capture file.
+
+    Convenience wrapper around ``load_capture()`` + ``_decode_all()``.
+    Returns events ready for extraction, filtering, and analysis.
+    """
+    events = load_capture(path)
+    _decode_all(events)
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -1577,6 +1593,11 @@ def _print_tsv_wdbs(rows: List[WdbRow], label: str = ""):
         print("\t".join(vals))
 
 
+def wdb_rows_to_json(rows: List[WdbRow]) -> List[Dict[str, Any]]:
+    """Serialize WDB extraction rows as JSON-serializable dicts."""
+    return [asdict(r) for r in rows]
+
+
 def _print_tsv_control_frames(rows: List[CtrlFrameRow], label: str = ""):
     """Print CONTROL_FRAME rows as TSV."""
     prefix = f"[{label}] " if label else ""
@@ -1593,6 +1614,11 @@ def _print_tsv_control_frames(rows: List[CtrlFrameRow], label: str = ""):
             str(r.y_end),
             str(r.height),
         ]))
+
+
+def cf_rows_to_json(rows: List[CtrlFrameRow]) -> List[Dict[str, Any]]:
+    """Serialize CONTROL_FRAME extraction rows as JSON-serializable dicts."""
+    return [asdict(r) for r in rows]
 
 
 def _print_tsv_read_cap(rows: List[ReadCapRow], label: str = ""):
@@ -1617,6 +1643,38 @@ def _print_tsv_read_cap(rows: List[ReadCapRow], label: str = ""):
             str(r.size_y),
             r.raw_hex,
         ]))
+
+
+def readcap_rows_to_json(rows: List[ReadCapRow]) -> List[Dict[str, Any]]:
+    """Serialize READ_CAPACITY extraction rows as JSON-serializable dicts."""
+    return [asdict(r) for r in rows]
+
+
+def json_structured_output(
+    events: List[Event],
+    phases: List[PhaseGroup],
+    issues: List[Issue],
+    wdbs: Optional[List[WdbRow]] = None,
+    control_frames: Optional[List[CtrlFrameRow]] = None,
+    read_capacity: Optional[List[ReadCapRow]] = None,
+    verbose: bool = False,
+    max_events: int = 10000,
+) -> Dict[str, Any]:
+    """Build a JSON-serializable dict with event data and all structural extractions.
+
+    This is the recommended API for programmatic consumers (tests, scripts).
+    Returns a dict suitable for ``json.dumps()`` that includes event summary,
+    phases, issues, command frequency, and optionally WDB/CF/ReadCap extraction
+    results.
+    """
+    base = json_output(events, phases, issues, verbose=verbose, max_events=max_events)
+    if wdbs:
+        base["wdbs"] = wdb_rows_to_json(wdbs)
+    if control_frames:
+        base["control_frames"] = cf_rows_to_json(control_frames)
+    if read_capacity:
+        base["read_capacity"] = readcap_rows_to_json(read_capacity)
+    return base
 
 
 def _print_wdb_diff(diffs: List[Dict[str, Any]], label_a: str = "A", label_b: str = "B"):
@@ -2000,17 +2058,18 @@ def main() -> int:
             events_a = filter_events(events_a, filter_ast)
             events_b = filter_events(events_b, filter_ast)
 
-        if args.extract_wdbs:
-            _print_tsv_wdbs(extract_wdbs(events_a), args.diff_a)
-            _print_tsv_wdbs(extract_wdbs(events_b), args.diff_b)
+        if not args.json:
+            if args.extract_wdbs:
+                _print_tsv_wdbs(extract_wdbs(events_a), args.diff_a)
+                _print_tsv_wdbs(extract_wdbs(events_b), args.diff_b)
 
-        if args.extract_control_frames:
-            _print_tsv_control_frames(extract_control_frames(events_a), args.diff_a)
-            _print_tsv_control_frames(extract_control_frames(events_b), args.diff_b)
+            if args.extract_control_frames:
+                _print_tsv_control_frames(extract_control_frames(events_a), args.diff_a)
+                _print_tsv_control_frames(extract_control_frames(events_b), args.diff_b)
 
-        if args.extract_read_capacity:
-            _print_tsv_read_cap(extract_read_capacity(events_a), args.diff_a)
-            _print_tsv_read_cap(extract_read_capacity(events_b), args.diff_b)
+            if args.extract_read_capacity:
+                _print_tsv_read_cap(extract_read_capacity(events_a), args.diff_a)
+                _print_tsv_read_cap(extract_read_capacity(events_b), args.diff_b)
 
         if args.diff_wdbs:
             _print_wdb_diff(
@@ -2031,7 +2090,17 @@ def main() -> int:
         diffs = diff_events(events_a, events_b)
 
         if args.json:
-            print(json.dumps({"differences": diffs, "count": len(diffs)}, indent=2))
+            output: Dict[str, Any] = {"differences": diffs, "count": len(diffs)}
+            if args.extract_wdbs:
+                output["wdbs_a"] = wdb_rows_to_json(extract_wdbs(events_a))
+                output["wdbs_b"] = wdb_rows_to_json(extract_wdbs(events_b))
+            if args.extract_control_frames:
+                output["control_frames_a"] = cf_rows_to_json(extract_control_frames(events_a))
+                output["control_frames_b"] = cf_rows_to_json(extract_control_frames(events_b))
+            if args.extract_read_capacity:
+                output["read_capacity_a"] = readcap_rows_to_json(extract_read_capacity(events_a))
+                output["read_capacity_b"] = readcap_rows_to_json(extract_read_capacity(events_b))
+            print(json.dumps(output, indent=2))
         elif not (args.extract_wdbs or args.extract_control_frames or
                   args.diff_wdbs or args.diff_control_frames):
             print(f"Differences: {len(diffs)}")
@@ -2077,19 +2146,29 @@ def main() -> int:
         annotation_issues = annotate_protocol(events)
         issues.extend(annotation_issues)
 
-    # Extraction outputs
-    if args.extract_wdbs:
-        _print_tsv_wdbs(extract_wdbs(events))
+    # Extraction outputs (TSV to stdout, unless --json)
+    if not args.json:
+        if args.extract_wdbs:
+            _print_tsv_wdbs(extract_wdbs(events))
 
-    if args.extract_control_frames:
-        _print_tsv_control_frames(extract_control_frames(events))
+        if args.extract_control_frames:
+            _print_tsv_control_frames(extract_control_frames(events))
 
-    if args.extract_read_capacity:
-        _print_tsv_read_cap(extract_read_capacity(events))
+        if args.extract_read_capacity:
+            _print_tsv_read_cap(extract_read_capacity(events))
 
     # Output
     if args.json:
-        output = json_output(events, phases, issues, verbose=args.verbose, max_events=max_events)
+        if args.extract_wdbs or args.extract_control_frames or args.extract_read_capacity:
+            output = json_structured_output(
+                events, phases, issues,
+                wdbs=extract_wdbs(events) if args.extract_wdbs else None,
+                control_frames=extract_control_frames(events) if args.extract_control_frames else None,
+                read_capacity=extract_read_capacity(events) if args.extract_read_capacity else None,
+                verbose=args.verbose, max_events=max_events,
+            )
+        else:
+            output = json_output(events, phases, issues, verbose=args.verbose, max_events=max_events)
         print(json.dumps(output, indent=2, default=str))
     elif args.group_by_phase:
         print_grouped_by_phase(events, phases, issues, max_events=max_events)

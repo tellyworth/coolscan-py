@@ -1,4 +1,4 @@
-.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures smoke-test-hardware generate-golden-fixture generate-batch-fixture replay-check
+.PHONY: lint lint-fix test test-fast format type-check check-all validate-fixtures smoke-test-hardware generate-golden-fixture generate-batch-fixture replay-check generate-fixture-snapshot analyze-capture
 
 # Linting and code quality
 lint:
@@ -65,3 +65,19 @@ syntax-check:
 # Analyze a capture file (default: golden fixture)
 analyze-capture:
 	python3 scripts/analyze_capture.py reference/golden_single_bw.txt
+
+# Generate a structured JSON analysis snapshot from the golden fixture.
+# This snapshot is used by tests to validate fixture consistency and can be
+# diffed to detect protocol changes when the pcapng is regenerated.
+generate-fixture-snapshot:
+	@echo "Generating fixture analysis snapshot..."
+	python3 scripts/analyze_capture.py reference/golden_single_bw.txt \
+		--extract-wdbs --extract-control-frames --extract-read-capacity \
+		--json --max-events 0 \
+		> reference/golden_single_bw_analysis.json
+	@echo "  Wrote reference/golden_single_bw_analysis.json"
+	python3 scripts/analyze_capture.py reference/golden_batch.txt \
+		--extract-wdbs --extract-control-frames \
+		--json --max-events 0 \
+		> reference/golden_batch_analysis.json 2>/dev/null || true
+	@echo "  Wrote reference/golden_batch_analysis.json (if batch fixture exists)"
