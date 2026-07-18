@@ -34,8 +34,11 @@ The test suite is organized into three tiers, each with a different role:
 
 | Tier | Scope | Marker | Purpose |
 |------|-------|--------|---------|
-| **Replay** | `test_usb_replay_*.py` | `@pytest.mark.replay_consistency` | **Fixture self-consistency** — protocol code produces the same byte sequence as the fixture. Does NOT prove hardware correctness. |
-| **Property** | `test_protocol_properties.py` | `@pytest.mark.property_test` | **Fixture-agnostic invariants** — REISSUE handling, polling loops, LUT sizes, status parsing, TUR retries, timeout budgeting. 14 tests. |
+| **Contract** | `test_protocol_contracts.py` | (none) | **Method call patterns** — each scenario method calls the right low-level methods in the right order with the right arguments. Uses `FakeCoolscanProtocol` (test double). |
+| **Property** | `test_protocol_properties.py`, `test_command_properties.py` | `@pytest.mark.property_test` | **Fixture-agnostic invariants** — REISSUE handling, polling loops, LUT sizes, status parsing, TUR retries, timeout budgeting. |
+| **State-machine** | `test_batch_state_machine.py` | (none) | **Batch frame transitions** — validates batch scan frame transitions are valid. Parameterized over frame counts. |
+| **Scanner** | `test_scanner.py` | (none) | **Scanner API** — `CoolscanScanner` uses real `CoolscanProtocol` API via `FakeCoolscanProtocol`. |
+| **Behavior** | `test_protocol_behavior.py` | (none) | **CDB-level contracts** — validated with mocked `_issue_command`. |
 | **Smoke** | `test_hardware_smoke.py` | `@pytest.mark.hardware` | **Hardware correctness** — connects to real scanner, validates protocol works on actual device. Skips gracefully when no scanner attached. |
 
 Markers are registered in `tests/conftest.py`. Replay tests are auto-marked when they lack an explicit marker.
@@ -67,17 +70,15 @@ That runs **real `CoolscanProtocol` logic** without hardware and without simulat
 | Fail-fast | When `usb_capture_replay` is set, **`ReplayError`** is re-raised from `_usb_read_bulk` / `_usb_write_bulk`, `_issue_usb_command`, `wait_scanner`, `_check_phase` / `_check_phase_with_retry`, and `initialize_scanner` paths instead of being turned into generic `StatusType.ERROR` / swallowed retries. |
 | `close()` | Skips `usb.util` teardown when replay is active. |
 
-**Tests:** `tests/test_usb_replay_transport.py` (first INQUIRY, parser edge cases); `tests/test_usb_replay_init_sequence.py` — **`initialize_scanner()` through MODE_SELECT** matches **`golden_single_bw.txt` lines 1–123**.
+**Tests:** The replay harness is tested through `UsbCaptureReplay` unit tests in `tests/test_protocol_properties.py` and contract tests in `tests/test_protocol_contracts.py`. These exercise the `usb_capture_replay` keyword argument on `CoolscanProtocol` and verify dispatches produce the expected byte sequences against golden fixture slices.
 
-**Focused replay tests (current strategy):** Rather than replaying entire sequences against a single legacy fixture, the suite now uses small, focused replay slices from `golden_single_bw.txt`:
+**Focused golden fixture coverage (current strategy):** Rather than replaying entire sequences against a single capture, the suite now uses small, focused golden fixture references and cross-capture property assertions:
 
-- `tests/test_usb_replay_start_scan_golden.py` — `START_SCAN` 3-attempt `REISSUE → ERROR → READY` pattern (lines 297-331).
-- `tests/test_usb_replay_prescan_helpers_golden.py` — individual prescan helpers:
-  `set_boundary_for_prescan()`, `read_exposure_data()`, `read_control_frame()`,
-  `read_channel_state()`, `upload_identity_luts(include_ir=False)`.
-- `tests/test_usb_replay_fullscan_helpers_golden.py` — individual full-scan helpers:
-  `set_boundary()` (CONTROL_FRAME), `read_focus()`, `read_channel_state(9)`,
-  `upload_identity_luts(include_ir=True)`, `stop_scan()`.
+- `tests/test_protocol_properties.py` — `test_reissue_causes_resend` exercises the real 3-attempt `REISSUE → ERROR → READY` pattern (golden fixture lines 297-331) via hand-constructed `UsbCaptureReplay` events.
+- `tests/test_protocol_contracts.py` — Individual helper contracts: `set_boundary_for_prescan`, `set_boundary` (CONTROL_FRAME), `read_exposure_data`, `read_control_frame`, `read_channel_state`, `upload_identity_luts`, `read_focus`, `stop_scan`, `start_scan` retry behavior, and full-scan setup.
+- `tests/test_protocol_behavior.py` — CDB-level contracts for `set_window`, `read_scan_data`, `get_window`, and related methods.
+- `tests/test_batch_state_machine.py` — Batch frame transition validation with ASCII state machine diagram.
+- `tests/test_command_properties.py` — Parameterized CDB structure, WDB layout, and status parsing properties.
 
 The legacy full-sequence replay tests (`tests/test_usb_replay_prescan_sequence.py`
 and `tests/test_usb_replay_full_scan_sequence.py`) were removed because they
@@ -117,9 +118,9 @@ Normalize once per slice when building the fixture, document the rule in the tes
 
 Work in **order along the real single-bw session**, extending only as far as needed for a working scan:
 
-1. **Init / inquiry / mode** — **Done (replay).** `tests/test_usb_replay_init_sequence.py` locks **`golden_single_bw.txt` lines 1–123** through MODE_SELECT.
+1. **Init / inquiry / mode** — **Done.** `initialize_scanner()` matches golden fixture lines 1–123 through MODE_SELECT. Covered by contract tests in `tests/test_protocol_contracts.py`.
 2. **Prescan setup** — **Partially done.** Individual prescan helpers now match the golden fixture (`set_boundary_for_prescan`, `read_exposure_data`, `read_control_frame`, `read_channel_state`, `upload_identity_luts`). `prescan()` itself still needs restructuring to drop redundant `SET_WINDOW` calls and add the missing `CONTROL_FRAME` / channel-state reads.
-3. **Post-START_SCAN** — **Done (replay slice).** Status reads (`0x87`), `poll_until_ready()` pattern, and the 3-attempt retry behavior are covered by `tests/test_usb_replay_start_scan_golden.py` (lines 297-331).
+3. **Post-START_SCAN** — **Done.** Status reads (`0x87`), `poll_until_ready()` pattern, and the 3-attempt retry behavior are covered by `test_reissue_causes_resend` in `tests/test_protocol_properties.py` and `test_start_scan` contracts in `tests/test_protocol_contracts.py`.
 4. **Full prescan image path** — **Historical.** Was covered by the now-removed legacy full-sequence replay test. Coverage will be restored as part of composing `prescan_frame()` in Phase 3.
 5. **Full scan setup + polling** — **Partially done.** Individual full-scan helpers now match the golden fixture (`set_boundary`, `read_focus`, `read_channel_state(9)`, `upload_identity_luts(include_ir=True)`, `stop_scan`). `perform_scan_sequence()` still needs restructuring to follow the real full-scan slice (lines ~427-660+) and to remove the obsolete `reserve_unit` / `read_capacity` preamble.
 6. **Full scan image data** — **Historical.** Was covered by the now-removed legacy full-sequence replay test. Coverage will be restored as part of composing `full_scan_frame()` in Phase 3. Remaining validation still applies:
@@ -228,7 +229,7 @@ Use a narrower path while iterating (e.g. `pytest tests/test_prescan_sequence_ve
 
 ## Out of scope for this plan
 
-- **Batch / ADF** capture (`ls40-batch.pcapng`) — partially done via `test_usb_replay_batch_scan.py`. Full multi-image ADF workflow is next after P0/P1 fixes land.
+- **Batch / ADF** capture (`ls40-batch.pcapng`) — partially covered by state-machine tests in `tests/test_batch_state_machine.py` and batch helper contracts in `tests/test_protocol_contracts.py`. Full multi-image ADF workflow is next after P0/P1 fixes land.
 - **CI setup** (optional later).
 - **Bit-identical timing** to the pcap unless a specific bug is proven to be timing-related; then add **tolerant** timing or ordering checks only for that phase.
 - **SANE feature parity** — We implement the minimal scan path. SANE-specific features (multi-frame, LOAD/EJECT, 16-bit depth, independent X/Y resolution) are P2 gaps, tracked in SANE audit section above.

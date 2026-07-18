@@ -46,11 +46,100 @@ Byte 5: Control byte (0x80 for most commands, 0x00 for simple ones)
 - **USB format**: `16 00 00 00 00 00`
   - Control byte is 0x00 (simple command)
 
-#### READ_CAPACITY (10 bytes)
-- **USB format**: `25 00 00 00 00 00 00 00 3a 80`
-  - 10-byte command (not 6-byte)
-  - Byte 8: Allocation length high (0x3a = 58 bytes)
-  - Byte 9: Allocation length low | control (0x80)
+#### READ_CAPACITY / GET_WINDOW (0x25)
+
+**Purpose**: Read the current window descriptor block (WDB) state for a given
+window. Despite the SCSI name "READ_CAPACITY", this command functions as
+GET_WINDOW — it returns the same 58-byte WDB format sent via SET_WINDOW (0x24).
+
+##### CDB Format
+
+```
+Byte 0:   0x25 (READ_CAPACITY / GET_WINDOW)
+Byte 1:   Flags (0x00 = window 0 / global state, 0x01 = specific window)
+Byte 2-4: 0x00 (reserved)
+Byte 5:   Window ID (ignored when byte 1 = 0x00)
+Byte 6-7: 0x00 (reserved)
+Byte 8:   Allocation length (0x3a = 58 bytes)
+Byte 9:   Control byte (0x80)
+```
+
+**Examples from golden fixture:**
+- Window 0 (global state): `25 00 00 00 00 00 00 00 3a 80` — line 89
+- Window 1 (R channel): `25 01 00 00 00 01 00 00 3a 80` — line 94
+- Window 2 (G channel): `25 01 00 00 00 02 00 00 3a 80` — line 99
+- Window 3 (B channel): `25 01 00 00 00 03 00 00 3a 80` — line 104
+- Window 9 (IR channel): `25 01 00 00 00 09 00 00 3a 80` — line 114
+
+##### Response Format (58 bytes)
+
+The response mirrors the WDB format sent by SET_WINDOW (0x24). The data starts
+at byte 8 with the same 50-byte WDB payload (bytes 8-57 of the SET_WINDOW data).
+
+**Per-window response** (byte 1 of CDB = 0x01):
+```
+Byte 0:       Status / flags
+Bytes 1-7:    Header (varies)
+Byte 8:       Data length (always 0x32 = 50)
+Byte 9:       Window ID (0x01=R, 0x02=G, 0x03=B, 0x09=IR)
+Bytes 10-11:  X resolution (big-endian uint16)
+Bytes 12-13:  Y resolution (big-endian uint16)
+Bytes 14-17:  X offset (big-endian uint32)
+Bytes 18-21:  Y offset (big-endian uint32)
+Bytes 22-25:  Width (big-endian uint32)
+Bytes 26-29:  Height (big-endian uint32)
+Byte 30:      Brightness
+Byte 31:      Threshold
+Byte 32:      Contrast
+Byte 33:      Image composition (0x05=prescan, 0x02=normal)
+Byte 34:      Pixel composition/depth (0x0c=12-bit, 0x08=8-bit)
+Bytes 35-47:  Reserved zeros
+Byte 48:      Multiread / ordering
+Byte 49:      Averaging | Positive/Negative
+Byte 50:      Scan kind (0x01=normal, 0x02=prescan/AE, 0x20=AE, 0x40=AE_WB)
+Byte 51:      Scan mode (0x02=single, 0x10=multi)
+Byte 52:      Color interleave (0x02)
+Byte 53:      AE byte (0xff)
+Bytes 54-57:  Exposure value (big-endian uint32, 10ns units)
+```
+
+**Window 0 response** (byte 1 of CDB = 0x00):
+The window-0 response returns global scanner state rather than a per-window WDB.
+The format differs slightly: bytes 0-7 contain a header, byte 8 is 0x32, and
+bytes 10-13 typically hold the current Measurement Unit Divisor (MUD).
+
+**Example — window 0 response** (golden fixture line 93):
+```
+01 00 00 00 00 00 00 32 00 00 0b 54 0b 54 ...
+                          ^^ ^^  ^^ ^^ ^^ ^^
+                          len=50  MUD=0x0b54 (2900 DPI)
+```
+
+**Example — window 1 response** (golden fixture line 97, after setting full-res WDB):
+```
+00 38 00 00 00 00 00 32 01 00 0b 54 0b 54 00 00
+                       ^^    ^^ ^^ ^^ ^^
+                       len=50 wid=1  x_res=2900 y_res=2900
+```
+
+##### Per-Window vs Global
+
+| Window | CDB byte 1 | Returns |
+|--------|-----------|---------|
+| 0 | 0x00 | Global state: MUD, scanner config |
+| 1+ | 0x01 | Per-window WDB mirror of last SET_WINDOW for that window |
+
+The per-window READ_CAPACITY responses are used after prescan to read back the
+calibrated exposure values (bytes 54-57) that the scanner determined during
+auto-exposure. See `CoolscanProtocol.get_exposure_values()` in `protocol.py`.
+
+##### Known Issues
+
+The `read_capacity()` method at `protocol.py:4668` parses the response as a
+standard SCSI READ_CAPACITY format (capacity + block size). This does not
+match the actual 58-byte response layout described above. The
+`extract_read_capacity()` function in `scripts/analyze_capture.py` uses the
+correct WDB-based offsets.
 
 #### START_STOP_UNIT (start scan)
 - **USB format**: `1b 00 00 00 03 00`
@@ -260,19 +349,76 @@ Examples from `usb_capture_timing.txt`:
 ### Status Format (8 bytes) - Both Sources Agree
 
 ```
-Byte 0: Status byte (0x00 = READY, 0x02 = ERROR)
-Byte 1: Sense key (0x00 = no sense, 0x06 = unit attention)
+Byte 0: Status byte (0x00 = READY, 0x02 = CHECK_CONDITION)
+Byte 1: Sense key (lower nibble)
 Byte 2: ASC (Additional Sense Code)
 Byte 3: ASCQ (Additional Sense Code Qualifier)
-Bytes 4-7: Additional sense information
+Bytes 4-7: Additional sense information (byte 4 used for REISSUE aux code)
 ```
 
-### Status Types
+### Sense Key / ASC / ASCQ Reference
 
-- **READY (0x00)**: Scanner is ready
-- **NO_DOCS**: No film loaded (sense key 0x06, ASC 0x28)
-- **BUSY**: Scanner is busy (sense key 0x06, ASC 0x40 or 0x41)
-- **ERROR**: Error condition (sense key 0x02)
+This table is extracted from `_parse_status()` at `coolscan/protocol.py:1168`
+and cross-referenced with SANE `coolscan3.c:2045-2083`.
+
+| Key | ASC | ASCQ | Byte 4 | Protocol Status | Meaning | Example from Golden Fixture |
+|-----|-----|------|--------|-----------------|---------|-----------------------------|
+| `0x00` | — | — | — | `READY` | No sense — scanner is ready | `00 00 00 00 00 00 00 00` (line 332) |
+| `0x01` | `0x37` | `0x00` | — | `READY` | Recovered error — rounded parameter | |
+| `0x01` | other | — | — | `ERROR` | Recovered error (unexpected ASC) | |
+| `0x02` | `0x04` | `0x01` | — | `PROCESSING` | Not ready — becoming ready (scan in progress) | `02 02 04 01 00 00 00 00` (line 306) |
+| `0x02` | `0x3A` | `0x00` | — | `NO_DOCS` | Not ready — no medium present | |
+| `0x02` | other | — | — | `PROCESSING` | Not ready — unknown ASC (tolerate firmware quirks) | |
+| `0x03` | — | — | — | `ERROR` | Medium error | |
+| `0x04` | — | — | — | `ERROR` | Hardware error | |
+| `0x05` | — | — | — | `ERROR` | Illegal request (e.g. wrong datatype) | `05 26 00 00 ...` (SANE's 0x88 rejected) |
+| `0x06` | `0x28` | `0x00` | — | `NO_DOCS` | Unit attention — no document | |
+| `0x06` | `0x40` | — | — | `BUSY` | Unit attention — busy | |
+| `0x06` | `0x41` | — | — | `BUSY` | Unit attention — busy alt | |
+| `0x06` | other | — | — | `ERROR` | Unit attention (unexpected ASC) | |
+| `0x09` | `0x80` | `0x06` | `0x00` | `REISSUE` | Vendor-specific — resend command | `09 80 06 00 ...` (line 297, attempt 1) |
+| `0x09` | `0x80` | `0x06` | `0x01` | `REISSUE` | Vendor-specific — resend command alt | |
+| `0x09` | `0x80` | `0x01` | — | `READY` | Vendor-specific — command acknowledged (after REISSUE retry) | `09 80 01 00 ...` (line 303, attempt 2) |
+| `0x09` | other | — | — | `ERROR` | Vendor-specific (unexpected ASC) | |
+| `0x0B` | — | — | — | `ERROR` | Aborted command | |
+
+### REISSUE Pattern (3-Attempt Retry)
+
+The scanner uses sense key `0x09` (vendor-specific) for a 3-attempt
+handshake on `START_SCAN`:
+
+| Attempt | Status Bytes | Meaning | Action |
+|---------|-------------|---------|--------|
+| 1 | `09 80 06 00 ...` | REISSUE — scanner wants command resent | Read 6-byte status (0x87), then 33-byte status; retry |
+| 2 | `09 80 01 00 ...` | Vendor-specific acknowledge (treated as ERROR) | Read 6-byte status (0x87), then 24-byte status; retry |
+| 3 | `00 00 00 00 00 00 00 00` | READY — scan started successfully | Continue to polling |
+
+This matches golden fixture lines 297-331 and is implemented in
+`start_scan()` at `protocol.py:2414`. The pattern is consistent across
+prescan, full scan, and batch `START_SCAN` operations.
+
+### TUR Polling Pattern
+
+While a scan is running, `TEST_UNIT_READY` (`00 00 00 00 00 00`) returns:
+- `02 02 04 01 00 00 00 00` — PROCESSING (scanner is scanning)
+- `00 00 00 00 00 00 00 00` — READY (scan pass complete)
+
+The implementation uses `poll_until_ready()` (`protocol.py:2547`) for
+dynamic polling at 500ms intervals rather than a fixed sleep. The CLI
+analysis tool (`scripts/analyze_capture.py`) suppresses NOT_READY status
+during TUR polling as expected background noise.
+
+### StatusType Enum
+
+```python
+class StatusType(Enum):
+    READY      = 0   # 0x00 key — scanner is ready
+    BUSY       = 1   # 0x06 key, ASC 0x40/0x41 — scanner is busy
+    NO_DOCS    = 2   # 0x02 key ASC 0x3A or 0x06 key ASC 0x28 — no film
+    PROCESSING = 4   # 0x02 key ASC 0x04 — scan in progress
+    ERROR      = 8   # all other non-READY, non-REISSUE statuses
+    REISSUE    = 16  # 0x09 key ASC 0x80 ASCQ 0x06 — resend command
+```
 
 ## Scan Operations
 
@@ -343,7 +489,14 @@ The prescan performs auto-exposure (AE) at low resolution to determine optimal e
 Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The implementation uses
 `poll_until_ready()` for dynamic polling instead of a fixed 8-second sleep.
 
-**USB replay tests:** `tests/test_usb_replay_prescan_sequence.py` locks bulk I/O for `prescan()` against `test_basic_scan_capture.txt` **lines 88–208** (`CoolscanProtocol(..., usb_capture_replay=...)`). The checked-in text tail follows **code call order** (image data, then exposure, then `GET_WINDOW`), and large IN rows use **`@tests/fixtures/prescan_image_block*.bin`** (rebuilt from `ls40-single-bw.pcapng` via **`scripts/refresh_prescan_image_fixtures.py`**). A raw `tshark` export can split the same logical READ into multiple IN rows (see `docs/capture-driven-development-plan.md`, **Pcap vs text fixture**).
+**Test coverage:** Prescan sequence contracts are validated in
+`tests/test_protocol_contracts.py` (`test_prescan_frame_contract`, which
+asserts call order for `set_boundary_for_prescan`, `read_exposure_data`,
+`read_control_frame`, `read_channel_state`, `set_scan_window` ×3,
+`upload_identity_luts(include_ir=False)`, `start_scan`, and `poll_until_ready`).
+The prescan image data format and CDB allocation lengths are validated by
+`tests/test_read_scan_data_cdb.py`. For the complete phase-by-phase
+walkthrough, see `docs/scan-sequence.md`.
 
 ### Full Scan Sequence (from USB capture)
 
@@ -367,13 +520,13 @@ Poll with TEST_UNIT_READY until status returns sense_key=0x00 (READY). The imple
 > R/G/B/IR data (288×433). See `docs/protocol.md` for the verified decoding
 > recipe and channel order.
 
-**USB replay tests:** The legacy full-sequence replay test that locked
-`perform_scan_sequence()` to `test_basic_scan_capture.txt` was removed.
-Current coverage uses focused golden-fixture slices in
-`tests/test_usb_replay_fullscan_helpers_golden.py`, covering individual
-full-scan helpers: `set_boundary()` (CONTROL_FRAME), `read_focus()`,
-`read_channel_state(9)`, `upload_identity_luts(include_ir=True)`, and
-`stop_scan()`. Full-sequence replay will be restored once `perform_scan_sequence()`
+**Test coverage:** Full-scan helper contracts are validated in
+`tests/test_protocol_contracts.py` (`test_full_scan_setup_frame_contract`
+and `test_full_scan_capture_frame_contract`) covering `set_boundary()`
+(CONTROL_FRAME), `read_focus()`, `read_channel_state(9)`,
+`upload_identity_luts(include_ir=True)`, `stop_scan()`, and the capture
+frame sequence. CDB-level contracts are in `tests/test_protocol_behavior.py`.
+Full-sequence replay will be restored once `perform_scan_sequence()`
 is rewritten as composable scenario methods (see
 `.opencode/plans/golden-fixture-sequence-alignment.md`).
 
@@ -384,6 +537,84 @@ scanner's 65508-byte-per-chunk return behavior are still validated by
 `tests/test_read_scan_data_cdb.py`.
 
 **Remaining full scan validation:** (A) `tests/test_read_scan_data_cdb.py` proves `read_scan_data()` emits correct READ(10) CDBs for all stripe sizes (258048, 223488, 259200, 103680) plus status/exposure datatypes; (B) `tests/test_get_window_cdb.py` validates GET_WINDOW CDBs and WDB exposure extraction; (C) `tests/test_scan_read_integration.py` covers full control flow from setup through `read_scan_data(64)` to release_unit with synthetic IN data.
+
+## Batch Mode (Multi-Frame Scanning)
+
+Batch mode scans multiple film frames in sequence with auto-focus between
+frames. It uses a three-stage scan pipeline per frame: a low-resolution
+IR+RGB preview (Stage A), an intermediate preview (Stage B), and a
+full-resolution RGB capture (Stage C).
+
+**Oracle:** `ls40-batch.pcapng` / `reference/golden_batch.txt`
+
+### State Machine
+
+```
+idle -> setup -> stage_a_capture -> between -> stage_b_capture ->
+full_res_setup -> full_res_start -> full_res_capture ->
+(loop back to setup for next frame) -> teardown -> done
+```
+
+### Per-Frame Transitions
+
+| # | Transition | Method | Stage |
+|---|-----------|--------|-------|
+| 1 | setup -> stage_a_capture | `batch_full_scan_setup_frame()` | 290 DPI IR+RGB setup (similar to single-BW setup, but no `stop_scan`) |
+| 2 | -> scanning | `start_scan(BATCH)` | Start batch scan for Stage A |
+| 3 | -> data | `batch_full_scan_capture_frame()` | Read Stage A IR+RGB 290 DPI data |
+| 4 | -> between | `_wait_ready_or_replay_once()` x2 | Transition polls (TUR) |
+| 5 | between -> stage_b_capture | `batch_between_scan_setup_frame()` | Configure Stage B windows |
+| 6 | -> data | `batch_preview_capture_frame()` | Read Stage B preview data |
+| 7 | -> full_res_setup | `batch_full_res_setup_frame()` | Configure 2900 DPI at per-frame Y offset |
+| 8 | -> full_res_start | `batch_full_res_start_frame()` | START_SCAN + poll until READY |
+| 9 | -> full_res_capture | `batch_full_res_capture_frame()` | Read full-res RGB data |
+| -- | (before loop) | `post_prescan_autofocus()` + TUR x2 | Auto-focus at next frame center |
+| 10 | -> done | `scan_teardown()` | STOP_SCAN + RELEASE_UNIT |
+
+### Key Differences from Single-BW
+
+- **Setup does not call `stop_scan()`** -- batch `batch_full_scan_setup_frame()`
+  uploads LUTs and configures windows but skips `stop_scan()`; the next event
+  is `start_scan(BATCH)` rather than `stop_scan`.
+- **Three scan passes per frame** -- Stage A (290 DPI IR+RGB), Stage B (290 DPI
+  preview), Stage C (2900 DPI full res) run as separate `START_SCAN` -> poll ->
+  read -> next sequence.
+- **Per-frame auto-focus** -- Between frames, autofocus runs at the next frame's
+  center coordinates. Frame 0 autofocus happens during setup; frames 1+ use
+  `post_prescan_autofocus()`.
+- **Per-frame Y offset** -- Each frame's full-res WDBs are parameterized with a
+  Y offset computed as `first_y + frame_index * step`.
+- **IR LUT always uploaded** -- Batch mode uploads 4 LUTs (IR + RGB) per frame;
+  single-BW uploads 3 (RGB only) for the capture frame.
+- **`skip_autofocus` flag** -- For frames 1+, the setup frame replaces
+  autofocus with 4 TUR polls since focus was already set by
+  `post_prescan_autofocus()`.
+
+### Batch WDB Tables
+
+| Scan Type | DPI | Windows | Used For |
+|-----------|-----|---------|----------|
+| `"batch"` | 290 | 9, 1, 2, 3 | Stage A (IR+RGB setup) |
+| `"batch_between"` | 290 | 1, 2, 3 | Stage B (RGB preview, no IR) |
+| `"normal"` (per-frame offset) | 2900 | 1, 2, 3 | Stage C (full-res RGB) |
+
+### Orchestration
+
+`batch_scan_to_frames()` (`protocol.py:2880`) conducts the full flow:
+
+1. `prescan()` -- auto-exposure calibration
+2. Estimate `frame_count` from prescan image height
+3. `set_boundary(batch=True)` -- generated CONTROL_FRAME with per-frame entries
+4. For each frame `i`:
+   - If `i > 0`: reconfigure Stage A, start scan, capture Stage A
+   - Stage B: between setup -> start -> capture
+   - Stage C: full-res setup (per-frame Y offset) -> start -> capture
+   - If not last frame: autofocus at next center
+   - Yield `(frame_index, full_res_bytes, previews_dict)`
+5. `scan_teardown()` after all frames
+
+See `docs/scan-sequence.md` for the complete batch phase table and
+`tests/test_batch_state_machine.py` for the state-machine validation tests.
 
 ## Key Differences: SANE vs USB Capture
 

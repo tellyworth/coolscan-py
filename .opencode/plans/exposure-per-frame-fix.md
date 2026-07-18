@@ -4,33 +4,36 @@
 
 ### What We Found
 
-Captured WDB exposure values from three sources, all for identical 35mm negative scans:
+Captured WDB exposure values from multiple sources across different film types:
 
 | Source | Phase | Res | Frame | R (hex) | G (hex) | B (hex) | R (ms) |
 |--------|-------|-----|-------|--------:|--------:|--------:|-------:|
-| Nikon Scan (pcapng) | Prescan | 96 DPI | — | 0x09ce6 | 0x0f912 | 0x0d77a | 0.40 |
-| Nikon Scan (pcapng) | Setup (Stage A) | 290 DPI | frame 1 | 0x0ea05 | 0x0b4ed | 0x073bc | 0.60 |
-| Nikon Scan (pcapng) | Setup (Stage A) | 290 DPI | frame 2 | 0x0ea05 | 0x0b4ed | 0x073bc | 0.60 |
-| Nikon Scan (pcapng) | Main (Stage C) | 2900 DPI | frame 1 | 0x1a452 | 0x167d3 | 0x0a4a7 | 1.08 |
-| Nikon Scan (pcapng) | Main (Stage C) | 2900 DPI | frame 2 | 0x1a452 | 0x167d3 | 0x0a4a7 | 1.08 |
+| Nikon Scan (pcapng, single-bw) | Prescan | 96 DPI | — | 0x0a381 | 0x08452 | 0x04e29 | 0.42 |
+| Nikon Scan (pcapng, batch) | Prescan | 96 DPI | — | 0x09ce6 | 0x0f912 | 0x0d77a | 0.40 |
+| Nikon Scan (pcapng, batch) | Setup (Stage A) | 290 DPI | frame 1 | 0x0ea05 | 0x0b4ed | 0x073bc | 0.60 |
+| Nikon Scan (pcapng, batch) | Setup (Stage A) | 290 DPI | frame 2 | 0x0ea05 | 0x0b4ed | 0x073bc | 0.60 |
+| Nikon Scan (pcapng, batch) | Main (Stage C) | 2900 DPI | frame 1 | 0x1a452 | 0x167d3 | 0x0a4a7 | 1.08 |
+| Nikon Scan (pcapng, batch) | Main (Stage C) | 2900 DPI | frame 2 | 0x1a452 | 0x167d3 | 0x0a4a7 | 1.08 |
 | Our hardware capture | Prescan | 96 DPI | — | 0x07dad | 0x055fe | 0x03701 | 0.32 |
 | Our hardware capture | Setup (Stage A) | 290 DPI | any | 0x09f3b | 0x06cf4 | 0x045b0 | 0.40 |
 | Our hardware capture | Main (Stage C) | 2900 DPI | any | 0x09f3b | 0x06cf4 | 0x045b0 | 0.40 |
 | Our log file (single) | All phases | any | any | 0x1a452 | 0x167d3 | 0x0a4a7 | 1.08 |
-| Our WDB table defaults | prescan | 96 DPI | — | 0x00a381 | 0x008452 | 0x004e29 | 0.42 |
-| Our WDB table defaults | setup | 290 DPI | — | 0x00ea05 | 0x00b4ed | 0x0073bc | 0.60 |
-| Our WDB table defaults | single_bw | 2900 DPI | — | 0x01a452 | 0x167d3 | 0x00a4a7 | 1.08 |
-| Our WDB table defaults | normal | 2900 DPI | — | 0x01c91e | 0x1847e | 0x00ac49 | 1.17 |
-| Our WDB table defaults | batch | 290 DPI | — | 0x00d386 | 0x15ca7 | 0x12d6e | 0.54 |
-| Our WDB table defaults | batch_between | 290 DPI | — | 0x1b773 | 0x15ca7 | 0x00b33c | 1.12 |
+| WDB table defaults | prescan | 96 DPI | — | 0x00a381 | 0x008452 | 0x004e29 | 0.42 |
+| WDB table defaults | setup | 290 DPI | — | 0x00ea05 | 0x00b4ed | 0x0073bc | 0.60 |
+| WDB table defaults | single_bw | 2900 DPI | — | 0x01a452 | 0x167d3 | 0x00a4a7 | 1.08 |
+| WDB table defaults | normal | 2900 DPI | — | 0x01c91e | 0x1847e | 0x00ac49 | 1.17 |
+| WDB table defaults | batch | 290 DPI | — | 0x00d386 | 0x15ca7 | 0x12d6e | 0.54 |
+| WDB table defaults | batch_between | 290 DPI | — | 0x1b773 | 0x15ca7 | 0x00b33c | 1.12 |
+
+**Note:** Prescan exposure varies by film content and film type. The WDB table defaults (0x0a381/0x08452/0x04e29) match `ls40-single-bw.pcapng`'s 96-DPI prescan exactly. The batch capture's prescan (0x09ce6) differs because it's a different film frame with different density. Negative film captures (`ls40-batch-neg.pcapng`) show further divergence (prescan R=0x09a34, G>>R).
 
 ### Problems Identified
 
-1. **Calibrated exposure applied uniformly to all scan types.** `read_channel_state()` measures exposure during prescan (96 DPI conditions) and stores values in `_calibrated_exposure`. Then `set_scan_window()` auto-applies these same values to setup (290 DPI), Stage B (290 DPI), and main scan (2900 DPI). The scanner needs ~2.7x more exposure for 2900 DPI than 96 DPI, but we send the same value.
+1. **Calibrated exposure applied uniformly to all scan types.** `read_channel_state()` measures exposure during prescan (96 DPI conditions) and stores values in `_calibrated_exposure`. Then `set_scan_window()` auto-applies these same values to setup (290 DPI), Stage B (290 DPI), and main scan (2900 DPI). The scanner needs different exposure per phase — for B&W film the prescan→main ratio is ~2.5-2.9×, but for negative film it's ~1.7×. Sending prescan-calibrated values to all phases is wrong regardless of the exact multiplier.
 
-2. **Wrong channel ratios.** `read_channel_state` returns R:G:B = 1.0:0.68:0.44. Nikon's WDB values maintain R:G:B = 1.0:1.59:1.37 (G and B need more exposure than R on this scanner). Our code corrupts the ratio.
+2. **Channel ratios vary by scan type and film.** `read_channel_state` returns R:G:B = 1.0:0.68:0.44 (our hardware). Nikon's WDB values use different ratios per phase: prescan is ~1:0.81:0.48 (G < R), batch setup is ~1:1.65:1.43 (G > R), and negative film main scan is ~1:2.0:1.0 (G >> R due to orange mask). Auto-applying a single calibrated ratio across all phases corrupts whatever the correct ratio should be for that phase.
 
-3. **All frames get identical exposure.** `batch_scan_to_frames` never updates calibrated exposure between frames. Even if different parts of the negative have different densities, we send the same WDB.
+3. **All frames get identical exposure.** `batch_scan_to_frames` never updates calibrated exposure between frames. Even if different parts of the film have different densities, we send the same WDB. Nikon Scan varies Stage B (R only) and Stage C (all channels) per frame — verified from `golden_batch.txt` where Stage C R goes 0x1c91e→0x1bdc0→0x1b6b3→0x1b3bf→0x1adf5→0x1aa60 across 6 frames.
 
 4. **The log file scan (`scan_20260712_154045.txt`) works correctly** because it uses `full_scan_frame()` → `perform_scan_sequence()` flow, which calls `get_exposure_values()` (GET_WINDOW read-back) after SET_WINDOW and uses those scanner-computed values. It doesn't go through `batch_scan_to_frames`.
 
@@ -44,8 +47,9 @@ The WDB tables (`_SCAN_WINDOW_WDB_TABLES`) have correct per-type exposure values
 
 1. Sends WDB with table-default exposure for each scan type
 2. After SET_WINDOW, reads back the WDB via `GET_WINDOW` (datatype 0x25) — the scanner may recalibrate internally
-3. Uses the read-back values to update subsequent phase WDBs (but within the same phase, sends the same values)
+3. In batch mode, Stage A (290 DPI) sends identical WDBs across all frames; per-frame variation only appears in Stage B (R varies, G/B constant) and Stage C (all channels vary)
 4. Does NOT use `read_channel_state` to override exposure in main scan WDBs
+5. The source of per-frame variation (software computation from preview data vs. scanner read-back) is unclear from wire captures alone — both are possible
 
 ## Plan
 
@@ -76,7 +80,7 @@ elif (
     # ... existing logic for applying calibrated exposure ...
 ```
 
-For the remaining types ("single_bw", "normal"), keep the existing auto-apply behavior. This way, `read_channel_state` values still flow through for single-scan mode, and `GET_WINDOW` read-back in `perform_scan_sequence()` can update `_calibrated_exposure` correctly.
+For the remaining types ("single_bw", "normal"), keep the existing auto-apply behavior. In the single-scan flow, `perform_scan_sequence()`'s `get_exposure_values()` read-back (line 4333, after prescan) already runs BEFORE `set_scan_window("normal")` (line 4902), so `_calibrated_exposure` contains setup-phase values, not prescan values. In batch mode, the GET_WINDOW read-back after each frame's setup phase similarly updates exposure before the main scan SET_WINDOW.
 
 ### Step 2: Add per-frame exposure read-back in batch mode
 
@@ -98,7 +102,7 @@ if _frame_exposures:
 
 Then for Stage C (line ~3035), when calling `set_scan_window()`, the auto-applied exposure will be the frame-specific read-back value.
 
-**Note:** For frames 1+, Stage A is re-run first, so the read-back naturally reflects that frame's conditions.
+**Note:** For frames 1+, Stage A is re-run first, so the read-back naturally reflects that frame's conditions. However, Stage A sends identical WDBs across all frames (verified in `golden_batch.txt` — all 6 frames have R=0x0d386). Whether the scanner's GET_WINDOW read-back returns frame-varying values despite identical input is uncertain. Nikon's captures show per-frame variation at Stage B and C, but whether that comes from GET_WINDOW read-back or from Nikon's internal software computation (analyzing preview data between stages) cannot be determined from wire captures alone. This approach should be validated against hardware before relying on it.
 
 ### Step 3: Fix IR channel handling in batch mode
 
@@ -175,8 +179,12 @@ Check for:
 
 1. **Fixture replay:** The `use_calibrated_exposure` check already bypasses auto-apply during replay. Adding `_NO_CALIBRATED_EXPOSURE_TYPES` is an additional guard. No fixture breakage expected.
 
-2. **Single scan mode (`full_scan_frame()`):** Steps 1-2 don't affect `perform_scan_sequence()` directly because its `get_exposure_values()` read-back already populates `_calibrated_exposure` correctly. Single scan flow already works (as proven by the log file scan).
+2. **Single scan mode (`full_scan_frame()`):** Steps 1-2 don't affect `perform_scan_sequence()` directly. After prescan, `get_exposure_values()` read-back (line 4333) updates `_calibrated_exposure` with setup-phase values before `set_scan_window("normal")` is called (line 4902). Single scan flow already works (as proven by the log file scan).
 
-3. **Backward compat:** `set_calibrated_exposure()` and explicit `exposure=` parameter continue to work. Only auto-apply behavior changes.
+3. **Per-frame read-back uncertainty:** Step 2's mechanism may not produce per-frame variation. Stage A sends identical WDBs for all frames, and GET_WINDOW read-back may return the same values regardless. Nikon's per-frame variation at Stage B/C may come from internal software computation (analyzing preview image data), not from a simple read-back. Hardware validation is required to determine which.
 
-4. **Zero-impact alternative:** If tests show the scanner internally recalculates exposure anyway (READ_CAPACITY returns same value regardless of WDB), this fix might be unnecessary. However, matching Nikon's wire protocol is the right approach per AGENTS.md trust hierarchy (pcapng is ground truth).
+4. **Backward compat:** `set_calibrated_exposure()` and explicit `exposure=` parameter continue to work. Only auto-apply behavior changes.
+
+5. **Negative film:** The 3 additional captures (`ls40-batch-neg.pcapng`, `ls40-batch-session.pcapng`, `ls40-single-negs.pcapng`) show different exposure scaling (~1.7× prescan→main for negatives vs ~2.7× for B&W) and different channel ratios (G>>R). The fix should be validated against these captures before declaring it complete.
+
+6. **Zero-impact alternative:** If tests show the scanner internally recalculates exposure anyway (READ_CAPACITY returns same value regardless of WDB), this fix might be unnecessary. However, matching Nikon's wire protocol is the right approach per AGENTS.md trust hierarchy (pcapng is ground truth).

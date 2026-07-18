@@ -38,7 +38,7 @@
 ## Current implementation status
 
 Individual prescan helpers now match the golden fixture and are covered by
-focused replay tests in `tests/test_usb_replay_prescan_helpers_golden.py`:
+contract tests in `tests/test_protocol_contracts.py`:
 
 - `set_boundary_for_prescan()`
 - `read_exposure_data()`

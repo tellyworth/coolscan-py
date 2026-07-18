@@ -231,12 +231,13 @@ same exposure information that prescan is designed to measure.
 
 **Replay / fixture status:** The legacy full-sequence replay tests that locked
 `prescan()` and `perform_scan_sequence()` to `test_basic_scan_capture.txt` were
-removed. Current coverage uses focused golden-fixture slices:
-`tests/test_usb_replay_start_scan_golden.py` (START_SCAN retry pattern),
-`tests/test_usb_replay_prescan_helpers_golden.py`, and
-`tests/test_usb_replay_fullscan_helpers_golden.py`. Full-sequence replay will be
-restored once `prescan()` and `perform_scan_sequence()` are rewritten as
-composable scenario methods (see `.opencode/plans/golden-fixture-sequence-alignment.md`).
+removed. Current coverage uses contract tests (`tests/test_protocol_contracts.py`)
+and property tests (`tests/test_protocol_properties.py`) with focused golden
+fixture references. START_SCAN retry behavior is covered by
+`test_reissue_causes_resend` in `tests/test_protocol_properties.py`.
+Full-sequence replay will be restored once `prescan()` and
+`perform_scan_sequence()` are rewritten as composable scenario methods (see
+`.opencode/plans/golden-fixture-sequence-alignment.md`).
 
 ### Beyond prescan (`ls40-single-bw`): full-resolution image READs
 

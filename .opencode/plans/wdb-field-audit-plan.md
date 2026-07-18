@@ -6,11 +6,11 @@ Goal: Eliminate re-analyzing captures and tracing protocol.py from scratch for e
 
 ## Deliverable 1: `docs/wdb-field-reference.md`
 
-Pre-computed reference from `ls40-single-bw.pcapng` + `ls40-batch.pcapng`.
+Pre-computed reference from all 5 captures: `ls40-single-bw.pcapng`, `ls40-batch.pcapng`, `ls40-batch-neg.pcapng`, `ls40-batch-session.pcapng`, `ls40-single-negs.pcapng`.
 
 ### Content
 
-**Section A: WDB layout cheat sheet** — table of all 58 bytes with offset, width, name, and meaning. Already partially exists in `to_bytes_58()` docstring at `protocol.py:274-292`, but needs to be standalone.
+**Section A: WDB layout cheat sheet** — table of all 58 bytes with offset, width, name, and meaning. Partially exists in `to_bytes_58()` docstring at `protocol.py:274-292`, but the docstring has known errors (byte 34 prescan value, byte 50 label mismatch, "film_type" mislabeling of byte 49). The reference doc should be authoritative, derived from actual pcapng data, not the buggy docstring.
 
 **Section B: Mutable field values per scan type** — for each field that varies, a table like:
 
@@ -18,10 +18,16 @@ Pre-computed reference from `ls40-single-bw.pcapng` + `ls40-batch.pcapng`.
 |#|#|#|#|#|#|
 |10-13 | resolution | 0x0060 | 0x0122 | 0x0b54 | 0x0122 | 0x0122 |
 |18-21 | y_offset | 0 | 0x024e | 0x024e | 0x001e | 0x001e |
-|34 | transfer_mode | 0x08 | 0x0C | 0x08 | 0x0C | 0x0C |
-|49 | film_type | 0x81 | 0x80 | 0x00 | 0x80 | 0x80 |
+|34 | transfer_mode | 0x0C | 0x0C | 0x08 | 0x0C | 0x0C |
+|49 | phase_flag | 0x81 | 0x80 | 0x00 | 0x80 | 0x80 |
 |50 | sub_mode | 0x02 | 0x01 | 0x01 | 0x01 | 0x01 |
 |54-57 | exposure | 0x0a381 | 0x0ea05 | 0x1a452 | 0x0d386 | 0x1b773 |
+
+**Notes on field values:**
+- **Byte 34:** prescan uses `0x0c` (not `0x08` as the docstring claims). The docstring at `protocol.py:286` says `"0x08=prescan/main, 0x0C=low-res"` but the actual prescan table data (derived from pcapng) uses `0x0c`. Only `single_bw` and `normal` (non-IR) use `0x08`.
+- **Byte 49:** Labeled "phase_flag" (not "film_type") — encodes scan phase, not film format. `0x81`=prescan/low-res, `0x80`=IR/preview, `0x00`=main capture.
+- **Byte 50:** The docstring says `"0x01=prescan/main"` but actual prescan uses `0x02` (which the docstring describes as "low-res 96 DPI"). The docstring is wrong; the table data is correct.
+- **Exposure:** Values shown are from `ls40-single-bw.pcapng` (B&W film). Exposure varies per capture, per frame, and per film type. Negative film captures show G>>R ratios and ~1.7× prescan→main scaling (vs ~2.7× for B&W). The reference doc should list ranges or per-capture values, not single constants.
 
 This table is derived from:
 1. `_SCAN_WINDOW_WDB_TABLES` (our code defaults)
@@ -48,9 +54,10 @@ Document which overrides are deliberate (y_offset per frame) vs which are bugs (
 
 One-shot script: `scripts/generate_wdb_reference.py`
 - Reads `_SCAN_WINDOW_WDB_TABLES` from protocol.py (import or parse)
-- Parses pcapng files via existing `analyze_capture.py --extract-wdbs`
+- Parses all 5 pcapng files via existing `analyze_capture.py --extract-wdbs` (including negative film captures)
 - Parses `GET_WINDOW` / `READ_CAPACITY` read-backs from the same extractions
-- Outputs markdown tables
+- Outputs markdown tables with per-capture values where they differ
+- For exposure field: output ranges or per-capture values, not single constants (exposure varies by film type, frame, and content)
 
 Run once, commit the output to `docs/wdb-field-reference.md`. Regenerate when captures change.
 

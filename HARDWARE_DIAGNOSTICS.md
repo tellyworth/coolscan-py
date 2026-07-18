@@ -37,10 +37,10 @@ but the scanner becomes `READY` on the **third** attempt.
 - Fixed contradictory assertion in
   `tests/test_prescan_sequence_verification.py::test_prescan_no_test_unit_ready_after_luts`.
 - Updated `tests/test_protocol_properties.py::test_reissue_causes_resend` to
-  exercise the real 3-attempt `REISSUE → ERROR → READY` pattern.
-- Added `tests/test_usb_replay_start_scan_golden.py`, which replays the
-  canonical 3-attempt `START_SCAN` slice from
-  `tests/fixtures/golden_single_bw.txt` (lines 297-331).
+  exercise the real 3-attempt `REISSUE → ERROR → READY` pattern
+  (golden fixture lines 297-331).
+- Added `start_scan` contract tests in `tests/test_protocol_contracts.py` covering
+  the 3-attempt retry pattern and status/progress read behavior.
 
 ## Structural Code / Fixture Mismatches Found
 
@@ -117,14 +117,14 @@ refactor plan. Summary:
 ## Remaining Testing-Strategy Work (short term)
 
 - The legacy full-sequence replay tests that loaded `test_basic_scan_capture.txt`
-  (`tests/test_usb_replay_full_scan_sequence.py` and
-  `tests/test_usb_replay_prescan_sequence.py`) were removed; they depended on
-  the old per-operation reservation model and on a legacy fixture that is
-  superseded by `tests/fixtures/golden_single_bw.txt`. Future coverage will use
-  focused slice tests and cross-capture property tests rather than full-sequence
-  replay against a single capture.
-- The focused golden-fixture `START_SCAN` test now covers the critical retry
-  behavior that caused the current hardware failure.
+  were removed; they depended on the old per-operation reservation model and on
+  a legacy fixture superseded by `tests/fixtures/golden_single_bw.txt`. Future
+  coverage uses focused contract tests (`tests/test_protocol_contracts.py`),
+  property tests (`tests/test_protocol_properties.py`), and CDB-level behavior
+  tests (`tests/test_protocol_behavior.py`) rather than full-sequence replay
+  against a single capture.
+- The `START_SCAN` 3-attempt retry is covered by `test_reissue_causes_resend`
+  in `tests/test_protocol_properties.py` and by `start_scan` contract tests.
 
 ## Historical Notes (possibly stale)
 

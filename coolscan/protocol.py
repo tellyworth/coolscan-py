@@ -1,8 +1,53 @@
 """
-Communication protocol for Nikon Coolscan scanners.
+Communication protocol for Nikon Coolscan scanners (LS-40 ED).
 
-This module implements the low-level communication protocol used by
-Coolscan scanners, based on the SANE backend implementation.
+Architecture (layered, bottom-up):
+
+  **Layer 1 — USB Transport** (``_init_usb``, ``_usb_write_bulk``, ``_usb_read_bulk``)
+    Raw bulk transfers on endpoints 0x01 (OUT) and 0x82 (IN).  Handles
+    device claim, configuration, and timeout/retry logic.  When
+    ``usb_capture_replay`` is provided, all I/O is serviced by
+    ``UsbCaptureReplay`` instead of real hardware.
+
+  **Layer 2 — Command Dispatch** (``_issue_usb_command``)
+    Sends a 6- or 10-byte CDB, performs mandatory phase checking (``0xd0``
+    probe → phase response → DATA_OUT/DATA_IN/STATUS), and returns
+    ``(data_bytes, StatusType)``.  Handles overflow detection, REISSUE
+    retries, and short reads.  This is the core wire-format engine;
+    every command method delegates to it.
+
+  **Layer 3 — Specific Commands** (``@sends``-decorated methods)
+    High-level protocol commands: ``inquiry``, ``test_unit_ready``,
+    ``set_scan_window``, ``start_scan``, ``read_scan_data``,
+    ``upload_identity_luts``, etc.  Each constructs a CDB, calls
+    ``_issue_usb_command``, and parses the response.  The ``@sends``
+    decorator records which command code(s) a method emits; used by
+    ``scripts/analyze_capture.py --annotate`` to detect unhandled
+    capture commands.
+
+  **Layer 4 — Scenario Methods** (``prescan_frame``, ``full_scan_setup_frame``,
+    ``full_scan_capture_frame``, ``batch_scan_to_frames``, etc.)
+    Composable sequences of Layer-3 calls validated against pcapng
+    captures.  Each docstring lists the golden-fixture line range it
+    reproduces.  These are the recommended entry points for high-level
+    scan orchestration.
+
+Key types:
+    ``PhaseType`` — ``0x01`` STATUS, ``0x02`` DATA_OUT, ``0x03`` DATA_IN
+    ``StatusType`` — ``READY``, ``ERROR``, ``REISSUE``, ``BUSY``, ...
+    ``DataType`` — datatype codes used in ``READ(0x28)``/``WRITE(0x2a)`` byte 2
+    ``WindowDescriptorBlock`` — 58-byte LS-40 ED WDB (``to_bytes_58`` /
+        ``from_bytes_58`` match pcapng captures; ``to_bytes`` / ``from_bytes``
+        implement the legacy 117-byte SANE format)
+
+Wire-format authority: ``ls40-single-bw.pcapng`` (primary) and
+``reference/golden_single_bw.txt`` (auto-derived from pcapng).  The
+SANE backend (``backends-1.4.0/backend/coolscan3.c``) is known buggy
+and incomplete; the pcapng captures are the ground truth.
+
+See ``docs/unified-protocol-spec.md`` for byte-level CDB and WDB layout,
+``docs/scan-sequence.md`` for phase-by-phase command walkthroughs, and
+``docs/commands.md`` for a per-command reference.
 """
 
 import struct
@@ -452,8 +497,17 @@ class ScannerInfo:
 # bytes sent on the wire.  Bytes 8 (window_id), 10–13 (resolution), and
 # 34 (bits_per_pixel) are parameterized by _build_scan_window_wdb();
 # all other bytes are preserved verbatim from the capture.
+#
+# Scan types:
+#   "prescan"       — 96 DPI, AE, windows 1/2/3, golden fixture ~lines 263-273
+#   "setup"         — 290 DPI, IR+RGB, windows 9/1/2/3, golden fixture ~lines 479-494
+#   "single_bw"     — 2900 DPI full-res RGB capture, windows 1/2/3, golden fixture ~lines 607-621
+#   "normal"        — 2900 DPI with alternate offset, golden fixture ~lines 148-163 (init)
+#   "batch"         — 290 DPI batch Stage A (IR+RGB), windows 9/1/2/3, golden_batch.txt ~lines 308-323
+#   "batch_between" — 290 DPI batch Stage B (RGB), windows 1/2/3, golden_batch.txt ~lines 3102-3114
 # ---------------------------------------------------------------------------
 _SCAN_WINDOW_WDB_TABLES: Dict[str, Dict[int, bytes]] = {
+    # golden_single_bw.txt lines ~263 (win 1), ~268 (win 2), ~273 (win 3)
     "prescan": {
         1: bytes.fromhex(
             "0000000000000032010000600060000000000000000000000b3600008760000000050c000000000000000000000000000081020202ff0000a381"
@@ -465,6 +519,7 @@ _SCAN_WINDOW_WDB_TABLES: Dict[str, Dict[int, bytes]] = {
             "0000000000000032030000600060000000000000000000000b3600008760000000050c000000000000000000000000000081020202ff00004e29"
         ),
     },
+    # golden_single_bw.txt lines ~479 (win 9), ~484 (win 1), ~489 (win 2), ~494 (win 3)
     "setup": {
         9: bytes.fromhex(
             "0000000000000032090001220122000000000000024e00000b36000010ec000000050c000000000000000000000000000080010202ff0001c305"
@@ -479,6 +534,7 @@ _SCAN_WINDOW_WDB_TABLES: Dict[str, Dict[int, bytes]] = {
             "0000000000000032030001220122000000000000024e00000b36000010ec000000050c000000000000000000000000000080010202ff000073bc"
         ),
     },
+    # golden_single_bw.txt lines ~607 (win 1), ~612 (win 2), ~617 (win 3)
     "single_bw": {
         1: bytes.fromhex(
             "000000000000003201000b540b54000000000000024e00000b36000010ec0000000508000000000000000000000000000000010202ff0001a452"
@@ -490,6 +546,8 @@ _SCAN_WINDOW_WDB_TABLES: Dict[str, Dict[int, bytes]] = {
             "000000000000003203000b540b54000000000000024e00000b36000010ec0000000508000000000000000000000000000000010202ff0000a4a7"
         ),
     },
+    # golden_single_bw.txt lines ~148 (win 1), ~153 (win 2), ~158 (win 3), ~163 (win 9)
+    # — session initialization WDBs (different Y offset from "single_bw")
     "normal": {
         1: bytes.fromhex(
             "000000000000003201000b540b54000000000000001e00000b36000010ec0000000508000000000000000000000000000000010202ff0001c91e"
@@ -504,6 +562,7 @@ _SCAN_WINDOW_WDB_TABLES: Dict[str, Dict[int, bytes]] = {
             "0000000000000032090001220122000000000000111c00000b36000010ec000000050c000000000000000000000000000080010202ff0001d1ae"
         ),
     },
+    # golden_batch.txt lines ~308 (win 9), ~313 (win 1), ~318 (win 2), ~323 (win 3)
     "batch": {
         9: bytes.fromhex(
             "0000000000000032090001220122000000000000001e00000b36000010ec000000050c000000000000000000000000000080010202ff0001d1ae"
@@ -518,6 +577,7 @@ _SCAN_WINDOW_WDB_TABLES: Dict[str, Dict[int, bytes]] = {
             "0000000000000032030001220122000000000000001e00000b36000010ec000000050c000000000000000000000000000080010202ff00012d6e"
         ),
     },
+    # golden_batch.txt lines ~3102 (win 1), ~3107 (win 2), ~3112 (win 3)
     "batch_between": {
         1: bytes.fromhex(
             "0000000000000032010001220122000000000000001e00000b36000010ec000000050c000000000000000000000000000080010202ff0001b773"
