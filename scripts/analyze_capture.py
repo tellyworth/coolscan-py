@@ -27,24 +27,30 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from coolscan.usb_replay import _decode_payload_field, BULK_OUT_EP, BULK_IN_EP
+from coolscan.protocol import (
+    DataType,
+    PhaseType,
+    StatusType,
+    WindowDescriptorBlock,
+    CHANNEL_RED,
+    CHANNEL_GREEN,
+    CHANNEL_BLUE,
+    CHANNEL_IR,
+    WDB_MODE_PRESCAN,
+    WDB_MODE_PREVIEW_MAIN,
+    WDB_TRANSFER_PRESCAN_MAIN,
+    WDB_TRANSFER_LOW_RES_PREVIEW,
+    WDB_FILM_PRESCAN,
+    WDB_FILM_IR_PREVIEW,
+    WDB_FILM_MAIN_SCAN,
+    WDB_SUBMODE_PRESCAN_MAIN,
+    WDB_SUBMODE_LOW_RES_96DPI,
+    parse_status_response,
+)
 
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
-
-
-class SenseKey:
-    """SCSI sense key names."""
-    GOOD = "GOOD"
-    RECOVERED_ERR = "RECOVERED_ERR"
-    NOT_READY = "NOT_READY"
-    MEDIA_ERR = "MEDIA_ERR"
-    HARDWARE_ERR = "HARDWARE_ERR"
-    ILLEGAL_REQ = "ILLEGAL_REQ"
-    UNIT_ATTENTION = "UNIT_ATTENTION"
-    DATA_PROTECT = "DATA_PROTECT"
-    VENDOR_SPECIFIC = "VENDOR_SPECIFIC"
-    ABORTED = "ABORTED"
 
 
 class Phase(Enum):
@@ -77,40 +83,9 @@ CMD_NAMES: Dict[int, str] = {
     0xe1: "VENDOR_E1",
 }
 
-SENSE_KEY_NAMES: Dict[int, str] = {
-    0x00: SenseKey.GOOD,
-    0x01: SenseKey.RECOVERED_ERR,
-    0x02: SenseKey.NOT_READY,
-    0x03: SenseKey.MEDIA_ERR,
-    0x04: SenseKey.HARDWARE_ERR,
-    0x05: SenseKey.ILLEGAL_REQ,
-    0x06: SenseKey.UNIT_ATTENTION,
-    0x07: SenseKey.DATA_PROTECT,
-    0x09: SenseKey.VENDOR_SPECIFIC,
-    0x0B: SenseKey.ABORTED,
-}
-
-PHASE_TYPE_NAMES: Dict[int, str] = {
-    0x00: "NONE",
-    0x01: "STATUS",
-    0x02: "OUT",
-    0x03: "IN",
-    0x04: "BUSY",
-}
-
-DATA_TYPE_NAMES: Dict[int, str] = {
-    0x00: "IMAGE_DATA",
-    0x01: "LUT",
-    0x87: "STATUS_PROGRESS",
-    0x8F: "CONTROL_FRAME",
-    0x92: "BORDER_POSITION",
-    0x8C: "CHANNEL_STATE",
-    0xA0: "SHADING_DATA",
-    0x8E: "EXPOSURE_CALIBRATION",
-    0x88: "IMAGE_POSITIONS",
-    0xC0: "USER_REG_GAMMA",
-    0xE0: "DEVICE_INTERNAL_INFO",
-}
+# Derived from shared enums/constants
+DATA_TYPE_NAMES: Dict[int, str] = {dt.value: dt.name for dt in DataType}
+PHASE_TYPE_NAMES: Dict[int, str] = {pt.value: pt.name for pt in PhaseType}
 
 E0_SUBCODE_NAMES: Dict[int, str] = {
     0x80: "reset",
@@ -127,33 +102,33 @@ E1_SUBCODE_NAMES: Dict[int, str] = {
     0xc1: "get_focus",
 }
 
-# Channel name lookup
+# Channel name lookup (derived from shared constants)
 CHANNEL_NAMES: Dict[int, str] = {
     0: "default",
-    1: "R",
-    2: "G",
-    3: "B",
+    CHANNEL_RED: "R",
+    CHANNEL_GREEN: "G",
+    CHANNEL_BLUE: "B",
     4: "reserved",
-    9: "IR",
+    CHANNEL_IR: "IR",
 }
 
-# WDB mode names (58-byte capture format, bytes 32-33)
+# WDB mode names (derived from shared constants)
 _WDB_MODE_NAMES: Dict[int, str] = {
-    0x0002: "prescan",
-    0x0005: "preview/main",
+    WDB_MODE_PRESCAN: "prescan",
+    WDB_MODE_PREVIEW_MAIN: "preview/main",
 }
 
-# WDB transfer byte names (58-byte capture format, byte 34)
+# WDB transfer byte names (derived from shared constants)
 _WDB_TRANSFER_NAMES: Dict[int, str] = {
-    0x08: "prescan/main",
-    0x0C: "low-res preview",
+    WDB_TRANSFER_PRESCAN_MAIN: "prescan/main",
+    WDB_TRANSFER_LOW_RES_PREVIEW: "low-res preview",
 }
 
-# WDB film/preview flag names (58-byte capture format, byte 49)
+# WDB film/preview flag names (derived from shared constants)
 _WDB_FILM_NAMES: Dict[int, str] = {
-    0x00: "main",
-    0x80: "IR preview",
-    0x81: "prescan/low-res",
+    WDB_FILM_MAIN_SCAN: "main",
+    WDB_FILM_IR_PREVIEW: "IR preview",
+    WDB_FILM_PRESCAN: "prescan/low-res",
 }
 
 
@@ -386,44 +361,29 @@ def load_capture_decoded(path: str) -> List[Event]:
 
 
 def _decode_wdb_58(data: bytes) -> Dict[str, Any]:
-    """Decode a 58-byte capture WDB payload."""
+    """Decode a 58-byte capture WDB payload using shared protocol parsing."""
     if len(data) < 58:
         return {}
-    import struct as _struct
 
-    channel = data[8]
-    ch_name = CHANNEL_NAMES.get(channel, f"ch{channel}")
-
-    x_res = _struct.unpack(">H", data[10:12])[0]
-    y_res = _struct.unpack(">H", data[12:14])[0]
-
-    frame_offset = _struct.unpack(">I", data[18:22])[0]
-    width = _struct.unpack(">I", data[22:26])[0]
-    line_count = _struct.unpack(">H", data[30:32])[0]
-
-    mode = _struct.unpack(">H", data[32:34])[0]
-    mode_name = _WDB_MODE_NAMES.get(mode, f"0x{mode:04x}")
-
-    transfer_byte = data[34]
-    transfer_name = _WDB_TRANSFER_NAMES.get(transfer_byte, f"0x{transfer_byte:02x}")
-
-    film_flag = data[49]
-    film_name = _WDB_FILM_NAMES.get(film_flag, f"0x{film_flag:02x}")
-
-    sub_mode = data[50]
-    exposure = _struct.unpack(">I", data[54:58])[0]
+    wdb = WindowDescriptorBlock.from_bytes_58(data)
+    ch_name = CHANNEL_NAMES.get(wdb.channel, f"ch{wdb.channel}")
+    mode_name = _WDB_MODE_NAMES.get(wdb.wdb_mode, f"0x{wdb.wdb_mode:04x}")
+    transfer_name = _WDB_TRANSFER_NAMES.get(
+        wdb.transfer_byte, f"0x{wdb.transfer_byte:02x}"
+    )
+    film_name = _WDB_FILM_NAMES.get(wdb.film_flag, f"0x{wdb.film_flag:02x}")
 
     return {
-        "channel": f"{ch_name}({channel})",
-        "resolution": f"{x_res}x{y_res}",
-        "frame_offset": f"0x{frame_offset:08x}",
-        "width": width,
-        "lines": line_count,
+        "channel": f"{ch_name}({wdb.channel})",
+        "resolution": f"{wdb.x_resolution}x{wdb.y_resolution}",
+        "frame_offset": f"0x{wdb.frame_offset:08x}",
+        "width": wdb.width,
+        "lines": wdb.length,
         "mode": mode_name,
         "transfer": transfer_name,
         "film": film_name,
-        "sub_mode": sub_mode,
-        "exposure": f"0x{exposure:08x}",
+        "sub_mode": wdb.sub_mode,
+        "exposure": f"0x{wdb.exposure:08x}",
     }
 
 
@@ -621,22 +581,28 @@ def decode_in_response(raw: bytes) -> DecodedInfo:
         )
 
     if len(raw) == 8:
-        sense_key = raw[1] & 0x0F
-        sense_name = SENSE_KEY_NAMES.get(
-            sense_key, f"UNKNOWN_0x{sense_key:02x}"
-        )
-        is_error = sense_key not in (0x00, 0x01, 0x09)
+        status, info = parse_status_response(raw)
+        sense_key = info["sense_key"]
+        sense_asc = info["sense_asc"]
+        sense_ascq = info["sense_ascq"]
 
-        if sense_key == 0x09 and raw[2] == 0x80 and raw[3] == 0x06:
-            aux = raw[4] if len(raw) > 4 else 0
-            if aux in (0x00, 0x01):
-                sense_name = "REISSUE"
-                is_error = False
+        # Map StatusType to human-readable sense names
+        SENSE_KEY_NAMES = {
+            0x00: "GOOD", 0x01: "RECOVERED_ERR", 0x02: "NOT_READY",
+            0x03: "MEDIA_ERR", 0x04: "HARDWARE_ERR", 0x05: "ILLEGAL_REQ",
+            0x06: "UNIT_ATTENTION", 0x07: "DATA_PROTECT",
+            0x09: "VENDOR_SPECIFIC", 0x0B: "ABORTED",
+        }
+        sense_name = SENSE_KEY_NAMES.get(sense_key, f"UNKNOWN_0x{sense_key:02x}")
+        if status == StatusType.REISSUE:
+            sense_name = "REISSUE"
+
+        is_error = status not in (StatusType.READY, StatusType.REISSUE)
 
         params: Dict[str, Any] = {
             "sense": sense_name,
-            "asc": f"0x{raw[2]:02x}",
-            "ascq": f"0x{raw[3]:02x}",
+            "asc": f"0x{sense_asc:02x}",
+            "ascq": f"0x{sense_ascq:02x}",
         }
         error_detail = ""
         if is_error:
@@ -772,11 +738,11 @@ def detect_issues(events: List[Event]) -> List[Issue]:
             if ev.decoded.is_error and ev.decoded.params:
                 sense = ev.decoded.params.get("sense", "")
 
-                if sense == SenseKey.NOT_READY:
+                if sense == "NOT_READY":
                     if last_out_cmd == 0x00:
                         continue
 
-                if sense == SenseKey.UNIT_ATTENTION:
+                if sense == "UNIT_ATTENTION":
                     if last_out_cmd in (0x12, 0x00, 0xe0):
                         continue
 
@@ -1054,34 +1020,34 @@ def _find_data_transfer_after_cmd(
 
 
 def _parse_wdb_from_bytes(data: bytes) -> Optional[WdbRow]:
-    """Parse a 58-byte WDB payload into structured fields."""
+    """Parse a 58-byte WDB payload into structured fields.
+
+    Delegates to WindowDescriptorBlock.from_bytes_58() for consistent parsing.
+    """
     if len(data) < 58:
         return None
 
-    window_id = data[0x08]
-    x_res = struct.unpack(">H", data[0x0A:0x0C])[0]
-    y_res = struct.unpack(">H", data[0x0C:0x0E])[0]
-    offset_x = struct.unpack(">L", data[0x0E:0x12])[0]
-    offset_y = struct.unpack(">L", data[0x12:0x16])[0]
-    size_x = struct.unpack(">L", data[0x16:0x1A])[0]
-    size_y = struct.unpack(">L", data[0x1A:0x1E])[0]
-    scan_kind_byte = data[0x32] if len(data) > 0x32 else 0
-    scan_kind_map = {0x01: "normal", 0x02: "prescan", 0x20: "AE", 0x40: "AE_WB"}
-    scan_kind = scan_kind_map.get(scan_kind_byte, f"0x{scan_kind_byte:02x}")
-    exposure = struct.unpack(">I", data[0x36:0x3A])[0] if len(data) >= 0x3A else 0
+    wdb = WindowDescriptorBlock.from_bytes_58(data)
+
+    # Map WDB sub-mode byte to scan_kind names
+    scan_kind_map = {
+        WDB_SUBMODE_PRESCAN_MAIN: "normal",
+        WDB_SUBMODE_LOW_RES_96DPI: "prescan",
+    }
+    scan_kind = scan_kind_map.get(wdb.sub_mode, f"0x{wdb.sub_mode:02x}")
 
     return WdbRow(
         line_num=0,
         timestamp=0.0,
-        window_id=window_id,
-        x_res=x_res,
-        y_res=y_res,
-        offset_x=offset_x,
-        offset_y=offset_y,
-        size_x=size_x,
-        size_y=size_y,
+        window_id=wdb.channel,
+        x_res=wdb.x_resolution,
+        y_res=wdb.y_resolution,
+        offset_x=wdb.frame_offset,
+        offset_y=0,  # Not available in 58-byte format
+        size_x=wdb.width,
+        size_y=wdb.length,
         scan_kind=scan_kind,
-        exposure=exposure,
+        exposure=wdb.exposure,
         raw_hex=data.hex(),
     )
 

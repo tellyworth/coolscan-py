@@ -69,6 +69,36 @@ except ImportError:
 from coolscan.usb_replay import ReplayError
 from coolscan.command_registry import sends
 
+# Public API for analyze_capture.py and other consumers
+__all__ = [
+    # Enums
+    "PhaseType",
+    "ScanType",
+    "StatusType",
+    "DataType",
+    # Data classes
+    "WindowDescriptorBlock",
+    "ScanParameters",
+    "ScannerInfo",
+    # Channel constants
+    "CHANNEL_RED",
+    "CHANNEL_GREEN",
+    "CHANNEL_BLUE",
+    "CHANNEL_IR",
+    # WDB constants
+    "WDB_MODE_PRESCAN",
+    "WDB_MODE_PREVIEW_MAIN",
+    "WDB_TRANSFER_PRESCAN_MAIN",
+    "WDB_TRANSFER_LOW_RES_PREVIEW",
+    "WDB_FILM_PRESCAN",
+    "WDB_FILM_IR_PREVIEW",
+    "WDB_FILM_MAIN_SCAN",
+    "WDB_SUBMODE_PRESCAN_MAIN",
+    "WDB_SUBMODE_LOW_RES_96DPI",
+    # Status parsing
+    "parse_status_response",
+]
+
 
 class PhaseType(Enum):
     """USB communication phases."""
@@ -600,6 +630,75 @@ _SCAN_WINDOW_RESOLUTIONS: Dict[str, int] = {
     "batch": 290,        # 0x0122
     "batch_between": 290,  # 0x0122
 }
+
+
+def parse_status_response(status_data: bytes) -> Tuple[StatusType, dict]:
+    """Parse 8-byte status response with comprehensive sense key handling.
+
+    Public function usable by analyze_capture.py and other consumers.
+
+    Returns:
+        Tuple of (StatusType, dict with sense_key/sense_asc/sense_ascq).
+    """
+    if len(status_data) != 8:
+        return StatusType.ERROR, {}
+
+    sense_key = status_data[1] & 0x0F
+    sense_asc = status_data[2]
+    sense_ascq = status_data[3]
+
+    # Comprehensive sense key parsing like SANE backend
+    if sense_key == 0x00:
+        status = StatusType.READY
+    elif sense_key == 0x01:
+        # Recovered error
+        if sense_asc == 0x37 and sense_ascq == 0x00:
+            status = StatusType.READY  # Rounded parameter
+        else:
+            status = StatusType.ERROR
+    elif sense_key == 0x02:
+        # Not ready
+        if sense_asc == 0x04 and sense_ascq == 0x01:
+            status = StatusType.PROCESSING  # Becoming ready
+        elif sense_asc == 0x3A and sense_ascq == 0x00:
+            status = StatusType.NO_DOCS  # No document
+        else:
+            # SANE coolscan.c:191-195 returns GOOD for unknown NOT-READY ASC/ASCQ
+            # Tolerate firmware quirks: scanner is busy with something unexpected
+            status = StatusType.PROCESSING
+    elif sense_key == 0x03:
+        # Medium error
+        status = StatusType.ERROR
+    elif sense_key == 0x04:
+        # Hardware error
+        status = StatusType.ERROR
+    elif sense_key == 0x05:
+        # Illegal request
+        status = StatusType.ERROR
+    elif sense_key == 0x06:
+        # Unit attention
+        status = StatusType.ERROR
+    elif sense_key == 0x09:
+        # Scanner-specific extended sense key
+        # SANE: coolscan3.c:2081-2083
+        # sense_code = (key<<24)|(ASC<<16)|(ASCQ<<8)|buf[4]
+        # REISSUE when sense_code == 0x09800600 or 0x09800601
+        # i.e. key=0x09, ASC=0x80, ASCQ=0x06, buf[4] in (0x00, 0x01)
+        sense_aux = status_data[4] if len(status_data) > 4 else 0
+        if sense_asc == 0x80 and sense_ascq == 0x06:
+            if sense_aux in (0x00, 0x01):
+                status = StatusType.REISSUE
+            else:
+                status = StatusType.READY
+        else:
+            status = StatusType.ERROR
+    elif sense_key == 0x0B:
+        # Aborted command
+        status = StatusType.ERROR
+    else:
+        status = StatusType.ERROR
+
+    return status, {"sense_key": sense_key, "sense_asc": sense_asc, "sense_ascq": sense_ascq}
 
 
 class CoolscanProtocol:
@@ -1166,66 +1265,8 @@ class CoolscanProtocol:
         return PhaseType.NONE
 
     def _parse_status(self, status_data: bytes) -> Tuple[StatusType, dict]:
-        """Parse 8-byte status response with comprehensive sense key handling."""
-        if len(status_data) != 8:
-            return StatusType.ERROR, {}
-
-        sense_key = status_data[1] & 0x0F
-        sense_asc = status_data[2]
-        sense_ascq = status_data[3]
-
-        # Comprehensive sense key parsing like SANE backend
-        if sense_key == 0x00:
-            status = StatusType.READY
-        elif sense_key == 0x01:
-            # Recovered error
-            if sense_asc == 0x37 and sense_ascq == 0x00:
-                status = StatusType.READY  # Rounded parameter
-            else:
-                status = StatusType.ERROR
-        elif sense_key == 0x02:
-            # Not ready
-            if sense_asc == 0x04 and sense_ascq == 0x01:
-                status = StatusType.PROCESSING  # Becoming ready
-            elif sense_asc == 0x3A and sense_ascq == 0x00:
-                status = StatusType.NO_DOCS  # No document
-            else:
-                # SANE coolscan.c:191-195 returns GOOD for unknown NOT-READY ASC/ASCQ
-                # Tolerate firmware quirks: scanner is busy with something unexpected
-                status = StatusType.PROCESSING
-        elif sense_key == 0x03:
-            # Medium error
-            status = StatusType.ERROR
-        elif sense_key == 0x04:
-            # Hardware error
-            status = StatusType.ERROR
-        elif sense_key == 0x05:
-            # Illegal request
-            status = StatusType.ERROR
-        elif sense_key == 0x06:
-            # Unit attention
-            status = StatusType.ERROR
-        elif sense_key == 0x09:
-            # Scanner-specific extended sense key
-            # SANE: coolscan3.c:2081-2083
-            # sense_code = (key<<24)|(ASC<<16)|(ASCQ<<8)|buf[4]
-            # REISSUE when sense_code == 0x09800600 or 0x09800601
-            # i.e. key=0x09, ASC=0x80, ASCQ=0x06, buf[4] in (0x00, 0x01)
-            sense_aux = status_data[4] if len(status_data) > 4 else 0
-            if sense_asc == 0x80 and sense_ascq == 0x06:
-                if sense_aux in (0x00, 0x01):
-                    status = StatusType.REISSUE
-                else:
-                    status = StatusType.READY
-            else:
-                status = StatusType.ERROR
-        elif sense_key == 0x0B:
-            # Aborted command
-            status = StatusType.ERROR
-        else:
-            status = StatusType.ERROR
-
-        return status, {"sense_key": sense_key, "sense_asc": sense_asc, "sense_ascq": sense_ascq}
+        """Parse 8-byte status response. Delegates to parse_status_response()."""
+        return parse_status_response(status_data)
 
     @sends(0xd0)
     def _check_phase(self) -> PhaseType:
