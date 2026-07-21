@@ -314,7 +314,7 @@ class WindowDescriptorBlock:
     def to_bytes_58(self) -> bytes:
         """Build the 58-byte capture-aligned WDB from dataclass fields.
 
-        Layout (from pcapng-derived plan):
+        Layout verified against pcapng captures (ls40-single-bw.pcapng):
 
             Bytes  0-3:  ``00000000`` (reserved)
             Bytes  4-7:  ``00000032`` (window id 50)
@@ -324,9 +324,9 @@ class WindowDescriptorBlock:
             Bytes 12-13: Y resolution (big-endian DPI)
             Bytes 14-17: ``00000000`` (reserved)
             Bytes 18-21: frame/boundary offset (big-endian)
-            Bytes 22-25: image width in pixels (big-endian)
-            Bytes 26-29: ``00000000`` (reserved)
-            Bytes 30-31: line count (big-endian)
+            Bytes 22-25: image width in pixels (big-endian, 32-bit)
+            Bytes 26-29: line count (big-endian, 32-bit)
+            Bytes 30-31: ``0000`` (reserved)
             Bytes 32-33: mode (0x0002=prescan, 0x0005=preview/main)
             Byte   34:   transfer/mode byte (0x08=prescan/main, 0x0C=low-res)
             Bytes 35-47: zeros
@@ -360,13 +360,13 @@ class WindowDescriptorBlock:
         # Bytes 18-21: frame/boundary offset
         data[18:22] = struct.pack(">I", self.frame_offset)
 
-        # Bytes 22-25: image width in pixels
+        # Bytes 22-25: image width in pixels (32-bit)
         data[22:26] = struct.pack(">I", self.width)
 
-        # Bytes 26-29: reserved zeros
+        # Bytes 26-29: line count (32-bit)
+        data[26:30] = struct.pack(">I", self.length)
 
-        # Bytes 30-31: line count
-        data[30:32] = struct.pack(">H", self.length)
+        # Bytes 30-31: reserved zeros
 
         # Bytes 32-33: mode
         data[32:34] = struct.pack(">H", self.wdb_mode)
@@ -422,11 +422,11 @@ class WindowDescriptorBlock:
         # Bytes 18-21: frame/boundary offset
         wdb.frame_offset = struct.unpack(">I", data[18:22])[0]
 
-        # Bytes 22-25: image width
+        # Bytes 22-25: image width (32-bit)
         wdb.width = struct.unpack(">I", data[22:26])[0]
 
-        # Bytes 30-31: line count
-        wdb.length = struct.unpack(">H", data[30:32])[0]
+        # Bytes 26-29: line count (32-bit)
+        wdb.length = struct.unpack(">I", data[26:30])[0]
 
         # Bytes 32-33: mode
         wdb.wdb_mode = struct.unpack(">H", data[32:34])[0]

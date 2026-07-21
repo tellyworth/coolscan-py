@@ -396,10 +396,10 @@ class TestWdb58Builder:
         assert result[22:26] == struct.pack(">I", 2870)
 
     def test_line_count(self):
-        """Bytes 30-31 are line count."""
+        """Bytes 26-29 are line count (32-bit)."""
         wdb = WindowDescriptorBlock(length=4332)
         result = wdb.to_bytes_58()
-        assert result[30:32] == struct.pack(">H", 4332)
+        assert result[26:30] == struct.pack(">I", 4332)
 
     def test_mode_bytes(self):
         """Bytes 32-33 are mode."""
@@ -449,7 +449,7 @@ class TestWdb58Builder:
         result = wdb.to_bytes_58()
         assert result[9] == 0
         assert result[14:18] == b"\x00" * 4
-        assert result[26:30] == b"\x00" * 4
+        assert result[30:32] == b"\x00" * 2
         assert result[35:48] == b"\x00" * 13
 
 
@@ -487,21 +487,21 @@ class TestWdb58FromBytes:
         assert wdb.width == 2870
 
     def test_parses_line_count(self):
-        """Line count is correctly parsed."""
+        """Line count is correctly parsed (32-bit at bytes 26-29)."""
         data = bytearray(58)
-        data[30:32] = struct.pack(">H", 4332)
+        data[26:30] = struct.pack(">I", 4332)
         wdb = WindowDescriptorBlock.from_bytes_58(bytes(data))
         assert wdb.length == 4332
 
     def test_parses_mode(self):
-        """Mode bytes are correctly parsed."""
+        """Mode bytes are correctly parsed (bytes 32-33)."""
         data = bytearray(58)
         data[32:34] = struct.pack(">H", WDB_MODE_PRESCAN)
         wdb = WindowDescriptorBlock.from_bytes_58(bytes(data))
         assert wdb.wdb_mode == WDB_MODE_PRESCAN
 
     def test_parses_transfer_byte(self):
-        """Transfer byte is correctly parsed."""
+        """Transfer byte is correctly parsed (byte 34)."""
         data = bytearray(58)
         data[34] = 0x0C
         wdb = WindowDescriptorBlock.from_bytes_58(bytes(data))
