@@ -253,7 +253,8 @@ class ReadCapRow:
     offset_y: int
     size_x: int
     size_y: int
-    raw_hex: str
+    exposure: int = 0
+    raw_hex: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -521,26 +522,37 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
             params["param2"] = f"0x{raw[2]:02x}"
             params["alloc_len"] = raw[4]
             params["control"] = f"0x{raw[5]:02x}"
+            if len(raw) >= 10:
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0x15:
             params["page"] = f"0x{raw[1]:02x}"
             params["alloc_len"] = raw[4]
+            if len(raw) >= 10:
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0x1a:
             params["page"] = f"0x{raw[2]:02x}"
             params["alloc_len"] = raw[4]
+            if len(raw) >= 10:
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0x1b:
             params["num_colors"] = raw[4]
+            if len(raw) >= 10:
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0x24:
             if len(raw) >= 10:
                 params["data_len"] = raw[8]
                 params["scan_type"] = f"0x{raw[9]:02x}"
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0x28:
             params["datatype"] = f"0x{raw[2]:02x}"
             if len(raw) >= 10:
-                params["length"] = (raw[7] << 16) | (raw[8] << 8) | raw[9]
+                params["length"] = (raw[6] << 16) | (raw[7] << 8) | raw[8]
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0x2a:
             params["datatype"] = f"0x{raw[2]:02x}"
             if len(raw) >= 10:
-                params["length"] = (raw[7] << 16) | (raw[8] << 8) | raw[9]
+                params["length"] = (raw[6] << 16) | (raw[7] << 8) | raw[8]
+                params["cdb_hex"] = raw[:10].hex()
                 # Flag WRITE 0x8f as frame table
                 if raw[2] == 0x8f:
                     params["purpose"] = "frame_table"
@@ -549,11 +561,13 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
                 subcode = raw[2]
                 sub_name = E0_SUBCODE_NAMES.get(subcode, "unknown")
                 params["subcode"] = f"0x{subcode:02x} ({sub_name})"
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0xe1:
             if len(raw) >= 10:
                 subcode = raw[2]
                 sub_name = E1_SUBCODE_NAMES.get(subcode, "unknown")
                 params["subcode"] = f"0x{subcode:02x} ({sub_name})"
+                params["cdb_hex"] = raw[:10].hex()
         elif cmd == 0x25:
             # READ_CAPACITY: channel in byte 1 and byte 5
             ch = raw[1] if len(raw) > 1 else 0
@@ -561,6 +575,8 @@ def decode_out_command(raw: bytes) -> DecodedInfo:
             params["channel"] = f"{ch_name}({ch})"
             if ch == 9:
                 params["channel"] += " [IR]"
+            if len(raw) >= 10:
+                params["cdb_hex"] = raw[:10].hex()
 
         return DecodedInfo(
             cmd_name=name,
@@ -1196,6 +1212,7 @@ def extract_read_capacity(events: List[Event]) -> List[ReadCapRow]:
         offset_y = struct.unpack(">I", payload[0x12:0x16])[0] if len(payload) > 0x15 else 0
         size_x = struct.unpack(">I", payload[0x16:0x1A])[0] if len(payload) > 0x19 else 0
         size_y = struct.unpack(">I", payload[0x1A:0x1E])[0] if len(payload) > 0x1D else 0
+        exposure = struct.unpack(">I", payload[0x36:0x3A])[0] if len(payload) >= 0x3A else 0
 
         rows.append(ReadCapRow(
             line_num=data_ev.index,
@@ -1207,6 +1224,7 @@ def extract_read_capacity(events: List[Event]) -> List[ReadCapRow]:
             offset_y=offset_y,
             size_x=size_x,
             size_y=size_y,
+            exposure=exposure,
             raw_hex=payload.hex(),
         ))
 
@@ -1342,6 +1360,9 @@ def _resolve_event_field(event: Event, name: str) -> Optional[Any]:
         raw_ep = event.endpoint
         return raw_ep
     if name == "length":
+        # For READ/WRITE commands, return the CDB-declared transfer length
+        if dec and "length" in dec.params:
+            return dec.params["length"]
         return len(event.raw)
     if name == "phase":
         return event.phase
@@ -1627,7 +1648,7 @@ def _print_tsv_read_cap(rows: List[ReadCapRow], label: str = ""):
     print(f"\n{prefix}READ_CAPACITY extraction ({len(rows)} entries):")
     cols = [
         "line_num", "timestamp", "window_id", "x_res", "y_res",
-        "offset_x", "offset_y", "size_x", "size_y", "raw_hex",
+        "offset_x", "offset_y", "size_x", "size_y", "exposure", "raw_hex",
     ]
     print("\t".join(cols))
     for r in rows:
@@ -1641,6 +1662,7 @@ def _print_tsv_read_cap(rows: List[ReadCapRow], label: str = ""):
             str(r.offset_y),
             str(r.size_x),
             str(r.size_y),
+            f"0x{r.exposure:08x}",
             r.raw_hex,
         ]))
 
@@ -1778,37 +1800,73 @@ def print_summary(
 
     # Per-event detail
     display_count = max_events if not verbose else len(events)
-    print(
-        f"{'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} "
-        f"{'Phase':<12} Description"
-    )
-    print("-" * 90)
-    for ev in events[:display_count]:
-        dec = ev.decoded
-        desc = ""
-        if dec:
-            # Inline payload decoding for DATA_OUT / DATA_BLOCK
-            inline = False
-            if dec.cmd_name in ("DATA_OUT", "DATA_BLOCK"):
-                decoded_payload = _decode_inline_payload(ev)
-                if decoded_payload:
-                    desc = f"{dec.cmd_name} {decoded_payload}"
-                    inline = True
-
-            if not inline:
-                params_str = " ".join(f"{k}={v}" for k, v in dec.params.items())
-                desc = dec.cmd_name
-                if params_str:
-                    desc += f" ({params_str})"
-            if dec.is_error:
-                desc += f" *** {dec.error_detail}"
-        else:
-            desc = f"raw {len(ev.raw)}B"
-
+    if verbose:
         print(
-            f"{ev.index:5d} {ev.timestamp:8.3f} {ev.direction:>3} "
-            f"{len(ev.raw):4d} {ev.phase:<12} {desc}"
+            f"{'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} "
+            f"{'Phase':<12} {'RawHex':<22} Description"
         )
+        print("-" * 112)
+        for ev in events[:display_count]:
+            dec = ev.decoded
+            desc = ""
+            raw_hex = ""
+            if dec:
+                inline = False
+                if dec.cmd_name in ("DATA_OUT", "DATA_BLOCK"):
+                    decoded_payload = _decode_inline_payload(ev)
+                    if decoded_payload:
+                        desc = f"{dec.cmd_name} {decoded_payload}"
+                        inline = True
+                if not inline:
+                    params_str = " ".join(f"{k}={v}" for k, v in dec.params.items())
+                    desc = dec.cmd_name
+                    if params_str:
+                        desc += f" ({params_str})"
+                if dec.is_error:
+                    desc += f" *** {dec.error_detail}"
+                if ev.direction == "out" and len(ev.raw) >= 6:
+                    raw_hex = ev.raw[:min(10, len(ev.raw))].hex()
+                elif ev.direction == "in" and len(ev.raw) <= 16:
+                    raw_hex = ev.raw.hex()
+            else:
+                desc = f"raw {len(ev.raw)}B"
+                raw_hex = ev.raw[:min(16, len(ev.raw))].hex()
+
+            print(
+                f"{ev.index:5d} {ev.timestamp:8.3f} {ev.direction:>3} "
+                f"{len(ev.raw):4d} {ev.phase:<12} {raw_hex:<22} {desc}"
+            )
+    else:
+        print(
+            f"{'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} "
+            f"{'Phase':<12} Description"
+        )
+        print("-" * 90)
+        for ev in events[:display_count]:
+            dec = ev.decoded
+            desc = ""
+            if dec:
+                inline = False
+                if dec.cmd_name in ("DATA_OUT", "DATA_BLOCK"):
+                    decoded_payload = _decode_inline_payload(ev)
+                    if decoded_payload:
+                        desc = f"{dec.cmd_name} {decoded_payload}"
+                        inline = True
+
+                if not inline:
+                    params_str = " ".join(f"{k}={v}" for k, v in dec.params.items())
+                    desc = dec.cmd_name
+                    if params_str:
+                        desc += f" ({params_str})"
+                if dec.is_error:
+                    desc += f" *** {dec.error_detail}"
+            else:
+                desc = f"raw {len(ev.raw)}B"
+
+            print(
+                f"{ev.index:5d} {ev.timestamp:8.3f} {ev.direction:>3} "
+                f"{len(ev.raw):4d} {ev.phase:<12} {desc}"
+            )
 
     if len(events) > display_count:
         print(f"\n... ({len(events) - display_count} more events, use --verbose for all)")
@@ -1888,12 +1946,19 @@ def print_grouped_by_phase(
             and ev.index < display_count
         ]
         if phase_events:
-            print(
-                f"  {'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} Description"
-            )
+            if verbose:
+                print(
+                    f"  {'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} "
+                    f"{'RawHex':<22} Description"
+                )
+            else:
+                print(
+                    f"  {'Event':>5} {'Time':>8} {'Dir':>3} {'Size':>4} Description"
+                )
             for ev in phase_events[:display_count]:
                 dec = ev.decoded
                 desc = ""
+                raw_hex = ""
                 if dec:
                     inline = False
                     if dec.cmd_name in ("DATA_OUT", "DATA_BLOCK"):
@@ -1910,13 +1975,153 @@ def print_grouped_by_phase(
                             desc += f" ({params_str})"
                     if dec.is_error:
                         desc += f" *** {dec.error_detail}"
+                    if verbose:
+                        if ev.direction == "out" and len(ev.raw) >= 6:
+                            raw_hex = ev.raw[:min(10, len(ev.raw))].hex()
+                        elif ev.direction == "in" and len(ev.raw) <= 16:
+                            raw_hex = ev.raw.hex()
                 else:
                     desc = f"raw {len(ev.raw)}B"
+                    if verbose:
+                        raw_hex = ev.raw[:min(16, len(ev.raw))].hex()
 
-                print(
-                    f"  {ev.index:5d} {ev.timestamp:8.3f} {ev.direction:>3} "
-                    f"{len(ev.raw):4d} {desc}"
-                )
+                if verbose:
+                    print(
+                        f"  {ev.index:5d} {ev.timestamp:8.3f} {ev.direction:>3} "
+                        f"{len(ev.raw):4d} {raw_hex:<22} {desc}"
+                    )
+                else:
+                    print(
+                        f"  {ev.index:5d} {ev.timestamp:8.3f} {ev.direction:>3} "
+                        f"{len(ev.raw):4d} {desc}"
+                    )
+
+
+def print_data_samples(events: List[Event], n_bytes: int) -> None:
+    """Print first N bytes of each IN transfer payload."""
+    in_events = [ev for ev in events if ev.direction == "in"]
+    print(f"\nData samples (first {n_bytes} bytes of each IN transfer, {len(in_events)} total):")
+    print(f"{'Event':>5} {'Time':>8} {'Size':>6} {'SampleHex'}")
+    print("-" * 80)
+    for ev in in_events:
+        sample = ev.raw[:n_bytes].hex()
+        print(
+            f"{ev.index:5d} {ev.timestamp:8.3f} {len(ev.raw):6d} {sample}"
+        )
+
+
+def print_timeline(events: List[Event]) -> None:
+    """Print OUT->IN command-response pairs with timing deltas."""
+    print("\nCommand-response timeline:")
+    print(f"{'OUT#':>5} {'OUT Time':>8} {'OUT Cmd':<20} {'IN#':>5} "
+          f"{'IN Time':>8} {'IN Size':>6} {'Delta(s)':>8}")
+    print("-" * 80)
+
+    i = 0
+    n = len(events)
+    while i < n:
+        ev_out = events[i]
+        if ev_out.direction != "out":
+            i += 1
+            continue
+
+        # Find the next IN response
+        j = i + 1
+        ev_in = None
+        while j < n:
+            if events[j].direction == "in":
+                ev_in = events[j]
+                break
+            j += 1
+
+        if ev_in is None:
+            break
+
+        out_dec = ev_out.decoded
+        in_dec = ev_in.decoded
+        out_name = out_dec.cmd_name if out_dec else f"raw({len(ev_out.raw)}B)"
+        delta = ev_in.timestamp - ev_out.timestamp
+
+        print(
+            f"{ev_out.index:5d} {ev_out.timestamp:8.3f} {out_name:<20} "
+            f"{ev_in.index:5d} {ev_in.timestamp:8.3f} {len(ev_in.raw):6d} "
+            f"{delta:8.3f}"
+        )
+
+        # Skip past the response sequence (phase handshake + data + status)
+        i = j + 1
+        # Skip subsequent IN events that are part of the same response
+        while i < n and events[i].direction == "in":
+            i += 1
+
+
+def compute_datatype_summary(events: List[Event]) -> Dict[str, Dict[str, Any]]:
+    """Compute per-datatype transfer totals from READ/WRITE commands and IN data.
+
+    Returns dict keyed by datatype hex (e.g. '0x00'), each with:
+    - name: human-readable name
+    - commands: number of READ/WRITE commands
+    - declared_bytes: sum of CDB-declared transfer lengths
+    - actual_bytes: sum of IN data block sizes for that datatype
+    """
+    summary: Dict[str, Dict[str, Any]] = {}
+    current_datatype: Optional[str] = None
+
+    for ev in events:
+        dec = ev.decoded
+        if not dec:
+            continue
+
+        # Track READ/WRITE datatype from OUT commands
+        if ev.direction == "out" and "datatype" in dec.params:
+            dt = dec.params["datatype"]  # e.g. "0x00"
+            current_datatype = dt
+            entry = summary.setdefault(dt, {
+                "name": DATA_TYPE_NAMES.get(int(dt, 16), "unknown"),
+                "commands": 0,
+                "declared_bytes": 0,
+                "actual_bytes": 0,
+            })
+            entry["commands"] += 1
+            if "length" in dec.params:
+                entry["declared_bytes"] += dec.params["length"]
+            continue
+
+        # Phase checks, status, etc. don't change datatype context
+        if ev.direction == "out":
+            # Non-datatype OUT commands (TUR, phase check, etc.) don't change context
+            continue
+
+        # IN events: accumulate actual data bytes under current datatype
+        if current_datatype and dec.cmd_name in ("DATA_BLOCK", "DATA_RESP"):
+            entry = summary.get(current_datatype)
+            if entry:
+                entry["actual_bytes"] += len(ev.raw)
+
+    return summary
+
+
+def print_datatype_summary(events: List[Event]) -> None:
+    """Print per-datatype transfer summary."""
+    summary = compute_datatype_summary(events)
+    if not summary:
+        return
+
+    print("\nData transfer by datatype:")
+    print(f"  {'Datatype':<12} {'Name':<22} {'Cmds':>5} "
+          f"{'Declared':>12} {'Actual':>12}")
+    print("  " + "-" * 65)
+    for dt in sorted(summary.keys()):
+        s = summary[dt]
+        print(
+            f"  {dt:<12} {s['name']:<22} {s['commands']:>5} "
+            f"{s['declared_bytes']:>12,} {s['actual_bytes']:>12,}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# JSON output
+# ---------------------------------------------------------------------------
 
 
 def json_output(
@@ -1949,8 +2154,13 @@ def json_output(
                 "direction": e.direction,
                 "endpoint": f"0x{e.endpoint:02x}",
                 "size": len(e.raw),
+                "raw_hex": e.raw[:min(10, len(e.raw))].hex()
+                if e.direction == "out" and len(e.raw) <= 16
+                else e.raw.hex() if len(e.raw) <= 16 else e.raw[:16].hex() + "...",
                 "phase": e.phase,
                 "decoded": asdict(e.decoded) if e.decoded else None,
+                **({"declared_length": e.decoded.params["length"]}
+                   if e.decoded and "length" in e.decoded.params else {}),
             }
             for e in events[:display_count]
         ],
@@ -2026,6 +2236,18 @@ def main() -> int:
     parser.add_argument(
         "--group-by-phase", action="store_true",
         help="Output events grouped by phase with per-phase stats",
+    )
+    parser.add_argument(
+        "--extract-data-samples", type=int, default=0, metavar="N",
+        help="Show first N bytes of each IN transfer payload as hex",
+    )
+    parser.add_argument(
+        "--timeline", action="store_true",
+        help="Show OUT->IN command-response pairs with timing deltas",
+    )
+    parser.add_argument(
+        "--datatype-summary", action="store_true",
+        help="Show per-datatype transfer totals (declared vs actual bytes)",
     )
 
     args = parser.parse_args()
@@ -2157,6 +2379,15 @@ def main() -> int:
         if args.extract_read_capacity:
             _print_tsv_read_cap(extract_read_capacity(events))
 
+        if args.extract_data_samples > 0:
+            print_data_samples(events, args.extract_data_samples)
+
+        if args.timeline:
+            print_timeline(events)
+
+        if args.datatype_summary:
+            print_datatype_summary(events)
+
     # Output
     if args.json:
         if args.extract_wdbs or args.extract_control_frames or args.extract_read_capacity:
@@ -2169,9 +2400,13 @@ def main() -> int:
             )
         else:
             output = json_output(events, phases, issues, verbose=args.verbose, max_events=max_events)
+        if args.datatype_summary:
+            output["datatype_summary"] = compute_datatype_summary(events)
         print(json.dumps(output, indent=2, default=str))
     elif args.group_by_phase:
         print_grouped_by_phase(events, phases, issues, max_events=max_events)
+    elif args.timeline:
+        print_timeline(events)
     else:
         print_summary(events, phases, issues, verbose=args.verbose, max_events=max_events)
 
