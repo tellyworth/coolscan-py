@@ -1,0 +1,684 @@
+# External Protocol Reference: kevihiiin/Nikon-Coolscan-RE Knowledge Base
+
+**Source**: [https://github.com/kevihiiin/Nikon-Coolscan-RE](https://github.com/kevihiiin/Nikon-Coolscan-RE)
+**Author**: [@kevihiiin](https://github.com/kevihiiin)
+**Last analysed**: 2026-07-25
+**Original commit**: `371f86b` (session 41), 214 commits total
+
+> This document captures the protocol understanding from the Nikon-Coolscan-RE project
+> for cross-reference with our pcapng-verified LS-40 ED knowledge. Their primary target is
+> the **LS-50 (Coolscan V ED, PID 4001)** using firmware disassembly + Windows driver RE.
+> Our primary target is the **LS-40 ED (Coolscan IV ED, PID 4000)** using USB pcapng captures.
+> Differences may reflect genuine LS-40 vs LS-50 hardware variation, not errors in either
+> project. Where the projects disagree, our pcapng captures are the authority for LS-40.
+
+---
+
+## 1. Fundamental Approach Differences
+
+| | coolscan-py (us) | Nikon-Coolscan-RE (them) |
+|---|---|---|
+| Target | LS-40 ED (PID 4000) | LS-50 (PID 4001) |
+| Method | USB hardware captures (pcapng) | Firmware disassembly (Ghidra/radare2) + driver RE |
+| Ground truth | `ls40-single-bw.pcapng` (1472 events) | LS-50 firmware binary + LS-50 USB captures (001-006 via Cynthion/Packetry) |
+| SCSI dispatch | Inferred from wire + SANE backend audit | Traced from firmware handler table at FW:0x49834 |
+| DTC dispatch | Inferred from wire | Traced from firmware tables at FW:0x49AD8 (READ) and FW:0x49B98 (WRITE) |
+| VENDOR_E0 sub-commands | ~8 observed in captures | 23 from firmware register table at FW:0x4A134 |
+| Emulator | No | Full H8/3003 emulator, 99.6% replay parity |
+| Firmware knowledge | None | Full firmware binary RE: handlers, data tables, state machines |
+| Driver knowledge | SANE coolscan3.c only | NKDUSCAN.dll + LS5000.md3 + NikonScan4.ds full decompilation |
+
+**Where they agree**: USB transport protocol (0xD0 phase query, 0x06 sense), core opcodes, phase byte values, CDB padding, data chunking, sense data format -- all consistent between projects. This is strong evidence that the wire protocol is the same at the transport layer.
+
+---
+
+## 2. USB Transport Layer
+
+Both projects agree on the USB transport:
+
+| Detail | Both Agree |
+|---|---|
+| VID/PID | 0x04B0 / varies by model (LS-40: 4000, LS-50: 4001, LS-5000: 4002) |
+| Device class | 0xFF/0xFF/0xFF (vendor-specific) -- NOT USB Mass Storage |
+| Endpoints | EP1 OUT (0x01) Bulk, EP2 IN (0x82) Bulk |
+| CDB padding | Sent as 32 bytes on bulk-out, zero-padded |
+| Command sequence | CDB → 0xD0 phase query → phase byte → data transfer (if needed) → 0x06 sense |
+| Phase byte 0x01 | No data transfer, skip to sense |
+| Phase byte 0x02 | Data-out (host → scanner) |
+| Phase byte 0x03 | Data-in (scanner → host) |
+| Sense data | 18 bytes, fixed format |
+| Control byte | 0x80 = Nikon vendor flag, 0x00 = standard |
+
+**Their additional detail** (from NKDUSCAN.dll decompilation):
+- CDB direction field in host parameter struct: 1=data-in, 2=data-out, other=no-data
+- 64-byte CDBs use `DeviceIoControl(IOCTL_SEND_USB_REQUEST = 0x80002008)` instead of bulk pipe I/O
+- Data chunking: first read attempts full transfer_length; if fewer bytes received, use actual as new chunk size
+- `ReadFile()` may return in chunks; NKDUSCAN retry-loops at `0x10002c46`
+
+---
+
+## 3. Opcode Inventory — Side-by-Side
+
+### Standard / Scanner SCSI Commands
+
+| Opcode | Name | Their KB | Our Code | Agreement? |
+|---|---|---|---|---|
+| `0x00` | TEST UNIT READY | Verified (FW:0x0215C2) | Verified (pcapng) | **Yes** |
+| `0x03` | REQUEST SENSE | — | Not used (0x06 instead) | — |
+| `0x06` | (Sense request byte, not CDB) | Same | Same | **Yes** |
+| `0x12` | INQUIRY | Verified (FW:0x023544, std + VPD pages) | Verified (pcapng) | **Yes** |
+| `0x15` | MODE SELECT | Verified (FW:0x02194A, page 0x03, 20B payload) | Verified (pcapng) | **Yes** |
+| `0x16` | RESERVE UNIT | Verified (FW handler) | Verified (pcapng) | **Yes** |
+| `0x17` | RELEASE UNIT | They note: "never sent by NikonScan" | Used in our teardown | **Investigate** |
+| `0x1a` | MODE SENSE | Verified | Partial (pcapng) | Consistent |
+| `0x1b` | SCAN / START STOP | Verified (FW:0x0220B8, op codes 1-4) | Verified (pcapng) | **Yes** |
+| `0x1c` | RECEIVE DIAGNOSTIC | Limited | Limited | Consistent |
+| `0x1d` | SEND DIAGNOSTIC | Verified (FW handler, state-dependent) | Mostly not used | **Gap** |
+| `0x24` | SET WINDOW | Verified (FW:0x026E38, 10B CDB + WDB) | Verified (pcapng) | **Yes** (see §6 for WDB comparison) |
+| `0x25` | GET WINDOW / READ CAPACITY | Verified (FW:0x0272F6, SI=0/1) | Verified (pcapng) | **Yes** |
+| `0x28` | READ(10) | Verified (FW:0x023F10, 15 DTCs) | Verified (pcapng, 6 DTCs) | **Yes**, see §4 |
+| `0x2a` | WRITE(10) | Verified (FW:0x025506, 7 DTCs) | Verified (pcapng, 4 DTCs) | **Yes**, see §4 |
+| `0x31` | OBJECT POSITION | Not in their KB | Used (SANE `object_feed` equiv) | **LS-40 specific?** |
+| `0x3c` | READ BUFFER | Verified (FW handler, log records) | Not used | **Their discovery** |
+| `0x3d` | WRITE BUFFER | Documented | Not used | **Their discovery** |
+| `0xc0` | VENDOR_C0 (abort) | Verified (FW:0x028AB4, cooperative flag) | Used (CANCEL_SCAN) | **Yes** |
+| `0xc1` | VENDOR_C1 (execute) | Verified (FW:0x028B08, dispatches to motor/cal) | Used (EXECUTE) | **Yes** |
+| `0xd0` | (Phase query byte, not CDB) | Same | Same | **Yes** |
+| `0xe0` | VENDOR_E0 (control write) | Verified (FW:0x028E16, 23 sub-cmds) | Used (~8 sub-cmds) | **Yes**, see §5 |
+| `0xe1` | VENDOR_E1 (sensor read) | Verified (FW:0x0295EA, 23 sub-cmds) | Used (~2 sub-cmds) | **Yes**, see §7 |
+
+### Their Additional Opcodes (not in our codebase)
+
+| Opcode | Name | Their Source | Notes |
+|---|---|---|---|
+| `0x3c` | READ BUFFER | FW:0x023544 dispatch | Reads firmware log records; verified High confidence (session 41) |
+| `0x3d` | WRITE BUFFER | FW dispatch | Write to scanner buffers |
+| `0x1c` | RECEIVE DIAGNOSTIC RESULTS | FW dispatch | Limited implementation |
+| `0x1d` | SEND DIAGNOSTIC | FW: dispatch, self-test/cal trigger | NikonScan sends with byte\[1\]=0x04; firmware action depends on scanner state |
+
+---
+
+## 4. READ / WRITE Data Type Code (DTC) Dispatch Tables
+
+### READ DTCs (opcode 0x28, FW:0x023F10, dispatch table at FW:0x49AD8)
+
+Their full list of 15 DTCs (12-byte entries, 0xFF terminated):
+
+| DTC | Name | Max Size | Qualifier | Confidence | In Our Code? |
+|---|---|---|---|---|---|
+| `0x00` | Image Data | Variable | 0=8-bit, 1=16-bit | Verified | **Yes** |
+| `0x03` | Gamma Function / LUT | 32768 | Per CDB\[5\] | Verified | **Yes** |
+| `0x81` | Scan Area / Film Frame Info | 8 | Single value | High | No |
+| `0x84` | Calibration Data | 6 | Single value | Verified | No |
+| `0x87` | Scan Parameters / Status | 24 | None (ignored) | Verified | **Yes** |
+| `0x88` | Boundary / Per-Channel Cal | 644 | 0-3 (R/G/B/all) | Verified | No (but see note) |
+| `0x8A` | Exposure / Gain Parameters | 14 | 0-3 (R/G/B/all) | High | No |
+| `0x8C` | Offset / Dark Current | 10 | 0-3 (R/G/B/all) | High | **Yes** (channel state) |
+| `0x8D` | Extended Scan Line Data | Variable | 0/1/3 (modes) | High | No |
+| `0x8E` | Focus / Measurement Data | Variable | 0 or 1 | High | **Yes** (exposure cal) |
+| `0x8F` | Histogram / Profile | 324 | 0/1/3 (R/G/B) | High | **Yes** (control frame read) |
+| `0x90` | CCD Characterization | 54 | 0-3 (R/G/B/all) | High | No |
+| `0x92` | Motor / Positioning Status | 10 | 0-3 (sub-type) | High | **Yes** (WDB readback) |
+| `0x93` | Calibration Reference Triplet | 12 | Single value (must=1) | High | **NEW — not in our code** |
+| `0xE0` | Extended Configuration | 1030 | 0/1/3 (modes) | High | No |
+
+Qualifier category byte from DTC table:
+- `0x00` — qualifier ignored
+- `0x01` — must match the table's qualifier value exactly
+- `0x03` — 0=composite/all, 1=R, 2=G, 3=B (channel select)
+- `0x10` — 0 or 1 (two-mode select)
+- `0x30` — 0, 1, or 3 (three-mode select, skips 2)
+
+**DTC 0x88 note**: They report DTC 0x88 appears in 0 out of 2058 READ exchanges across all 6 real LS-50 captures. The only factory that emits it (Type D PhaseB) is gated behind MAID cap 0x4129 ("Start Scan") which NikonScan never reaches in the current HIL setup. This suggests DTC 0x88 may exist but is rarely/never used in practice on LS-50.
+
+**DTC 0x93 note** (NEW): Returns a fixed 12-byte response: 6-byte header + 6-byte payload from firmware flash at 0x6042. The payload is three 16-bit big-endian values: `0x03F2` (1010), `0x03C8` (968), `0x02D7` (727) — interpreted as R/G/B calibration-reference levels. The host reads this at each cal-pass boundary during full scans. Appears in LS-50 captures 003/004/005 but NOT in preview (002). The firmware handler at FW:0x024FC4 has a scan-state gate (`@0x40077C & 0xFF == 1` = scan active).
+
+### WRITE DTCs (opcode 0x2A, FW:0x025506, dispatch table at FW:0x49B98)
+
+Their full list of 7 DTCs (10-byte entries, 0xFF terminated):
+
+| DTC | Name | Max Size | Qualifier | Confidence | In Our Code? |
+|---|---|---|---|---|---|
+| `0x03` | Gamma Function / LUT | 32768 | Per CDB\[5\] (LUT select) | Verified | **Yes** |
+| `0x84` | Calibration Data Upload | 6 | Single value | Verified | No |
+| `0x85` | Extended Calibration | Variable | Single value | High | No (WRITE-only, no READ counterpart) |
+| `0x88` | Boundary / Per-Channel Cal | 644 | 0-3 (R/G/B/all) | Verified | No |
+| `0x8F` | Histogram / Profile | 324 | 0/1/3 (R/G/B) | High | **Yes** (control frame write) |
+| `0x92` | Motor / Positioning Control | 4 | 0-3 (sub-type) | High | **Yes** (border position) |
+| `0xE0` | Extended Configuration | 1024 | 0/1/3 (modes) | High (handler undecoded) | **Yes** (internal data) |
+
+**Key difference from READ**: WRITE has only 7 DTCs vs READ's 15. Image data (0x00) is never written. DTC 0x85 is WRITE-only with no READ counterpart. DTCs 0x81/0x87/0x8A/0x8C/0x8D/0x8E/0x90/0x93 are READ-only.
+
+**DTC 0x92 divergence**: They document DTC 0x92 WRITE as "motor/positioning control" with a 4-byte payload (motor selector, operation mode, direction/flags, step count). We use WRITE DTC 0x92 as BORDER_POSITION (4 bytes for prescan boundary offset). The firmware handler at FW:0x25908 validates transfer size == 4, qualifier range, and writes to `0x400790` (motor_state). **This likely IS the same DTC** — the LS-40 prescan boundary offset may be mapped to the same DTC, just with different payload semantics across models. **Verify with pcapng** — does our LS-40 WRITE DTC 0x92 payload match the motor control format described below?
+
+Firmware motor control payload format (from their FW:0x25908 decompile):
+```
+Byte 0: Motor selector (0x01=scan motor, 0x02=focus motor)
+Byte 1: Operation mode (step count multiplier)
+Byte 2: Direction/flags (bit 0=direction, bits 4-7=speed profile)
+Byte 3: Step count parameter
+```
+
+**DTC 0x8F divergence**: They document WRITE DTC 0x8F as "histogram/profile" with max 324 bytes. We use it as CONTROL_FRAME with 52-byte payload. The same DTC but different payload semantics across models.
+
+---
+
+## 5. VENDOR_E0 Sub-Command Register Table (23 entries from FW:0x4A134)
+
+Firmware register table format: `[reg_id:8, max_data_len:8]` at FW:0x4A134.
+
+| Sub-cmd | Max Data Len | Their Purpose | In Our Code? | Notes |
+|---|---|---|---|---|
+| `0x40` | 11 | Scan parameters | No | |
+| `0x41` | 11 | Calibration data | No | |
+| `0x42` | 11 | Gain values | No | Host-side parser consumes this (stored at obj+0x468) |
+| `0x43` | 11 | Offset values | No | |
+| `0x44` | 5 | Motor position | Implied (via e0/c1) | Our `auto_focus()` and `focus_setup()` may use this |
+| `0x45` | 11 | Exposure time | Implied (via e0/c1) | Key to auto-exposure calibration loop |
+| `0x46` | 11 | Focus position | Implied | |
+| `0x47` | 11 | Lamp settings | No | |
+| `0x80` | **0** | Lamp on/off (trigger only) | **Yes** (our `reset_scanner()`) | We send 13-byte data; they say 0 bytes |
+| `0x81` | **0** | Motor init (trigger only) | No | |
+| `0x91` | 5 | Motor step (direction + count) | **Yes** (our `load_medium()` / `eject_medium()`) | Our `e1/91` always returned `000000000100000000` |
+| `0xA0` | 9 | CCD setup / load preheat | **Yes** (our `auto_focus()`) | LS-50 captures show 9-byte payload with motor target + session counter |
+| `0xB0` | **0** | State change (trigger only) | **Yes** (our `calibrate()`) | We send 9-byte payload; they say 0 bytes |
+| `0xB1` | **0** | State change (trigger only) | No | |
+| `0xB3` | 13 | Config write | No | |
+| `0xB4` | 9 | Extended config | **Yes** (our ICE/densitometry/reset params) | Firmware validates: scanner state + param range [60,3600] |
+| `0xC0` | 5 | Gain calibration | Implied | Host-side parser consumes this (stored at obj+0x460) |
+| `0xC1` | 5 | Offset calibration | **Yes** (our `frame_select()`) | |
+| `0xD0` | **0** (table) / 9 (wire) | Diagnostic / **eject motor** | **Yes** (our `eject_medium()`) | **Conflict**: table says 0-byte trigger, but LS-50 capture 006 shows 9-byte payload |
+| `0xD1` | **0** | Diagnostic (trigger only) | No | |
+| `0xD2` | 5 | Diagnostic data | No | |
+| `0xD5` | 5 | Extended diagnostic | No | |
+| `0xD6` | 5 | Persistent settings | No | |
+
+**Key observations**:
+- Sub-cmds marked with max_data_len=0 are "trigger only" in the firmware table, but real LS-50 captures show NikonScan sometimes sends data anyway (e.g., 0xD0 with 9 bytes). The firmware may silently accept and discard the extra data.
+- Our code sends 13-byte data for 0x80, 9-byte data for 0xB0 — both listed as "trigger only" in their table. This may be LS-40 vs LS-50 difference or our code may be over-sending.
+
+**The E0 → C1 → E1 cycle** (their description):
+1. **E0** = write control data TO scanner (sets register values)
+2. **C1** = commit/trigger the operation (firmware reads sub-command from `@0x400D63`, set by E0)
+3. **E1** = read sensor data FROM scanner (reads results)
+
+This cycle is used for: autofocus, auto-exposure, motor positioning, gain/offset calibration.
+
+---
+
+## 6. SET WINDOW Descriptor (WDB) Layout
+
+Their WDB layout is traced from `LS5000.md3:0x100B2B30` (host-side SET WINDOW builder function, 1268 bytes). Their host-side builder constructs a **variable-length** descriptor based on scanner-reported vendor extensions. The firmware accepts up to 0x42 (66 bytes) total.
+
+### Their Standard Fields (offsets within the descriptor, after 8-byte header)
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 1 | Window ID | |
+| 1 | 1 | Reserved | |
+| 2-3 | 2 | X Resolution (DPI, BE) | |
+| 4-5 | 2 | Y Resolution (DPI, BE) | |
+| 6-9 | 4 | Upper Left X (BE) | |
+| 10-13 | 4 | Upper Left Y (BE) | |
+| 14-17 | 4 | Width (BE) | |
+| 18-21 | 4 | Height (BE) | |
+| 22 | 1 | Brightness | Default 128 (0x80) |
+| 23 | 1 | Threshold | |
+| 24 | 1 | Contrast | |
+| 25 | 1 | Image Composition | 0=BW, 2=grayscale, 5=RGB |
+| 26 | 1 | Bits Per Pixel | 8, 14, 16 |
+| 27 | 1 | Halftone Pattern | |
+| 28-33 | 6 | Padding / Reserved | |
+| 34 | 1 | Color/Composition Composite | `(param_0x128 << 4) \| (param_0x127 & 0xF)` |
+| 35 | 1 | Scan Flags (bitfield) | See below |
+| 36 | 1 | Multi-Sample Count | From scan type code (see encoding table) |
+| 37 | 1 | Compression Type | |
+| 38 | 1 | Compression Argument | |
+| 39 | 1 | Reserved | |
+| 40-43 | 4 | Vendor ext 0x102 | **Per-channel exposure time** (4 bytes, big-endian) |
+| 44+ | var | Additional vendor extensions | Dynamic, see below |
+
+### Byte 35 — Scan Flags Bitfield
+
+| Bit | MAID Param | Meaning |
+|---|---|---|
+| 0 | 0x129 | Padding type |
+| 1 | 0x131 | Bit ordering (0=MSB, 1=LSB) |
+| 2-4 | — | Reserved |
+| 5 | 0x12a | RIF (Reverse Image Format) |
+| 6 | 0x12b | Auto background detection |
+| 7 | 0x12c | Reserved flag |
+
+### Byte 36 — Multi-Sample Count Encoding
+
+| Scan Type (param_4) | Multi-Sample | Byte Value |
+|---|---|---|
+| 0x20 | 1× (single) | 0x01 |
+| 0x21 | 2× | 0x02 |
+| 0x22 | 4× | 0x04 |
+| 0x31 | 8× | 0x08 |
+| 0x23 | 16× | 0x10 |
+| 0x24 | 32× | 0x20 |
+| 0x25 | 64× | 0x40 |
+
+### Vendor Extension Parameters (dynamic, self-describing)
+
+12 vendor extension param IDs (0x102-0x10d), registered conditionally based on feature flags from GET WINDOW response. Only **0x102 (per-channel exposure time, 4 bytes)** is Verified end-to-end.
+
+| Param ID | Group | Feature Flag | Data Size | Confidence | Notes |
+|---|---|---|---|---|---|
+| 0x102 | 1 | flags_1 bit 2 | 4 bytes (BE) | **Verified** | Per-channel CCD integration time, stored at RAM 0x400FAE |
+| 0x103 | 1 | flags_1 bit 3 | dynamic (1/2/4) | **Low** | Unverified |
+| 0x104 | 1 | flags_1 bit 4 | dynamic | **Low** | Unverified |
+| 0x105 | 1 | flags_1 bit 5 | dynamic | **Low** | Unverified |
+| 0x106 | 1 | flags_1 bit 6 | dynamic | **Low** | Unverified |
+| 0x107 | 2 | flags_2 bit 0 | dynamic | **Low** | Unverified |
+| 0x108 | 2 | flags_2 bit 1 | dynamic | **Low** | Unverified |
+| 0x109 | 2 | flags_2 bit 2 | dynamic | **Low** | Unverified |
+| 0x10a | 2 | flags_2 bit 3 | dynamic | **Low** | Unverified |
+| 0x10b | 2 | flags_2 bit 4 | dynamic | **Low** | Unverified |
+| 0x10c | 2 | flags_2 bit 5 | dynamic | **Low** | Unverified |
+| 0x10d | 2 | flags_2 bit 6 | dynamic | **Medium** | Triggers reading of 0xf02 or 0xf03 |
+
+The data size for each vendor extension (1, 2, or 4 bytes) is determined **by the scanner**, not the host. The host discovers this during init via GET WINDOW.
+
+### Comparison with Our 58-Byte WDB
+
+Our 58-byte hardcoded WDB format from pcapng captures matches the first 40 bytes of their standard layout, plus the 4-byte vendor ext 0x102, plus 14 more bytes that likely correspond to additional vendor extensions. The key structural difference is:
+- **Theirs**: Variable-length, self-describing via GET WINDOW discovery
+- **Ours**: Fixed 58-byte tables (`_SCAN_WINDOW_WDB_TABLES`) from pcapng
+
+---
+
+## 7. VENDOR_E1 Host-Side Response Parser
+
+Their KB decodes `FUN_100AEB80` at `LS5000.md3:0x100AEB80` (108 bytes), the single function that interprets 9-byte E1 data-in payloads.
+
+**Critical finding**: NikonScan's host-side parser only processes **two** sub-commands:
+- **Sub=0x42 (focus)**: packs `buf[1..4]` into 32-bit value, stores at `scan_op + 0x468`
+- **Sub=0xC0 (gain/exposure)**: packs `buf[1..4]` into 32-bit value, stores at `scan_op + 0x460`
+- **All other sub-commands** (0x44, 0x45, 0x46, 0x47, 0x80, 0x81, 0x91, 0xA0, 0xB0, etc.): data is **IGNORED** — received transiently but never read
+
+This explains our observation that `e1/91` always returns `000000000100000000` — the host never reads the bytes anyway. The E1→E0→C1 round-trip for 0x42/0xC0 is used for the **auto-exposure / auto-focus convergence loop** (read current value → write adjusted value → trigger).
+
+### Response-Length Policy (from FW:0x029668)
+
+The firmware has a hard cap of **13 bytes** for E1 responses. The actual length sent is `min(host_requested, 13)`. If host requests >13 bytes, firmware returns sense 0x50. Each sub-command fills specific bytes of the 13-byte buffer; unwritten positions are zero.
+
+---
+
+## 8. Scan Flow State Machine (LS-50 Firmware Perspective)
+
+### Full-Scan Pipeline Stages (task codes)
+
+From their firmware RE of the 20KB scan state machine region (0x40000-0x45300):
+
+```
+SCAN Good → INIT (0x0110-0x0121) → MOTOR (0x0300) → FOCUS (0x0400)
+         → CALIBRATION (0x0501) → EXPOSURE (0x0930-0x0940) → SCAN EXEC (0x08xx)
+                                                                    ↓
+                                                              First scan line → Buffer RAM
+                                                                    ↓
+                                                              push_to_usb → EP2 FIFO
+```
+
+### Scan Task Codes by Operation
+
+| Condition | Task Group | Task Codes |
+|---|---|---|
+| Preview / low-res | Group 2 | 0x0800-0x0820 |
+| 8-bit, no ICE | Group 3 | 0x0830-0x0834 |
+| 8-bit, with ICE | Group 4 | 0x0840-0x0844 |
+| 14-bit, no ICE | Group 5 | 0x0850-0x0854 |
+| 14-bit, with ICE | Group 6 | 0x0860-0x0864 |
+| Multi-pass, no ICE | Group 7 | 0x0870-0x0874 |
+| Multi-pass, with ICE | Group 8 | 0x0880-0x0884 |
+| Extended multi-sample A-C | Groups 9-B | 0x0891-0x08B4 |
+
+The low nibble (0-4) selects the adapter variant.
+
+### Calibration Trigger Conditions
+
+Their firmware RE shows the scan orchestrator F2 at FW:0x40660 decides whether to calibrate:
+
+| Condition | Triggers Recalibration? | Why |
+|---|---|---|
+| E0/C1/E1 exposure loop ran | **Always** | Updates 0x400FAE, firmware detects parameter change |
+| Resolution changed | Yes | Different CCD binning mode |
+| Bit depth changed | Yes | Different analog gain/offset config |
+| Scan area changed | Sometimes | Only if crosses CCD readout boundary |
+| Same params, repeat scan | **No** — calibration skipped | Firmware reuses cached calibration data |
+| First scan of session | Yes | No cached calibration exists |
+
+### Data Buffer Pipeline (3-stage)
+
+```
+CCD Sensor (tri-linear R/G/B + IR)
+    ↓  ASIC internal DMA (triggered per line: write 0x02 to 0x200001)
+    ↓  Poll 0x200002 bit 3 for completion
+ASIC RAM (224KB @ 0x800000-0x837FFF)
+    ↓  16 DMA banks: 4×32KB + 12×8KB
+    ↓  CPU pixel extraction at FW:0x36C90
+Buffer RAM (64KB @ 0xC00000-0xC0FFFF)
+    ↓  Ping-pong: Bank A (0xC00000, 32KB) + Bank B (0xC08000, 32KB)
+    ↓  ITU4 system tick (FW:0x10A8C) polls buffer_status==3
+ISP1581 USB Controller (0x600000)
+    ↓  DMA direction 0x8000 = host-read, mode 5 = bulk
+USB Bulk-In (EP2) → Host
+```
+
+Buffer status variable at `0x4052EE`: 0=empty, 1=initializing, 3=full/ready, 6=DMA active, 7=scan complete.
+
+### Stall Behavior
+
+When host stops reading: buffer fills → EP2 FIFO fills → `buffer_status` stays at 3 → no new CCD DMA triggered → task code transitions to **0x0330** ("scan buffer stall") → motor pauses (single-step cooperative model, ITU2 stops naturally). When host resumes: USB drains → `buffer_status` clears → scan resumes from paused position. No data loss occurs.
+
+---
+
+## 9. Key Protocol Mechanics (Driver-Critical Details)
+
+### 9.1 DTC 0x87 Timing Criticality
+
+**This is the most impactful finding for driver correctness.**
+
+After SCAN returns Good, the firmware's `push_to_usb` function (FW:0x10B3E) runs autonomously on the ITU4 system tick. Once the scan pipeline produces its first complete scan line into Buffer RAM, the system tick pushes that data to EP2's FIFO — **without waiting for a READ DTC 0x00 CDB from the host**.
+
+Once scan data is in EP2's FIFO, all subsequent bulk-in reads return that data instead of command responses (D0 phase bytes, sense data, or DTC responses).
+
+Their analysis of approaches and failures:
+
+| Approach | Failure Mechanism |
+|---|---|
+| DTC 0x87 after TUR OK | TUR OK means scanner exited active scan state → READ permission 0x0054 rejects → sense 0x66 |
+| DTC 0x87 after no calibration | Pipeline goes straight to SCAN EXEC (0x08xx) → data in EP2 FIFO before host completes READ 0x87 |
+| Read until timeout | No end-of-data signal on USB; firmware just stops producing, last read hangs |
+| GET WINDOW instead | Wrong data, unreliable permissions at high DPI |
+
+**The solution**: Run the E0/C1/E1 auto-exposure calibration loop before SCAN. This forces the firmware to recalibrate during SCAN, creating a guaranteed window of 500ms+ where:
+- Scanner is in active scan state (permission 0x0054 passes for READ DTC 0x87)
+- Pipeline is in CALIBRATION phase (no scan data has reached EP2)
+- DTC 0x87 buffer at 0x400D45 is already populated from SET WINDOW processing
+
+**Correct sequence**:
+```
+1. SET WINDOW — initial scan params (exposure bytes can be zero)
+2. E0/C1/E1 loop — auto-exposure calibration (FORCES recalibration window)
+3. SET WINDOW — re-send with calibrated exposure in bytes 54-57
+4. SCAN — start scan pipeline (returns Good)
+5. READ DTC 0x87 — IMMEDIATELY! Parse bytes [2..5] = total_bytes
+6. Poll TUR — wait for data ready
+7. READ DTC 0x00 loop — transfer exactly total_bytes
+8. SEND DIAGNOSTIC — cleanup
+```
+
+Step 5 MUST come before step 6. This is **not a hack — it is the correct protocol**.
+
+### 9.2 DTC 0x87 Response Layout (24 bytes)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0-1 | 2 | Status/flags |
+| **2-5** | **4** | **Total image byte count (BE32)** |
+| 6 | 1 | Channel count/mode (1=mono, 2=dual, 6=RGB, 7=RGBI) |
+| 7-18 | 12 | Per-channel line geometry (bytes_per_line, line_count) |
+| 19-23 | 5 | Additional params |
+
+The total image byte count is the key field. The host uses this to read exactly the right number of bytes, avoiding buffer corruption from over-reading.
+
+### 9.3 MODE SELECT Page Layout (20 bytes)
+
+From their host-side CDB builder:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0-3 | 4 | Mode parameter header |
+| 4-5 | 2 | Page code (0x03) + page length (6) |
+| 6-7 | 2 | Base resolution (big-endian) |
+| 8-9 | 2 | Max X dimension (big-endian) |
+| 10-11 | 2 | Max Y dimension (big-endian) |
+| 12-19 | 8 | Reserved/padding |
+
+### 9.4 SCAN Command Details
+
+The SCAN handler at FW:0x0220B8 uses operation code in the data-out payload:
+- Operation 0 = Preview scan
+- Operation 1 = (not detailed)
+- Operation 4 = Full-scan / move to position
+
+Data-out payload: window ID list. For full scan with IR+RGB: `09 01 02 03`. For RGB-only: `01 02 03`. For preview: single byte typically `0x00`.
+
+### 9.5 VENDOR_C0 Abort Mechanism
+
+Cooperative flag mechanism (not immediate kill):
+
+1. Host sends `C0 00 00 00 00 00`
+2. Firmware handler at FW:0x028AB4 checks bit 6 of `@0x400776` (operation active)
+3. If active, sets bit 7 (abort requested) and clears transfer count
+4. Inner scan loop at FW:0x40252 periodically checks bit 7 → exits cleanly
+5. Recovery task 0x0F10 runs cleanup
+6. Host polls TUR until Good
+
+After abort, host must call `usb_clear_halt()` on EP2 IN to clear stale data from host USB controller buffer.
+
+---
+
+## 10. New-To-Us Information (Previously Unknown or Unconfirmed)
+
+### 10.1 DTC 0x93 — Calibration Reference Triplet
+
+**Status**: Not in our codebase at all. Present in LS-50 captures 003/004/005.
+
+- CDB: `28 00 93 00 00 01 00 00 0c 80` (qualifier must = 1, transfer_length = 12)
+- Response: 12 bytes: `93 00 00 00 00 06 03 f2 03 c8 02 d7`
+- Payload: Three 16-bit BE values from firmware flash 0x6042: 0x03F2 (1010), 0x03C8 (968), 0x02D7 (727)
+- Interpretation: R/G/B nominal target/white-balance reference levels
+- The value is a compile-time constant, never changes at runtime
+- Read once per cal-pass boundary during full scans
+- Firmware handler has scan-state gate: must be in active scan state
+
+**Action**: Check our LS-40 pcapng for this DTC.
+
+### 10.2 DTC 0x85 — Extended Calibration (WRITE-only)
+
+**Status**: Not in our codebase. Has no READ counterpart.
+
+Firmware dispatch at FW:0x025830. WRITE DTC 0x85 uploads extended calibration values. Unique among WRITE DTCs for having no READ counterpart — scanner accepts calibration uploads it does not expose for readback.
+
+### 10.3 WRITE BUFFER (0x3D) / READ BUFFER (0x3C)
+
+**Status**: Not in our codebase. Their KB notes READ BUFFER 0x3C reads firmware log records (verified in session 41 against FW:0x60000-0x7FFFF flash dump).
+
+### 10.4 SEND DIAGNOSTIC (0x1D) State-Dependent Behavior
+
+**Status**: We don't use this. NikonScan always sends `1D 04 00 00 00 00` (SelfTest=1), but the firmware's action depends on scanner state:
+- Just initialized: Hardware self-test (lamp, motor, CCD)
+- Pre-scan: Pre-scan calibration
+- Post-scan: Cleanup, lamp-off
+- Ejecting: Motor control for film transport
+
+### 10.5 E0 sub=0xB4 Host-Data Validation Gate
+
+The sub=0xB4 handler at FW:0x029510 enforces:
+1. Scanner state `@0x400773` ∈ {1, 2, 4, 5} (active-scan family)
+2. First 32-bit parameter ∈ [60, 3600] (consistent with µs exposure range)
+3. Second 32-bit parameter ∈ {0, 1}
+
+If any check fails → sense 0x53 ("Invalid Field in Parameter List").
+
+### 10.6 Per-Channel Exposure Storage (RAM 0x400FAE)
+
+Vendor extension param 0x102 values are stored per-channel at `0x400FAE + (channel_id * 4)`:
+- Window 1 (Red): `0x400FAE`
+- Window 2 (Green): `0x400FB2`
+- Window 3 (Blue): `0x400FB6`
+- Window 9 (IR): special path
+
+Values are in hardware clock cycles (20 MHz CPU = 50 ns/cycle). Updated by E0/C1/E1 auto-exposure loop.
+
+### 10.7 READ DTC 0x8E / 0x8F Sub-Handler Details
+
+Their firmware RE fully decodes the 0x8E (focus/measurement) and 0x8F (histogram/profile) sub-handlers:
+
+- **DTC 0x8E** (FW:0x24CDE): Reads focus measurement data from `0x405282`. qual=0 returns 9-byte head; qual=1 returns variable-length record sized as `step_idx*4 + 10`.
+- **DTC 0x8F** (FW:0x248BC): Reads autofocus per-channel sensor measurements indexed by focus iteration count (1..40). qual=0 returns header only (6 bytes); qual=1/3 returns N×8 + 8 bytes of per-step R/G/B/IR measurements.
+
+---
+
+## 11. LS-50 Full-Scan Wire Trace Summary
+
+From their capture 003 (4000 DPI, 8-bit, no ICE, ~800 SCSI exchanges):
+
+### Phase 1 — Warm-up (~12s)
+- 5× TUR idle poll
+- E0 sub=0xA0 + 9B payload + C1 trigger (load + cal preheat)
+- ~95× TUR busy-poll while lamp warms / film positions
+
+### Phase 2 — Pre-scan Probes
+- E1 sub=0xC1 read (9B response, state-counter sanity check)
+- READ DTC 0x93 qual=1 (calibration triplet)
+- READ DTC 0x8C qual=9 (IR channel motor position)
+
+### Phase 3 — Cal-Pass Cycle (repeated per pass)
+- 4× SET WINDOW (channels 09/01/02/03 for cal pass, or 01/02/03 for RGB-only passes)
+- 4× WRITE DTC 0x03 (32KB cal LUT each)
+- 1× SCAN (data-out: `09 01 02 03` or `01 02 03`)
+- 2× READ DTC 0x87 (status snapshot: 6B busy + 33B extended)
+- 4× GET WINDOW (readback)
+- READ DTC 0x00 burst (chunked image data, ~261KB-262KB per chunk)
+- READ DTC 0x93 (pass-boundary marker)
+
+### Per-Pass Statistics
+- Cal pass: 261,120 B chunks (with 6-byte IR header in first chunk)
+- RGB-only passes: 262,144 B chunks
+- Total passes: 1 cal-pass + 3 RGB passes = 4 passes
+- 003 ends mid-scan at exchange #800 (no explicit eject)
+
+### 8-bit vs 14-bit Delta (003 vs 004)
+Only **3 bytes** differ per SET WINDOW:
+- Byte 21: 0xC6 (8-bit no-ICE) vs 0xE2 (14-bit no-ICE)
+- Bytes 56-57: CRC trailer (different seed when byte 21 changes)
+
+### ICE Delta (003 vs 005)
+- Pass count: 4 passes all with channel 09 (vs 1 cal-pass + 3 RGB-only)
+- Byte 21: 0xC6 (003) → 0xF0 (005)
+- SCAN payload: always `09 01 02 03` (vs cal-only IR in 003)
+
+---
+
+## 12. Key Discrepancies / Conflicts Between Projects
+
+### 12.1 WRITE DTC 0x92: Motor Control vs Border Position
+
+| | Their KB | Our Code |
+|---|---|---|
+| DTC | 0x92 | 0x92 |
+| Name | Motor / Positioning Control | BORDER_POSITION |
+| Payload | 4 bytes: motor_sel, mode, direction, step_count | 4 bytes: prescan boundary offset |
+| FW handler | FW:0x25908 (motor command dispatch) | N/A (our knowledge from pcapng) |
+| Context | Focus/motor control | Prescan frame setup |
+
+**Analysis**: Same DTC, same payload size (4 bytes), different semantics. These may actually be the same thing — the prescan boundary may be set via motor positioning, or these may be genuinely different uses of the same DTC with different qualifiers. **Verify with pcapng**: decode the 4-byte payload in our LS-40 WRITE DTC 0x92 exchanges against their motor control format.
+
+### 12.2 DTC 0x8F: Histogram/Profile vs Control Frame
+
+| | Their KB | Our Code |
+|---|---|---|
+| READ DTC 0x8F | Autofocus histogram (324B max, qual 0/1/3) | CONTROL_FRAME state read (58 bytes) |
+| WRITE DTC 0x8F | Histogram upload (324B) | CONTROL_FRAME write (52 bytes) |
+
+**Analysis**: Same DTC, different semantic interpretation. The firmware handler at FW:0x248BC may serve different purposes at different points in the scan lifecycle. The "histogram" interpretation comes from autofocus context; our "control frame" use has completely different payload structure. **Verify with pcapng**: decode our DTC 0x8F payloads against their histogram format.
+
+### 12.3 VENDOR_E0 Payload Lengths (Trigger-Only vs Non-Zero)
+
+Their firmware table shows several sub-commands with max_data_len=0 (trigger only), but real LS-50 captures and our code both send non-zero payloads for some of these:
+
+| Sub-cmd | FW table says | LS-50 capture shows | Our code sends | Resolution |
+|---|---|---|---|---|
+| 0x80 | 0 (trigger only) | Not in their captures | 13 bytes | Their table may be incomplete or firmware silently discards over-sent data |
+| 0xB0 | 0 (trigger only) | Not in their captures | 9 bytes | Same |
+| 0xD0 | 0 (trigger only) | **9 bytes** (capture 006) | 9 bytes | Their table is wrong or incomplete for this sub-cmd |
+
+**Their open question**: "Does the firmware silently accept and discard the 9 bytes (NikonScan over-sends), or is the register-table interpretation wrong/incomplete and D0 has its own data-out path the decompile missed?"
+
+### 12.4 RELEASE UNIT (0x17)
+
+Our code sends RELEASE at teardown. Their KB explicitly states: "No RELEASE (0x17) is ever sent by NikonScan -- the reservation is implicitly cleared on USB disconnect."
+
+This may be an LS-40 vs LS-50 difference, or we may be sending an unnecessary command. **Low risk** either way — sending RELEASE should be harmless even if it's not strictly required.
+
+### 12.5 OBJECT POSITION (0x31)
+
+We use opcode 0x31 (from SANE `object_feed`). Their KB does not mention this opcode at all, and it does not appear in their firmware dispatch table analysis. This suggests 0x31 may be LS-40 specific, or it may be mapped to SCAN (0x1B) with operation code 4 on LS-50, or the SANE backend may use a different command entirely for LS-50.
+
+### 12.6 MODE SELECT Ordering
+
+Their described init sequence: TUR → INQUIRY → RESERVE → MODE SELECT → SEND DIAGNOSTIC → GET WINDOW → READ cal data
+
+Our observed pcapng sequence: TUR → INQUIRY → TURs → INQUIRY VPD pages → RESERVE → READ_CAPACITY for windows → MODE SELECT
+
+This is likely a genuine difference in initialization strategy between LS-40 and LS-50, or between NikonScan and SANE. **Not a discrepancy to fix** — both sequences work for their respective scanners.
+
+### 12.7 DTC 0x88 in LS-40 vs LS-50
+
+They report DTC 0x88 is never dispatched in any real LS-50 capture (0/2058 READ exchanges). Our LS-40 captures may show different behavior. Worth checking if we actually see this in our pcapng.
+
+---
+
+## 13. Verification Tasks (Prioritized)
+
+### P1 — Verify against our pcapng
+
+1. **Search for DTC 0x93** in `ls40-single-bw.pcapng` — does LS-40 use this?
+   ```bash
+   python3 scripts/analyze_capture.py reference/golden_single_bw.txt --filter "cmd=READ and data_type=0x93"
+   ```
+
+2. **Decode WRITE DTC 0x92 payloads** — do they match motor control format?
+   ```bash
+   python3 scripts/analyze_capture.py reference/golden_single_bw.txt --filter "cmd=WRITE and data_type=0x92" --verbose
+   ```
+
+3. **Decode DTC 0x8F payloads** — histogram or control frame?
+   ```bash
+   python3 scripts/analyze_capture.py reference/golden_single_bw.txt --filter "data_type=0x8f" --verbose
+   ```
+
+4. **Check for DTC 0x88** in our captures
+   ```bash
+   python3 scripts/analyze_capture.py reference/golden_single_bw.txt --filter "cmd=READ and data_type=0x88"
+   ```
+
+5. **Verify READ control byte asymmetry** — does READ use 0x80 and WRITE use 0x00 in our captures?
+
+### P2 — Protocol improvements to adopt
+
+6. **DTC 0x87 timing**: Check if our protocol.py reads DTC 0x87 before or after TUR polling post-SCAN. If after, we may have a latent race condition.
+
+7. **E0/C1/E1 auto-exposure loop**: We have partial support. Consider implementing the full round-trip (E1 sub=0xC0 read → E0 sub=0x45 write → C1 trigger → repeat until converged) before final SET WINDOW.
+
+8. **MODE SELECT page layout**: Compare our MODE SELECT payload against their 20-byte layout. Our current code may use a different structure.
+
+### P3 — Low-risk adoptions
+
+9. **VENDOR_E0 sub-command table**: Add the 23-entry table as documentation in protocol.py, even if we only implement the subset we need.
+
+10. **DTC 0x93**: Add as a documented-but-not-implemented DTC, with the fixed response bytes noted.
+
+11. **Scan task code table**: Add as reference for understanding firmware behavior during long scan operations.
+
+---
+
+## 14. References
+
+- Their repo: [https://github.com/kevihiiin/Nikon-Coolscan-RE](https://github.com/kevihiiin/Nikon-Coolscan-RE)
+- Our key docs: `docs/unified-protocol-spec.md`, `docs/commands.md`, `docs/protocol.md`
+- Their key docs:
+  - `docs/kb/scsi-commands/` — per-command reference (22 files)
+  - `docs/kb/driver-guide/scan-data-transfer.md` — scan data protocol Q&A
+  - `docs/kb/deep-dive/scsi-command-sequences.md` — complete sequence reference
+  - `docs/kb/deep-dive/full-scan-wire-trace.md` — LS-50 003 full-scan annotated trace
+  - `docs/kb/scsi-commands/set-window-descriptor.md` — WDB byte-level mapping
+  - `docs/kb/scsi-commands/vendor-e0.md` — 23-entry sub-command table
+  - `docs/kb/scsi-commands/vendor-e1.md` — host-side parser decode
+  - `docs/kb/scsi-commands/read-dtc-93.md` — DTC 0x93 full decode
+  - `docs/kb/architecture/usb-protocol.md` — USB transport details
