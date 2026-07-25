@@ -47,8 +47,6 @@ SIX_BYTE_COMMANDS = [
     (0x12, 0x01, 0xC1, 0x00, 0x55, 0x80, "1201c1005580", "INQUIRY_C1"),
     # RESERVE_UNIT
     (0x16, 0x00, 0x00, 0x00, 0x00, 0x00, "160000000000", "RESERVE_UNIT"),
-    # RELEASE_UNIT
-    (0x17, 0x00, 0x00, 0x00, 0x00, 0x00, "170000000000", "RELEASE_UNIT"),
     # MODE_SELECT
     (0x15, 0x10, 0x00, 0x00, 0x14, 0x00, "151000001400", "MODE_SELECT"),
     # MODE_SENSE (page 0x10, alloc_length 0x14)
@@ -366,7 +364,6 @@ class TestProtocolBuildMethods:
             (0x00, "000000000000"),
             (0x12, "120000000080"),
             (0x16, "160000000000"),
-            (0x17, "170000000000"),
             (0x1A, "1a0000000080"),
             (0x15, "150000000080"),
             (0x1B, "1b0000000080"),
@@ -647,7 +644,7 @@ class TestOpcodeCoverage:
         0x12,  # INQUIRY
         0x15,  # MODE_SELECT
         0x16,  # RESERVE_UNIT
-        0x17,  # RELEASE_UNIT
+        # 0x17 RELEASE_UNIT intentionally excluded: never sent by LS-40 SANE driver
         0x1A,  # MODE_SENSE
         0x1B,  # START_STOP_UNIT
         0x24,  # SET_WINDOW

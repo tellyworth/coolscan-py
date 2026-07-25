@@ -174,11 +174,6 @@ class CoolscanScanner:
                 self.cancel_scan()
 
             try:
-                self.protocol.release_unit()
-            except:
-                pass
-
-            try:
                 self.protocol.close()
             except:
                 pass

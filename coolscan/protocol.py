@@ -165,6 +165,10 @@ class DataType(Enum):
     CONTROL_FRAME = 0x8F  # Control/frame position data (WRITE)
     IMAGE_POSITIONS = 0x88  # SANE coolscan3 uses this for set_boundary; LS-40 ED rejects it
     BORDER_POSITION = 0x92  # LS-40 ED golden fixture line 203: prescan boundary
+    CALIBRATION_REFERENCE  = 0x93   # LS-50 only: fixed 12B flash constant (R/G/B reference triplet)
+                                     # Absent from all LS-40 captures. DTC exists in LS-50 firmware
+                                     # at FW:0x024FC4. Returns 6-byte header + 03F203C802D7 payload.
+                                     # Documented for cross-reference; not emitted by this driver.
     CHANNEL_STATE = 0x8C  # LS-40 ED golden fixture line 236: per-channel state read
     SHADING_DATA = 0xA0
     USER_REG_GAMMA = 0xC0
@@ -1735,20 +1739,7 @@ class CoolscanProtocol:
             print(f"Unit reservation: {'SUCCESS' if success else 'FAILED'}")
         return success
 
-    @sends(0x17)
-    def release_unit(self) -> bool:
-        """Release the scanner unit."""
-        if self.verbose:
-            print("Releasing unit...")
-        # Format: 17 00 00 00 00 00 (from USB capture)
-        cmd = self._build_6byte_command(0x17, control=0x00)
-        _, status = self._issue_command(cmd)
-        success = status == StatusType.READY
-        if self.verbose:
-            print(f"Unit release: {'SUCCESS' if success else 'FAILED'}")
-        return success
-
-    @sends(0x1b, 0x17, 0x00)
+    @sends(0x1b, 0x00)
     def reset_scanner(self) -> bool:
         """
         Reset/cleanup scanner to restore it to a responsive state.
@@ -1815,26 +1806,7 @@ class CoolscanProtocol:
                     if self.verbose:
                         print(f"    (stop scan: {e})")
 
-                # Step 4: Send RELEASE_UNIT
-                if self.verbose:
-                    print("  Sending RELEASE_UNIT...")
-                try:
-                    if hasattr(self, "bulk_out") and self.bulk_out:
-                        release_cmd = bytes([0x17, 0x00, 0x00, 0x00, 0x00, 0x00])
-                        self.usb_device.write(
-                            self.bulk_out.bEndpointAddress, release_cmd, timeout=200
-                        )
-                        time.sleep(0.1)
-                        # Try to read any response
-                        try:
-                            self.usb_device.read(self.bulk_in.bEndpointAddress, 64, timeout=100)
-                        except:
-                            pass
-                except Exception as e:
-                    if self.verbose:
-                        print(f"    (release unit: {e})")
-
-                # Step 5: Final drain
+                # Step 4: Final drain
                 time.sleep(0.2)
                 if hasattr(self, "bulk_in") and self.bulk_in:
                     for _ in range(5):
@@ -1843,7 +1815,7 @@ class CoolscanProtocol:
                         except:
                             break
 
-                # Step 6: Try a TEST_UNIT_READY to check responsiveness
+                # Step 5: Try a TEST_UNIT_READY to check responsiveness
                 if self.verbose:
                     print("  Testing responsiveness...")
                 try:
@@ -1952,32 +1924,6 @@ class CoolscanProtocol:
             if self.verbose:
                 print("Internal info read failed")
             return None
-
-    @sends(0x31)
-    def object_position(self, auto_feed: int = 0x00) -> bool:
-        """Send OBJECT_POSITION command (like SANE coolscan_object_feed)."""
-        if self.verbose:
-            print("Sending object position command...")
-        cmd = bytearray(
-            [
-                0x31,  # OBJECT_POSITION
-                0x00,  # Auto feeder function
-                0x00,
-                0x00,
-                0x00,  # Count
-                0x00,
-                0x00,
-                0x00,
-                0x00,  # Reserved
-                0x00,  # Control byte
-            ]
-        )
-
-        _, status = self._issue_command(bytes(cmd))
-        success = status == StatusType.READY
-        if self.verbose:
-            print(f"Object position: {'SUCCESS' if success else 'FAILED'}")
-        return success
 
     @sends(0x2a)
     def send_lut(self, lut_data: bytes) -> bool:
@@ -4148,6 +4094,32 @@ class CoolscanProtocol:
     # ------------------------------------------------------------------
     # VENDOR_E0 command family (10-byte CDB + 9-byte OUT + EXECUTE)
     # ------------------------------------------------------------------
+    # Sub-command register table (23 entries from LS-50 firmware FW:0x4A134)
+    # Sub-cmds used by LS-40: 0xA0 (autofocus), 0xB4 (extended config), 0xD0 (eject)
+    # Sub-cmd  MaxLen  Purpose
+    # 0x40     11      Scan parameters
+    # 0x41     11      Calibration data
+    # 0x42     11      Gain values (host-side parser consumes this)
+    # 0x43     11      Offset values
+    # 0x44     5       Motor position
+    # 0x45     11      Exposure time (auto-exposure calibration loop)
+    # 0x46     11      Focus position
+    # 0x47     11      Lamp settings
+    # 0x80     0       Lamp on/off (trigger only)
+    # 0x81     0       Motor init (trigger only)
+    # 0x91     5       Motor step (direction + count)
+    # 0xA0     9       CCD setup / load preheat [USED BY LS-40]
+    # 0xB0     0       State change (trigger only)
+    # 0xB1     0       State change (trigger only)
+    # 0xB3     13      Config write
+    # 0xB4     9       Extended config [USED BY LS-40]
+    # 0xC0     5       Gain calibration
+    # 0xC1     5       Offset calibration [USED BY LS-40 as frame_select]
+    # 0xD0     0/9     Diagnostic / eject motor [USED BY LS-40]
+    # 0xD1     0       Diagnostic (trigger only)
+    # 0xD2     5       Diagnostic data
+    # 0xD5     5       Extended diagnostic
+    # 0xD6     5       Persistent settings
 
     @sends(0xe0, 0xc1)
     def vendor_e0(self, subcode: int, data: bytes) -> bool:

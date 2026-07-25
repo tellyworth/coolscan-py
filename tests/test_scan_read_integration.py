@@ -6,8 +6,8 @@ using a fixture-independent MagicMock test double.  This verifies call
 sequencing and data lengths without depending on USB replay or fixture files.
 
 The 64-byte allocation proves the protocol transitions correctly from
-scanner_ready → reserve_unit → object_position → set_window → _upload_lut →
-start_scan → poll_until_ready → read_scan_data → release_unit.
+scanner_ready → reserve_unit → set_window → _upload_lut →
+start_scan → poll_until_ready → read_scan_data.
 """
 
 import pytest
@@ -20,7 +20,7 @@ from tests.fakes import configure_mock, make_protocol_mock
 def test_full_scan_flow_with_synthetic_data():
     """
     Full control flow: scanner_ready → reserve → setup → start_scan →
-    poll_until_ready → read_scan_data(64) → release_unit.
+    poll_until_ready → read_scan_data(64).
 
     Uses a spec'd MagicMock to verify call sequencing and return values.
     """
@@ -31,31 +31,25 @@ def test_full_scan_flow_with_synthetic_data():
     # Run the full scan sequence
     assert mock.scanner_ready(timeout=30) is True
     assert mock.reserve_unit() is True
-    assert mock.object_position() is True
     assert mock.set_window(ScanParameters()) is True
     assert mock._upload_lut(channel=1, lut_data=b"\x00" * 8192) is True
     assert mock.start_scan() is True
     assert mock.poll_until_ready(timeout=30) is True
 
-    # Read image data before release
+    # Read image data
     data = mock.read_scan_data(64, DataType.IMAGE_DATA)
     assert len(data) == 64
     assert data == synthetic_data
-
-    # Release unit
-    assert mock.release_unit() is True
 
     # Verify call sequence matches expected order
     expected = [
         "scanner_ready",
         "reserve_unit",
-        "object_position",
         "set_window",
         "_upload_lut",
         "start_scan",
         "poll_until_ready",
         "read_scan_data",
-        "release_unit",
     ]
     actual = [call[0] for call in mock.mock_calls]
     assert actual == expected, f"Call sequence mismatch:\n  expected: {expected}\n  actual:   {actual}"
