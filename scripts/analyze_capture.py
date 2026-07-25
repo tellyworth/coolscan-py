@@ -11,6 +11,7 @@ frames, generic event filtering, and protocol annotation.
 
 import argparse
 import json
+import os
 import sys
 import struct
 from collections import Counter, defaultdict
@@ -1843,6 +1844,7 @@ def print_grouped_by_phase(
     phases: List[PhaseGroup],
     issues: List[Issue],
     max_events: int = 10000,
+    verbose: bool = False,
 ) -> None:
     """Print events grouped by phase with per-phase summary."""
     display_count = max_events
@@ -2134,6 +2136,190 @@ def json_output(
 
 
 # ---------------------------------------------------------------------------
+# Image extraction from captures
+# ---------------------------------------------------------------------------
+
+
+def extract_image_frames(
+    events: List[Event],
+    output_dir: str,
+    depth: int = 12,
+    width: int = 2880,
+    height: int = 4332,
+    num_channels: int = 3,
+    fmt: str = "both",
+) -> List[Dict[str, Any]]:
+    """Extract image frames from capture events and save as TIFF/JPEG.
+
+    Walks through decoded events looking for READ(10) commands (0x28) with
+    datatype=0x00 (IMAGE_DATA).  Groups consecutive DATA_BLOCK responses
+    belonging to the same image read sequence.  A new frame starts when a
+    SCAN (0x24) command is encountered (Stage C setup in batch scans).
+
+    For each frame, concatenates all DATA_BLOCK payloads, decodes the raw
+    image data using ``_parse_scan_data``, and saves TIFF and/or JPEG output.
+
+    Args:
+        events: Decoded events (call ``_decode_all()`` first).
+        output_dir: Directory to write output files.
+        depth: Bit depth (8 or 12).
+        width: Image width in pixels.
+        height: Image height in pixels.
+        num_channels: Number of colour channels (3 for RGB).
+        fmt: Output format: "tiff", "jpeg", or "both".
+
+    Returns:
+        List of dicts with keys: frame_index, bytes_count, tiff_path, jpeg_path.
+    """
+    import numpy as np
+
+    from coolscan.scanner import LS40_CHANNEL_OFFSETS, _parse_scan_data
+    from coolscan.cli import (
+        _apply_auto_adjust,
+        _save_jpeg,
+        _save_tiff_dual_ifd,
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = Path(output_dir).resolve()
+
+    # Collect image data groups keyed by frame index
+    # A new frame starts when we see a SCAN (0x24) command
+    current_frame_data = bytearray()
+    current_frame_active = False
+    frames: List[bytearray] = []
+
+    for ev in events:
+        if not ev.raw or not ev.decoded:
+            continue
+
+        # OUT commands
+        if ev.direction == "out":
+            # SCAN command (0x24) marks the start of a new frame setup
+            if ev.raw[0] == 0x24:
+                # Flush any accumulated data from the previous frame
+                if current_frame_active and current_frame_data:
+                    frames.append(bytearray(current_frame_data))
+                current_frame_data = bytearray()
+                current_frame_active = True
+                continue
+
+            # READ(10) with datatype=0x00 (IMAGE_DATA)
+            if (ev.raw[0] == 0x28 and len(ev.raw) >= 10
+                    and ev.raw[2] == 0x00):
+                # This is an image data read — collect subsequent DATA_BLOCKs
+                current_frame_active = True
+                continue
+
+            # Any other OUT command ends the current data collection
+            if not ev.raw[0] in (0x00, 0xd0):  # TUR and PHASE_CHECK are noise
+                if current_frame_active and current_frame_data:
+                    frames.append(bytearray(current_frame_data))
+                current_frame_active = False
+                current_frame_data = bytearray()
+
+        # IN responses
+        elif ev.direction == "in":
+            # DATA_BLOCK responses contain actual image data
+            if (current_frame_active
+                    and ev.decoded.cmd_name == "DATA_BLOCK"):
+                current_frame_data.extend(ev.raw)
+
+    # Flush final frame
+    if current_frame_active and current_frame_data:
+        frames.append(bytearray(current_frame_data))
+
+    if not frames:
+        print("No image frames found in capture.", file=sys.stderr)
+        return []
+
+    # Determine basename from output directory
+    basename = out_path.stem or "scan"
+
+    results: List[Dict[str, Any]] = []
+    total_bytes = 0
+
+    for frame_idx, scan_data in enumerate(frames):
+        print(f"  Frame {frame_idx + 1}/{len(frames)}: {len(scan_data)} bytes")
+        total_bytes += len(scan_data)
+
+        # Calculate actual height from data size
+        bytes_per_channel = 2 if depth > 8 else 1
+        expected_bytes = height * width * num_channels * bytes_per_channel
+        actual_height = len(scan_data) // (width * num_channels * bytes_per_channel)
+        if actual_height < 100:
+            # Skip prescan/preview frames that are much smaller than full-res
+            print(
+                f"    Skipping frame {frame_idx + 1}: "
+                f"data too small for full-res ({len(scan_data)} bytes, "
+                f"height={actual_height}, expected ~{height})",
+                file=sys.stderr,
+            )
+            continue
+
+        # Parse raw scan data
+        img_arr, trailing = _parse_scan_data(
+            scan_data,
+            width=width,
+            height=actual_height,
+            num_channels=num_channels,
+            depth=depth,
+            format="plane",
+            channel_offsets=LS40_CHANNEL_OFFSETS,
+        )
+
+        # Build RGB array
+        rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
+
+        # Build output paths
+        frame_name = f"{basename}_frame_{frame_idx}"
+
+        # TIFF output
+        tiff_path = None
+        if fmt in ("tiff", "both"):
+            tiff_p = out_path / f"{frame_name}.tiff"
+            # Scale 12-bit to full 16-bit range for TIFF storage
+            if depth > 8 and rgb_arr.dtype == np.uint16:
+                tiff_rgb = (rgb_arr.astype(np.uint32) * 65535 // 4095).astype(np.uint16)
+            else:
+                tiff_rgb = rgb_arr
+            _save_tiff_dual_ifd(tiff_rgb, None, tiff_p, exif_data=None)
+            tiff_path = str(tiff_p)
+            print(f"    Saved TIFF: {tiff_p}")
+
+        # JPEG output
+        jpeg_path = None
+        if fmt in ("jpeg", "both"):
+            jpeg_p = out_path / f"{frame_name}.jpg"
+            # _apply_auto_adjust expects 8-bit uint8 input
+            if rgb_arr.dtype == np.uint16:
+                jpeg_input = (rgb_arr >> 4).astype(np.uint8)
+            else:
+                jpeg_input = rgb_arr
+            jpeg_arr = np.ascontiguousarray(jpeg_input)
+            # Workaround: _apply_auto_adjust assumes 8-bit input; we feed
+            # it the down-converted 8-bit data directly.  The auto-adjust
+            # performs negative inversion + histogram stretch + gamma.
+            jpeg_arr = _apply_auto_adjust(jpeg_arr)
+            jpeg_arr = np.ascontiguousarray(jpeg_arr)
+            _save_jpeg(jpeg_arr, jpeg_p, exif_data=None)
+            jpeg_path = str(jpeg_p)
+            print(f"    Saved JPEG: {jpeg_p}")
+
+        results.append({
+            "frame_index": frame_idx,
+            "bytes_count": len(scan_data),
+            "tiff_path": tiff_path,
+            "jpeg_path": jpeg_path,
+        })
+
+    # Print summary
+    print(f"\nImage extraction complete: {len(results)} frames, {total_bytes} total bytes")
+    print(f"Output directory: {out_path}")
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2214,6 +2400,30 @@ def main() -> int:
     parser.add_argument(
         "--datatype-summary", action="store_true",
         help="Show per-datatype transfer totals (declared vs actual bytes)",
+    )
+    parser.add_argument(
+        "--extract-images", metavar="DIR",
+        help="Extract image frames from capture and save as TIFF/JPEG to DIR",
+    )
+    parser.add_argument(
+        "--extract-depth", type=int, choices=[8, 12], default=12,
+        help="Bit depth for image extraction (default: 12)",
+    )
+    parser.add_argument(
+        "--extract-width", type=int, default=2880,
+        help="Image width in pixels for extraction (default: 2880)",
+    )
+    parser.add_argument(
+        "--extract-height", type=int, default=4332,
+        help="Image height in pixels for extraction (default: 4332)",
+    )
+    parser.add_argument(
+        "--extract-channels", type=int, default=3,
+        help="Number of colour channels for extraction (default: 3)",
+    )
+    parser.add_argument(
+        "--extract-format", choices=["tiff", "jpeg", "both"], default="both",
+        help="Output format for extraction (default: both)",
     )
 
     args = parser.parse_args()
@@ -2354,6 +2564,17 @@ def main() -> int:
         if args.datatype_summary:
             print_datatype_summary(events)
 
+        if args.extract_images:
+            extract_image_frames(
+                events,
+                output_dir=args.extract_images,
+                depth=args.extract_depth,
+                width=args.extract_width,
+                height=args.extract_height,
+                num_channels=args.extract_channels,
+                fmt=args.extract_format,
+            )
+
     # Output
     if args.json:
         if args.extract_wdbs or args.extract_control_frames or args.extract_read_capacity:
@@ -2370,7 +2591,7 @@ def main() -> int:
             output["datatype_summary"] = compute_datatype_summary(events)
         print(json.dumps(output, indent=2, default=str))
     elif args.group_by_phase:
-        print_grouped_by_phase(events, phases, issues, max_events=max_events)
+        print_grouped_by_phase(events, phases, issues, max_events=max_events, verbose=args.verbose)
     elif args.timeline:
         print_timeline(events)
     else:

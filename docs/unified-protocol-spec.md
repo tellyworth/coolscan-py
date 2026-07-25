@@ -568,14 +568,19 @@ full_res_setup -> full_res_start -> full_res_capture ->
 | 7 | -> full_res_setup | `batch_full_res_setup_frame()` | Configure 2900 DPI at per-frame Y offset |
 | 8 | -> full_res_start | `batch_full_res_start_frame()` | START_SCAN + poll until READY |
 | 9 | -> full_res_capture | `batch_full_res_capture_frame()` | Read full-res RGB data |
+| 10 | -> next setup | `poll_until_ready()` | Wait for scanner to finish naturally; **no STOP_SCAN between frames** |
 | -- | (before loop) | `post_prescan_autofocus()` + TUR x2 | Auto-focus at next frame center |
-| 10 | -> done | `scan_teardown()` | STOP_SCAN + RELEASE_UNIT |
+| 11 | -> done | `scan_teardown()` | STOP_SCAN + RELEASE_UNIT |
 
 ### Key Differences from Single-BW
 
 - **Setup does not call `stop_scan()`** -- batch `batch_full_scan_setup_frame()`
   uploads LUTs and configures windows but skips `stop_scan()`; the next event
   is `start_scan(BATCH)` rather than `stop_scan`.
+- **No `stop_scan()` between full-res frames.** After each full-res capture the
+  driver polls until READY; the scanner returns to READY naturally once the exact
+  byte count is consumed. The next frame then starts with auto-focus and TUR
+  polling. This matches the golden batch pcapng.
 - **Three scan passes per frame** -- Stage A (290 DPI IR+RGB), Stage B (290 DPI
   preview), Stage C (2900 DPI full res) run as separate `START_SCAN` -> poll ->
   read -> next sequence.
@@ -609,6 +614,7 @@ full_res_setup -> full_res_start -> full_res_capture ->
    - If `i > 0`: reconfigure Stage A, start scan, capture Stage A
    - Stage B: between setup -> start -> capture
    - Stage C: full-res setup (per-frame Y offset) -> start -> capture
+   - `poll_until_ready()` after capture (no `stop_scan()` between frames)
    - If not last frame: autofocus at next center
    - Yield `(frame_index, full_res_bytes, previews_dict)`
 5. `scan_teardown()` after all frames

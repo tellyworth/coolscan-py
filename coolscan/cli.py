@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import sys
 import time
 import traceback
@@ -106,6 +107,100 @@ def _build_exif_data(
     return info
 
 
+def _write_tiff_16bit_rgb(
+    rgb_array: np.ndarray,
+    output_path: Path,
+    ir_array: Optional[np.ndarray] = None,
+    compression: str = "zstd",
+    exif_data: Optional[dict] = None,
+) -> None:
+    """Write a 16-bit per channel RGB TIFF (with optional IR as 4th channel).
+
+    Writes a proper multi-channel 16-bit TIFF using manual TIFF format.
+    Pillow cannot handle uint16 RGB arrays directly.
+    """
+    height, width, channels = rgb_array.shape
+    assert channels == 3
+
+    # Ensure contiguous uint16 data
+    data = np.ascontiguousarray(rgb_array, dtype=np.uint16)
+
+    # If IR is present, include it as a 4th channel
+    if ir_array is not None:
+        ir_cont = np.ascontiguousarray(ir_array, dtype=np.uint16)
+        samples_per_pixel = 4
+        bits_per_sample = [16, 16, 16, 16]
+        # Pack RGB + IR: reshape IR to match RGB shape
+        ir_3d = ir_cont.reshape(height, width, 1)
+        combined = np.concatenate([data, ir_3d], axis=2)
+        combined = np.ascontiguousarray(combined)
+        raw_bytes = combined.tobytes()
+    else:
+        samples_per_pixel = 3
+        bits_per_sample = [16, 16, 16]
+        raw_bytes = data.tobytes()
+
+    # TIFF Header
+    # Little-endian, magic 42, first IFD offset
+    ifd_start = 8
+    num_tags = 12
+    ifd_size = 2 + num_tags * 12 + 4  # count + tags + next_ifd
+
+    # Compute offsets for values that don't fit in 4 bytes
+    bits_per_sample_offset = ifd_start + ifd_size
+    x_res_offset = bits_per_sample_offset + len(bits_per_sample) * 2
+    y_res_offset = x_res_offset + 8
+    strip_offsets_offset = y_res_offset + 8
+    strip_data_offset = strip_offsets_offset + 4
+
+    with open(output_path, "wb") as f:
+        # TIFF Header
+        f.write(b"II")  # Little-endian
+        f.write(struct.pack("<H", 42))  # Magic number
+        f.write(struct.pack("<I", ifd_start))  # First IFD offset
+
+        # Build tags (sorted by tag number)
+        tags = bytearray()
+        # 256: ImageWidth (LONG)
+        tags += struct.pack("<HHII", 256, 4, 1, width)
+        # 257: ImageLength (LONG)
+        tags += struct.pack("<HHII", 257, 4, 1, height)
+        # 258: BitsPerSample (SHORT, multiple values -> offset)
+        tags += struct.pack("<HHII", 258, 3, samples_per_pixel, bits_per_sample_offset)
+        # 259: Compression (SHORT, 1 = uncompressed)
+        tags += struct.pack("<HHII", 259, 3, 1, 1)
+        # 262: PhotometricInterpretation (SHORT, 2 = RGB)
+        tags += struct.pack("<HHII", 262, 3, 1, 2)
+        # 273: StripOffsets (LONG)
+        tags += struct.pack("<HHII", 273, 4, 1, strip_data_offset)
+        # 277: SamplesPerPixel (SHORT)
+        tags += struct.pack("<HHII", 277, 3, 1, samples_per_pixel)
+        # 278: RowsPerStrip (LONG)
+        tags += struct.pack("<HHII", 278, 4, 1, height)
+        # 279: StripByteCounts (LONG)
+        tags += struct.pack("<HHII", 279, 4, 1, len(raw_bytes))
+        # 282: XResolution (RATIONAL -> offset)
+        tags += struct.pack("<HHII", 282, 5, 1, x_res_offset)
+        # 283: YResolution (RATIONAL -> offset)
+        tags += struct.pack("<HHII", 283, 5, 1, y_res_offset)
+        # 296: ResolutionUnit (SHORT, 2 = inch)
+        tags += struct.pack("<HHII", 296, 3, 1, 2)
+
+        f.write(struct.pack("<H", num_tags))
+        f.write(tags)
+        f.write(struct.pack("<I", 0))  # Next IFD = 0 (no more IFDs)
+
+        # Tag value data at offsets
+        for bps in bits_per_sample:
+            f.write(struct.pack("<H", bps))  # BitsPerSample
+        f.write(struct.pack("<II", 2900, 1))  # XResolution
+        f.write(struct.pack("<II", 2900, 1))  # YResolution
+        f.write(struct.pack("<I", strip_data_offset))  # StripOffsets value
+
+        # Image data
+        f.write(raw_bytes)
+
+
 def _save_tiff_dual_ifd(
     rgb_array: np.ndarray,
     ir_array: Optional[np.ndarray],
@@ -123,8 +218,7 @@ def _save_tiff_dual_ifd(
     else:
         compress_str = "tiff_deflate"
 
-    # Save main IFD (RGB)
-    rgb_image = Image.fromarray(np.ascontiguousarray(rgb_array), "RGB")
+    # Build TIFF metadata tags (only applied to first IFD)
     tiff_info: dict = {}
     if exif_data:
         # Embed metadata as TIFF tags.  Pillow's Image.Exif() is intended for
@@ -150,22 +244,33 @@ def _save_tiff_dual_ifd(
             except (ValueError, TypeError):
                 pass
 
-    rgb_image.save(
-        str(output_path),
-        format="TIFF",
-        compression=compress_str,
-        info=tiff_info,
-    )
+    is_16bit = rgb_array.dtype == np.uint16
 
-    # Append IR as second IFD
-    if ir_array is not None:
-        ir_image = Image.fromarray(np.ascontiguousarray(ir_array), "L")
-        ir_image.save(
+    if is_16bit:
+        _write_tiff_16bit_rgb(
+            rgb_array, output_path, ir_array=ir_array,
+            compression=compress_str, exif_data=tiff_info,
+        )
+    else:
+        # 8-bit RGB: standard "RGB" mode
+        rgb_image = Image.fromarray(np.ascontiguousarray(rgb_array), "RGB")
+        rgb_image.save(
             str(output_path),
             format="TIFF",
             compression=compress_str,
-            append=True,
+            info=tiff_info,
         )
+
+        # Append IR as second IFD
+        if ir_array is not None:
+            ir_mode = "I;16" if ir_array.dtype == np.uint16 else "L"
+            ir_image = Image.fromarray(np.ascontiguousarray(ir_array), ir_mode)
+            ir_image.save(
+                str(output_path),
+                format="TIFF",
+                compression=compress_str,
+                append=True,
+            )
 
 
 def _save_jpeg(
@@ -175,6 +280,9 @@ def _save_jpeg(
     orientation: Optional[int] = None,
 ) -> None:
     """Save a JPEG with EXIF metadata."""
+    # JPEG only supports 8-bit; down-convert uint16 (12-bit >> 4)
+    if image_array.dtype != np.uint8:
+        image_array = (image_array >> 4).astype(np.uint8)
     image = Image.fromarray(np.ascontiguousarray(image_array), "RGB")
 
     exif_bytes = None
@@ -209,7 +317,10 @@ def _save_jpeg(
             exif_info[274] = orientation  # Orientation tag
         exif_bytes = exif_info.tobytes()
 
-    image.save(str(output_path), format="JPEG", quality=95, exif=exif_bytes)
+    save_kwargs: dict = {"format": "JPEG", "quality": 95}
+    if exif_bytes is not None:
+        save_kwargs["exif"] = exif_bytes
+    image.save(str(output_path), **save_kwargs)
 
 
 def _detect_orientation(image_array: np.ndarray) -> Optional[int]:
@@ -298,6 +409,10 @@ def eject(scanner: Optional[int]):
     click.echo(f"Ejecting film from {device}...")
     try:
         with CoolscanScanner(device) as scanner_obj:
+            # Drain any buffered scan data before ejecting.
+            # Unconsumed data causes eject_medium() to fail with
+            # ILLEGAL REQUEST / COMMAND SEQUENCE ERROR.
+            scanner_obj.protocol._drain_buffered_scan_data()
             if scanner_obj.protocol.eject_medium():
                 click.echo("Film ejected successfully")
                 if scanner_obj.protocol.reset_params():
@@ -629,9 +744,13 @@ def _do_batch_scan(
 
             # Parse full-res data
             batch_width = 2880
-            batch_height = len(full_res_data) // (batch_width * 3)
+            bytes_per_channel = 2 if depth > 8 else 1
+            batch_height = len(full_res_data) // (batch_width * 3 * bytes_per_channel)
             if batch_height < 100:
                 click.echo(f"  ⚠️  Suspicious data size: {len(full_res_data)} bytes (height={batch_height})", err=True)
+            expected_bytes = batch_height * batch_width * 3 * bytes_per_channel
+            if expected_bytes != len(full_res_data):
+                click.echo(f"  ⚠️  Data size mismatch: expected {expected_bytes}, got {len(full_res_data)}", err=True)
             channel_offsets = LS40_CHANNEL_OFFSETS
 
             img_arr, _ = _parse_scan_data(
@@ -645,6 +764,13 @@ def _do_batch_scan(
             )
 
             rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
+
+            # Scale 12-bit raw values to full 16-bit range for TIFF storage.
+            # Without this, 12-bit data (0-4095) in a uint16 container appears
+            # nearly black in viewers that expect the full 0-65535 range.
+            if depth > 8 and rgb_arr.dtype == np.uint16:
+                rgb_arr = (rgb_arr.astype(np.uint32) * 65535 // 4095).astype(np.uint16)
+
             ir_arr = None
 
             # IR from Stage A preview (4 channels: R, G, B, IR)

@@ -227,36 +227,36 @@ class TestParseScanDataDepth:
     """Tests for 12-bit depth handling."""
 
     def test_12bit_depth_shift(self):
-        """12-bit values are shifted right 4 bits to produce 8-bit output."""
+        """12-bit values are preserved as uint16 without shifting."""
         w, h, ch = 2, 2, 3
         data = _make_pixel_data(w, h, ch, "pixel", depth=12)
 
         arr, trailing = _parse_scan_data(data, w, h, ch, 12, "pixel")
 
-        assert arr.dtype == np.uint8
+        assert arr.dtype == np.uint16
         assert trailing == 0
 
-        # Values should match 8-bit equivalent (shift right 4 bits)
+        # Values should be full 12-bit (left-shifted by 4 in the raw data)
         for y in range(h):
             for x in range(w):
                 for c in range(ch):
-                    expected = (x * 37 + y * 13 + c * 53) % 256
+                    expected = ((x * 37 + y * 13 + c * 53) % 256) << 4
                     assert arr[y, x, c] == expected
 
     def test_12bit_plane_format(self):
-        """12-bit values work correctly in plane format."""
+        """12-bit values work correctly in plane format (uint16 output)."""
         w, h, ch = 3, 2, 3
         data = _make_pixel_data(w, h, ch, "plane", depth=12)
 
         arr, trailing = _parse_scan_data(data, w, h, ch, 12, "plane")
 
-        assert arr.dtype == np.uint8
+        assert arr.dtype == np.uint16
         assert trailing == 0
 
         for y in range(h):
             for x in range(w):
                 for c in range(ch):
-                    expected = (x * 37 + y * 13 + c * 53) % 256
+                    expected = ((x * 37 + y * 13 + c * 53) % 256) << 4
                     assert arr[y, x, c] == expected
 
 

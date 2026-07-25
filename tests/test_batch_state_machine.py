@@ -100,6 +100,16 @@ class _MockProtocol:
     def batch_full_res_capture_frame(self) -> bytes:
         return self._log("batch_full_res_capture_frame") or b"\x00"
 
+    def stop_scan(self) -> bool:
+        return self._log("stop_scan")
+
+    def _drain_buffered_scan_data(self) -> int:
+        return self._log("_drain_buffered_scan_data")
+
+    def poll_until_ready(self, timeout: int = 30, poll_interval: float = 0.5) -> bool:
+        return self._log("poll_until_ready", (timeout, poll_interval),
+                         {"timeout": timeout, "poll_interval": poll_interval})
+
     def scan_teardown(self) -> bool:
         return self._log("scan_teardown")
 
@@ -126,6 +136,9 @@ def _make_protocol() -> _MockProtocol:
 # =========================================================================
 
 # The expected method calls for ONE frame (without teardown)
+# Note: _drain_buffered_scan_data and stop_scan are NOT called between frames;
+# the full-res capture reads the exact expected byte count so there is no
+# residual data, and the scanner returns to READY naturally.
 FRAME_SEQUENCE = [
     "batch_full_scan_setup_frame",
     "start_scan",
@@ -137,6 +150,7 @@ FRAME_SEQUENCE = [
     "batch_full_res_setup_frame",
     "batch_full_res_start_frame",
     "batch_full_res_capture_frame",
+    "poll_until_ready",
 ]
 
 

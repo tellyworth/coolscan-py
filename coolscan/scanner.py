@@ -68,8 +68,7 @@ def _parse_scan_data(
         and trailing_bytes is the number of unused bytes at the end.
     """
     if depth > 8:
-        samples = np.frombuffer(scan_data, dtype=">u2")  # big-endian uint16
-        samples = (samples >> 4).astype(np.uint8)  # top 8 bits of 12-bit value
+        samples = np.frombuffer(scan_data, dtype=">u2").astype(np.uint16)  # BE uint16 → native
     else:
         samples = np.frombuffer(scan_data, dtype=np.uint8)
 
@@ -92,7 +91,8 @@ def _parse_scan_data(
             samples = np.pad(samples, (0, -trailing), constant_values=0)
             trailing = 0
 
-        arr = np.zeros((height, width, num_channels), dtype=np.uint8)
+        out_dtype = np.uint16 if depth > 8 else np.uint8
+        arr = np.zeros((height, width, num_channels), dtype=out_dtype)
         offset = 0
         for y in range(height):
             for ch in range(num_channels):
@@ -127,9 +127,15 @@ def _parse_scan_data(
 class CoolscanScanner:
     """High-level interface for Coolscan scanner operations."""
 
-    def __init__(self, device: ScannerDevice, usb_log_file: Optional[str] = None):
+    def __init__(
+        self,
+        device: ScannerDevice,
+        usb_log_file: Optional[str] = None,
+        verbose: bool = False,
+    ):
         self.device = device
         self.usb_log_file = usb_log_file
+        self.verbose = verbose
         self.protocol = None
         self.is_connected = False
         self.scan_in_progress = False
@@ -138,8 +144,9 @@ class CoolscanScanner:
     def connect(self, usb_log_file: Optional[str] = None) -> bool:
         """Connect to the scanner using enhanced SANE sequence."""
         try:
-            print("Connecting to scanner...")
-            self.protocol = CoolscanProtocol(self.device)
+            if self.verbose:
+                print("Connecting to scanner...")
+            self.protocol = CoolscanProtocol(self.device, verbose=self.verbose)
 
             # Enable USB capture before any USB traffic
             if usb_log_file:
@@ -150,11 +157,13 @@ class CoolscanScanner:
                 raise RuntimeError("Scanner initialization failed")
 
             self.is_connected = True
-            print("Scanner connected successfully")
+            if self.verbose:
+                print("Scanner connected successfully")
             return True
 
         except Exception as e:
-            print(f"Failed to connect to scanner: {e}")
+            if self.verbose:
+                print(f"Failed to connect to scanner: {e}")
             self.is_connected = False
             return False
 
@@ -321,21 +330,25 @@ class CoolscanScanner:
             raise RuntimeError("Scan already in progress")
 
         try:
-            print("Starting prescan...")
+            if self.verbose:
+                print("Starting prescan...")
 
             # Session-level reservation happens during connect(); do not
             # reserve/release per operation.
             success = self.protocol.prescan()
 
             if success:
-                print("Prescan completed successfully")
+                if self.verbose:
+                    print("Prescan completed successfully")
             else:
-                print("Prescan failed")
+                if self.verbose:
+                    print("Prescan failed")
 
             return success
 
         except Exception as e:
-            print(f"Prescan failed: {e}")
+            if self.verbose:
+                print(f"Prescan failed: {e}")
             return False
 
     def auto_focus(self) -> bool:
@@ -344,21 +357,25 @@ class CoolscanScanner:
             raise RuntimeError("Scanner not connected")
 
         try:
-            print("Performing auto focus...")
+            if self.verbose:
+                print("Performing auto focus...")
 
             # Session-level reservation happens during connect(); do not
             # reserve/release per operation.
             success = self.protocol.auto_focus()
 
             if success:
-                print("Auto focus completed successfully")
+                if self.verbose:
+                    print("Auto focus completed successfully")
             else:
-                print("Auto focus failed")
+                if self.verbose:
+                    print("Auto focus failed")
 
             return success
 
         except Exception as e:
-            print(f"Auto focus failed: {e}")
+            if self.verbose:
+                print(f"Auto focus failed: {e}")
             return False
 
     def _perform_scan(
@@ -398,7 +415,8 @@ class CoolscanScanner:
             raise RuntimeError("Scan already in progress")
 
         try:
-            print(f"Starting {scan_type} scan...")
+            if self.verbose:
+                print(f"Starting {scan_type} scan...")
 
             # Use the capture-informed full-scan frame sequence.
             if not self.protocol.full_scan_frame(params):
@@ -407,7 +425,8 @@ class CoolscanScanner:
             self.scan_in_progress = True
 
             # Read scan data with proper datatype
-            print("Reading scan data...")
+            if self.verbose:
+                print("Reading scan data...")
 
             # Calculate expected image dimensions.
             # The LS-40 ED returns a 2880 x 3888 pixel frame for full-resolution
@@ -459,7 +478,8 @@ class CoolscanScanner:
 
                 # Progress indicator
                 progress = bytes_read / total_bytes * 100
-                print(f"Scan progress: {progress:.1f}%")
+                if self.verbose:
+                    print(f"Scan progress: {progress:.1f}%")
 
             # --- Image format handling ---
             # The LS-40 ED outputs plane-interleaved data.  Apply channel
@@ -468,11 +488,12 @@ class CoolscanScanner:
                 scan_data, width, height, num_channels, params.depth,
                 format, channel_offsets,
             )
-            print(
-                f"  Format: {format}, dimensions: {width}x{height}, "
-                f"bytes={len(scan_data)}, trailing={trailing}, "
-                f"offsets={channel_offsets}"
-            )
+            if self.verbose:
+                print(
+                    f"  Format: {format}, dimensions: {width}x{height}, "
+                    f"bytes={len(scan_data)}, trailing={trailing}, "
+                    f"offsets={channel_offsets}"
+                )
 
             # Build PIL image from array
             if params.infrared:
@@ -482,7 +503,8 @@ class CoolscanScanner:
 
             # Save the image
             image.save(output_path)
-            print(f"Scan saved to {output_path}")
+            if self.verbose:
+                print(f"Scan saved to {output_path}")
 
             self.scan_in_progress = False
             # Session-level reservation is released in disconnect(); do not
@@ -490,7 +512,8 @@ class CoolscanScanner:
             return True
 
         except Exception as e:
-            print(f"Scan failed: {e}")
+            if self.verbose:
+                print(f"Scan failed: {e}")
             if self.scan_in_progress:
                 self.cancel_scan()
             return False
@@ -503,13 +526,16 @@ class CoolscanScanner:
         try:
             if self.protocol.cancel_scan():
                 self.scan_in_progress = False
-                print("Scan cancelled")
+                if self.verbose:
+                    print("Scan cancelled")
                 return True
             else:
-                print("Failed to cancel scan")
+                if self.verbose:
+                    print("Failed to cancel scan")
                 return False
         except Exception as e:
-            print(f"Error cancelling scan: {e}")
+            if self.verbose:
+                print(f"Error cancelling scan: {e}")
             return False
 
     def wait_for_ready(self, timeout: int = 30) -> bool:

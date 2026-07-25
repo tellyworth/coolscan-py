@@ -800,7 +800,8 @@ class CoolscanProtocol:
                     idVendor=vendor_id, idProduct=product_id, backend=libusb0_backend
                 )
                 if self.usb_device is not None:
-                    print(f"  Using libusb0 backend (fallback)")
+                    if self.verbose:
+                        print(f"  Using libusb0 backend (fallback)")
             except (ImportError, AttributeError):
                 pass
 
@@ -815,17 +816,20 @@ class CoolscanProtocol:
             # This doesn't require the device to be in an active configuration
             cfg_desc = usb.util.find_descriptor(self.usb_device, bConfigurationValue=1)
             if cfg_desc:
-                print(f"  Got configuration descriptor 1")
+                if self.verbose:
+                    print(f"  Got configuration descriptor 1")
 
             # Try to get active configuration (might fail, that's OK)
             try:
                 cfg = self.usb_device.get_active_configuration()
-                print(f"  Device already configured (config {cfg.bConfigurationValue})")
+                if self.verbose:
+                    print(f"  Device already configured (config {cfg.bConfigurationValue})")
             except usb.core.USBError:
                 # Not configured, try to set it
                 try:
                     self.usb_device.set_configuration(1)
-                    print(f"  Configuration set to 1")
+                    if self.verbose:
+                        print(f"  Configuration set to 1")
                     try:
                         cfg = self.usb_device.get_active_configuration()
                     except usb.core.USBError:
@@ -833,9 +837,11 @@ class CoolscanProtocol:
                 except usb.core.USBError as e:
                     err_msg = str(e).lower()
                     if "result too large" not in err_msg and e.errno != 16:
-                        print(f"  ⚠️  Configuration set failed: {e}")
+                        if self.verbose:
+                            print(f"  ⚠️  Configuration set failed: {e}")
         except Exception as e:
-            print(f"  ⚠️  Could not get configuration descriptor: {e}")
+            if self.verbose:
+                print(f"  ⚠️  Could not get configuration descriptor: {e}")
 
         # Set timeouts (in milliseconds)
         # Use longer timeout to allow scanner time to respond, especially after film insertion
@@ -861,13 +867,15 @@ class CoolscanProtocol:
                 )
 
                 if self.bulk_out and self.bulk_in:
-                    print(
-                        f"  Found endpoints via descriptor: OUT=0x{self.bulk_out.bEndpointAddress:02x}, IN=0x{self.bulk_in.bEndpointAddress:02x}"
-                    )
+                    if self.verbose:
+                        print(
+                            f"  Found endpoints via descriptor: OUT=0x{self.bulk_out.bEndpointAddress:02x}, IN=0x{self.bulk_in.bEndpointAddress:02x}"
+                        )
                 else:
                     raise RuntimeError("Endpoints not found in descriptor")
             except Exception as e:
-                print(f"  ⚠️  Could not get endpoints from descriptor: {e}")
+                if self.verbose:
+                    print(f"  ⚠️  Could not get endpoints from descriptor: {e}")
                 cfg_desc = None  # Force fallback
         elif cfg:
             try:
@@ -887,20 +895,23 @@ class CoolscanProtocol:
                 )
 
                 if self.bulk_out and self.bulk_in:
-                    print(
-                        f"  Found endpoints via active config: OUT=0x{self.bulk_out.bEndpointAddress:02x}, IN=0x{self.bulk_in.bEndpointAddress:02x}"
-                    )
+                    if self.verbose:
+                        print(
+                            f"  Found endpoints via active config: OUT=0x{self.bulk_out.bEndpointAddress:02x}, IN=0x{self.bulk_in.bEndpointAddress:02x}"
+                        )
                 else:
                     raise RuntimeError("Endpoints not found in configuration")
             except Exception as e:
-                print(f"  ⚠️  Could not get endpoints from configuration: {e}")
-                print(f"  Using hardcoded endpoint addresses (from USB capture analysis)")
+                if self.verbose:
+                    print(f"  ⚠️  Could not get endpoints from configuration: {e}")
+                    print(f"  Using hardcoded endpoint addresses (from USB capture analysis)")
 
         # Fallback: Use hardcoded endpoint addresses from USB capture analysis
         # OUT endpoint: 0x01 (endpoint 1, OUT direction)
         # IN endpoint: 0x82 (endpoint 2, IN direction = 0x02 | 0x80)
         if not cfg:
-            print(f"  Using hardcoded endpoints: OUT=0x01, IN=0x82")
+            if self.verbose:
+                print(f"  Using hardcoded endpoints: OUT=0x01, IN=0x82")
 
             # Create mock endpoint objects with the known addresses
             class MockEndpoint:
@@ -920,7 +931,8 @@ class CoolscanProtocol:
                     if self.usb_device.is_kernel_driver_active(0):
                         try:
                             self.usb_device.detach_kernel_driver(0)
-                            print(f"  Detached kernel driver")
+                            if self.verbose:
+                                print(f"  Detached kernel driver")
                         except (usb.core.USBError, NotImplementedError) as e:
                             # Not supported on macOS, that's OK
                             pass
@@ -930,7 +942,8 @@ class CoolscanProtocol:
                     err_msg = str(e).lower()
                     if "no such file" not in err_msg and "not supported" not in err_msg:
                         # Only log if it's an unexpected error
-                        print(f"  ⚠️  Kernel driver check failed: {e}")
+                        if self.verbose:
+                            print(f"  ⚠️  Kernel driver check failed: {e}")
         except (AttributeError, NotImplementedError):
             # Kernel driver handling not available (normal on macOS)
             pass
@@ -939,7 +952,8 @@ class CoolscanProtocol:
         # On macOS, this often fails due to various quirks, but we can continue with hardcoded endpoints
         try:
             usb.util.claim_interface(self.usb_device, 0)
-            print(f"  Interface claimed successfully")
+            if self.verbose:
+                print(f"  Interface claimed successfully")
         except usb.core.USBError as e:
             # Interface might already be claimed, or various macOS quirks
             # Since we're using hardcoded endpoints, we can continue anyway
@@ -951,20 +965,24 @@ class CoolscanProtocol:
                 or "other error" in err_msg
             ):
                 # These errors often mean the interface is already claimed or can't be claimed, which is OK
-                print(f"  Interface claim failed (will continue with hardcoded endpoints): {e}")
+                if self.verbose:
+                    print(f"  Interface claim failed (will continue with hardcoded endpoints): {e}")
             else:
                 # Log but don't fail - we'll try to continue anyway
-                print(f"  ⚠️  Interface claim failed: {e} (will try to continue)")
+                if self.verbose:
+                    print(f"  ⚠️  Interface claim failed: {e} (will try to continue)")
 
         # Clear any halted endpoints (don't reset device - it causes disconnection)
         # Note: device.reset() causes the device to disconnect, so we skip it
         try:
             self.usb_device.clear_halt(self.bulk_out.bEndpointAddress)
             self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
-            print(f"  Endpoints cleared")
+            if self.verbose:
+                print(f"  Endpoints cleared")
         except (usb.core.USBError, AttributeError) as e:
             # Endpoint clearing might fail, that's OK
-            print(f"  Endpoint clearing failed (may be normal): {e}")
+            if self.verbose:
+                print(f"  Endpoint clearing failed (may be normal): {e}")
 
     def _init_scsi(self):
         """Initialize SCSI connection."""
@@ -1097,7 +1115,8 @@ class CoolscanProtocol:
                     self._usb_capture_log.flush()
                 except Exception:
                     pass
-            print(f"    ❌ Write error: {e}")
+            if self.verbose:
+                print(f"    ❌ Write error: {e}")
             raise
 
     def _usb_read_bulk(self, length: int) -> bytes:
@@ -1166,7 +1185,8 @@ class CoolscanProtocol:
                     self._usb_capture_log.flush()
                 except Exception:
                     pass
-            print(f"    ❌ Read error: {e}")
+            if self.verbose:
+                print(f"    ❌ Read error: {e}")
             raise
 
     @sends(0x00)
@@ -1214,9 +1234,10 @@ class CoolscanProtocol:
                         self._replay_reraise_if_needed(e)
                         hard_errors += 1
                         if hard_errors >= max_hard_errors:
-                            print(
-                                f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
-                            )
+                            if self.verbose:
+                                print(
+                                    f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
+                                )
                             return False
                         time.sleep(delay)
                         continue
@@ -1236,13 +1257,15 @@ class CoolscanProtocol:
                     self._replay_reraise_if_needed(e)
                     hard_errors += 1
                     if hard_errors >= max_hard_errors:
-                        print(
-                            f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
-                        )
+                        if self.verbose:
+                            print(
+                                f"  ❌ Scanner wait failed: {hard_errors} consecutive hard errors"
+                            )
                         return False
                     time.sleep(delay)
 
-            print(f"  ⚠️  Scanner not ready after {timeout:.0f}s")
+            if self.verbose:
+                print(f"  ⚠️  Scanner not ready after {timeout:.0f}s")
             return False
         finally:
             self.usb_device.default_timeout = original_timeout
@@ -1258,7 +1281,8 @@ class CoolscanProtocol:
                 time.sleep(0.5 * (attempt + 1))
             except Exception as e:
                 self._replay_reraise_if_needed(e)
-                print(f"Phase check attempt {attempt + 1} failed: {e}")
+                if self.verbose:
+                    print(f"Phase check attempt {attempt + 1} failed: {e}")
                 # Longer delay on error too
                 time.sleep(1.0 * (attempt + 1))
 
@@ -1275,7 +1299,8 @@ class CoolscanProtocol:
         phase_cmd = self._pack_byte(0xD0)
         try:
             self._usb_write_bulk(phase_cmd)
-            print(f"      Phase check command (0xd0) sent")
+            if self.verbose:
+                print(f"      Phase check command (0xd0) sent")
 
             # Read phase response
             response = self._usb_read_bulk(1)
@@ -1287,14 +1312,17 @@ class CoolscanProtocol:
 
             if response and len(response) >= 1:
                 phase = PhaseType(response[0])
-                print(f"      Phase response: {phase}")
+                if self.verbose:
+                    print(f"      Phase response: {phase}")
                 return phase
             else:
-                print(f"      ⚠️  No phase response received")
+                if self.verbose:
+                    print(f"      ⚠️  No phase response received")
                 return PhaseType.NONE
         except Exception as e:
             self._replay_reraise_if_needed(e)
-            print(f"      ⚠️  Phase check error: {e}")
+            if self.verbose:
+                print(f"      ⚠️  Phase check error: {e}")
         return PhaseType.NONE
 
     def _issue_command(
@@ -1352,15 +1380,17 @@ class CoolscanProtocol:
                                     remaining_data_length -= len(data_in)
                                 else:
                                     data_in = b""
-                                print(
-                                    f"    ⚠️  Overflow on phase read - extracted phase=0x{phase_byte:02x}, got {len(chunk)-1} bytes of data"
-                                )
+                                if self.verbose:
+                                    print(
+                                        f"    ⚠️  Overflow on phase read - extracted phase=0x{phase_byte:02x}, got {len(chunk)-1} bytes of data"
+                                    )
                             else:
                                 phase_byte = 0x03  # Default to DATA_IN
                                 data_in = b""
                         except Exception as e2:
                             self._replay_reraise_if_needed(e2)
-                            print(f"    ⚠️  Failed to read chunk after Overflow: {e2}")
+                            if self.verbose:
+                                print(f"    ⚠️  Failed to read chunk after Overflow: {e2}")
                             phase_byte = 0x03  # Assume DATA_IN phase
                             data_in = b""
                     else:
@@ -1371,7 +1401,8 @@ class CoolscanProtocol:
                                 status_data = status_data.tobytes()
                             if len(status_data) >= 8:
                                 status, parsed = self._parse_status(status_data)
-                                print(f"    ⚠️  Got status directly (Overflow on phase): {status}")
+                                if self.verbose:
+                                    print(f"    ⚠️  Got status directly (Overflow on phase): {status}")
                                 return b"", status
                         except Exception as e_ov:
                             self._replay_reraise_if_needed(e_ov)
@@ -1379,13 +1410,15 @@ class CoolscanProtocol:
                         phase_byte = 0x03  # Default to DATA_IN
                         data_in = b""
                 else:
-                    print(f"    ⚠️  Phase read failed: {e}")
+                    if self.verbose:
+                        print(f"    ⚠️  Phase read failed: {e}")
                     phase_byte = 0x03  # Assume DATA_IN phase
                     data_in = b""
 
             # Handle Busy phase (0x04)
             if phase_byte == 0x04:
-                print(f"    Scanner busy, retrying...")
+                if self.verbose:
+                    print(f"    Scanner busy, retrying...")
                 for retry in range(5):
                     time.sleep(0.5)
                     try:
@@ -1402,7 +1435,8 @@ class CoolscanProtocol:
                         self._replay_reraise_if_needed(e_busy)
                         pass
                 if phase_byte == 0x04:
-                    print(f"    ⚠️  Scanner still busy")
+                    if self.verbose:
+                        print(f"    ⚠️  Scanner still busy")
                     return b"", StatusType.BUSY
 
             # data_in already initialized at start of function
@@ -1412,7 +1446,8 @@ class CoolscanProtocol:
             if phase_byte not in (0x02, 0x03, 0x04) and data_in_length == 0:
                 pass  # Graceful: skip data phase, proceed to status read
             elif phase_byte not in (0x02, 0x03, 0x04):
-                print(f"    ⚠️  Unexpected phase 0x{phase_byte:02x} with data expected")
+                if self.verbose:
+                    print(f"    ⚠️  Unexpected phase 0x{phase_byte:02x} with data expected")
                 # Continue to status read to clear the pipe and get the error code
                 data_in = b""
                 remaining_data_length = 0
@@ -1428,7 +1463,8 @@ class CoolscanProtocol:
                     # No phase check needed - status is next in the protocol sequence
                 except Exception as e:
                     self._replay_reraise_if_needed(e)
-                    print(f"    ⚠️  Data out failed: {e}")
+                    if self.verbose:
+                        print(f"    ⚠️  Data out failed: {e}")
                     return b"", StatusType.ERROR
 
             # Read data if phase is Data IN (0x03)
@@ -1455,7 +1491,8 @@ class CoolscanProtocol:
                         data_in = existing_data
                 except Exception as e:
                     self._replay_reraise_if_needed(e)
-                    print(f"    ⚠️  Data read failed: {e}")
+                    if self.verbose:
+                        print(f"    ⚠️  Data read failed: {e}")
                     # Keep existing data if we have it
                     if len(data_in) == 0:
                         data_in = b""
@@ -1532,14 +1569,16 @@ class CoolscanProtocol:
 
                 # Only print if error
                 if status != StatusType.READY:
-                    print(f"    Status: {status}, sense: {parsed}")
-                    if len(status_data) == 8:
-                        print(f"    Raw status: {status_data.hex()}")
+                    if self.verbose:
+                        print(f"    Status: {status}, sense: {parsed}")
+                        if len(status_data) == 8:
+                            print(f"    Raw status: {status_data.hex()}")
 
                 return data_in, status
             except Exception as e:
                 self._replay_reraise_if_needed(e)
-                print(f"    ⚠️  Status read failed: {e}")
+                if self.verbose:
+                    print(f"    ⚠️  Status read failed: {e}")
                 try:
                     self._usb_write_bulk(self._build_6byte_command(0x00, control=0x00))
                     self._usb_write_bulk(self._pack_byte(0xD0))
@@ -1550,7 +1589,8 @@ class CoolscanProtocol:
 
         except Exception as e:
             self._replay_reraise_if_needed(e)
-            print(f"    ❌ USB command error: {e}")
+            if self.verbose:
+                print(f"    ❌ USB command error: {e}")
             return b"", StatusType.ERROR
 
     def _issue_scsi_command(
@@ -1649,7 +1689,8 @@ class CoolscanProtocol:
 
         Uses the correct 6-byte command format: 00 00 00 00 00 00
         """
-        print("Testing unit ready...")
+        if self.verbose:
+            print("Testing unit ready...")
 
         # Use shorter timeout for TEST_UNIT_READY to fail faster
         original_timeout = self.usb_device.default_timeout
@@ -1660,17 +1701,20 @@ class CoolscanProtocol:
             for attempt in range(3):
                 try:
                     if attempt > 0:
-                        print(f"  Retry attempt {attempt + 1}...")
+                        if self.verbose:
+                            print(f"  Retry attempt {attempt + 1}...")
                         time.sleep(0.2)  # Shorter delay between attempts (200ms instead of 1s)
 
                     status, _ = self._test_unit_ready_once()
-                    print(f"  Status: {status}")
+                    if self.verbose:
+                        print(f"  Status: {status}")
 
                     if status == StatusType.READY:
                         return True
 
                 except Exception as e:
-                    print(f"  Error in test_unit_ready (attempt {attempt + 1}): {e}")
+                    if self.verbose:
+                        print(f"  Error in test_unit_ready (attempt {attempt + 1}): {e}")
                     continue
 
             return False
@@ -1681,23 +1725,27 @@ class CoolscanProtocol:
     @sends(0x16)
     def reserve_unit(self) -> bool:
         """Reserve the scanner unit (like SANE coolscan_grab_scanner)."""
-        print("Reserving unit...")
+        if self.verbose:
+            print("Reserving unit...")
         # Format: 16 00 00 00 00 00 (from USB capture)
         cmd = self._build_6byte_command(0x16, control=0x00)
         _, status = self._issue_command(cmd)
         success = status == StatusType.READY
-        print(f"Unit reservation: {'SUCCESS' if success else 'FAILED'}")
+        if self.verbose:
+            print(f"Unit reservation: {'SUCCESS' if success else 'FAILED'}")
         return success
 
     @sends(0x17)
     def release_unit(self) -> bool:
         """Release the scanner unit."""
-        print("Releasing unit...")
+        if self.verbose:
+            print("Releasing unit...")
         # Format: 17 00 00 00 00 00 (from USB capture)
         cmd = self._build_6byte_command(0x17, control=0x00)
         _, status = self._issue_command(cmd)
         success = status == StatusType.READY
-        print(f"Unit release: {'SUCCESS' if success else 'FAILED'}")
+        if self.verbose:
+            print(f"Unit release: {'SUCCESS' if success else 'FAILED'}")
         return success
 
     @sends(0x1b, 0x17, 0x00)
@@ -1710,10 +1758,12 @@ class CoolscanProtocol:
 
         Returns True if scanner appears responsive, False otherwise.
         """
-        print("🔄 Attempting to reset scanner state (aggressive cleanup)...")
+        if self.verbose:
+            print("🔄 Attempting to reset scanner state (aggressive cleanup)...")
 
         if not self.usb_device:
-            print("  ⚠️  No USB device, nothing to reset")
+            if self.verbose:
+                print("  ⚠️  No USB device, nothing to reset")
             return False
 
         try:
@@ -1727,17 +1777,20 @@ class CoolscanProtocol:
 
             try:
                 # Step 1: Clear any stalled endpoints
-                print("  Clearing endpoints...")
+                if self.verbose:
+                    print("  Clearing endpoints...")
                 try:
                     if hasattr(self, "bulk_out") and self.bulk_out:
                         self.usb_device.clear_halt(self.bulk_out.bEndpointAddress)
                     if hasattr(self, "bulk_in") and self.bulk_in:
                         self.usb_device.clear_halt(self.bulk_in.bEndpointAddress)
                 except Exception as e:
-                    print(f"    (endpoint clear: {e})")
+                    if self.verbose:
+                        print(f"    (endpoint clear: {e})")
 
                 # Step 2: Drain any pending data aggressively
-                print("  Draining pending data...")
+                if self.verbose:
+                    print("  Draining pending data...")
                 if hasattr(self, "bulk_in") and self.bulk_in:
                     for _ in range(10):  # More drain attempts
                         try:
@@ -1746,7 +1799,8 @@ class CoolscanProtocol:
                             break
 
                 # Step 3: Send STOP_SCAN command (0x1b with action 0x04)
-                print("  Sending STOP_SCAN...")
+                if self.verbose:
+                    print("  Sending STOP_SCAN...")
                 try:
                     if hasattr(self, "bulk_out") and self.bulk_out:
                         stop_cmd = bytes([0x1B, 0x00, 0x00, 0x00, 0x04, 0x00])
@@ -1758,10 +1812,12 @@ class CoolscanProtocol:
                         except:
                             pass
                 except Exception as e:
-                    print(f"    (stop scan: {e})")
+                    if self.verbose:
+                        print(f"    (stop scan: {e})")
 
                 # Step 4: Send RELEASE_UNIT
-                print("  Sending RELEASE_UNIT...")
+                if self.verbose:
+                    print("  Sending RELEASE_UNIT...")
                 try:
                     if hasattr(self, "bulk_out") and self.bulk_out:
                         release_cmd = bytes([0x17, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -1775,7 +1831,8 @@ class CoolscanProtocol:
                         except:
                             pass
                 except Exception as e:
-                    print(f"    (release unit: {e})")
+                    if self.verbose:
+                        print(f"    (release unit: {e})")
 
                 # Step 5: Final drain
                 time.sleep(0.2)
@@ -1787,7 +1844,8 @@ class CoolscanProtocol:
                             break
 
                 # Step 6: Try a TEST_UNIT_READY to check responsiveness
-                print("  Testing responsiveness...")
+                if self.verbose:
+                    print("  Testing responsiveness...")
                 try:
                     if hasattr(self, "bulk_out") and self.bulk_out:
                         tur_cmd = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -1802,12 +1860,15 @@ class CoolscanProtocol:
                                 self.bulk_in.bEndpointAddress, 8, timeout=500
                             )
                             if status and status[0] == 0x00:
-                                print("  ✅ Scanner is responsive")
+                                if self.verbose:
+                                    print("  ✅ Scanner is responsive")
                                 return True
                 except Exception as e:
-                    print(f"    (test ready: {e})")
+                    if self.verbose:
+                        print(f"    (test ready: {e})")
 
-                print("  ⚠️  Reset completed but scanner responsiveness unknown")
+                if self.verbose:
+                    print("  ⚠️  Reset completed but scanner responsiveness unknown")
                 return False
 
             finally:
@@ -1815,30 +1876,35 @@ class CoolscanProtocol:
                 self.usb_device.default_timeout = original_timeout
 
         except Exception as e:
-            print(f"  ⚠️  Reset error: {e}")
+            if self.verbose:
+                print(f"  ⚠️  Reset error: {e}")
             return False
 
     @sends(0x1a)
     def mode_sense(self) -> Optional[int]:
         """Get mode sense data to determine MUD (Measurement Unit Divisor)."""
-        print("Getting mode sense...")
+        if self.verbose:
+            print("Getting mode sense...")
         cmd = self._parse_command("1a 18 03 00 00 00")
         data, status = self._issue_command(cmd, data_in_length=64)
 
         if status == StatusType.READY and len(data) >= 8:
             # Extract MUD like SANE backend
             mud = struct.unpack(">H", data[6:8])[0]
-            print(f"MUD (Measurement Unit Divisor): {mud}")
+            if self.verbose:
+                print(f"MUD (Measurement Unit Divisor): {mud}")
             self.mud = mud
             return mud
         else:
-            print("Mode sense failed")
+            if self.verbose:
+                print("Mode sense failed")
             return None
 
     @sends(0x28)
     def get_internal_info(self) -> Optional[ScannerInfo]:
         """Get internal scanner information (like SANE get_internal_info)."""
-        print("Getting internal info...")
+        if self.verbose:
+            print("Getting internal info...")
         # READ with datatype 0xe0 for internal info (256 bytes)
         cmd = bytearray(
             [
@@ -1878,17 +1944,20 @@ class CoolscanProtocol:
             for i in range(8):
                 info.device_errors[i] = data[0x40 + i]
 
-            print(f"Scanner info: {info}")
+            if self.verbose:
+                print(f"Scanner info: {info}")
             self.scanner_info = info
             return info
         else:
-            print("Internal info read failed")
+            if self.verbose:
+                print("Internal info read failed")
             return None
 
     @sends(0x31)
     def object_position(self, auto_feed: int = 0x00) -> bool:
         """Send OBJECT_POSITION command (like SANE coolscan_object_feed)."""
-        print("Sending object position command...")
+        if self.verbose:
+            print("Sending object position command...")
         cmd = bytearray(
             [
                 0x31,  # OBJECT_POSITION
@@ -1906,7 +1975,8 @@ class CoolscanProtocol:
 
         _, status = self._issue_command(bytes(cmd))
         success = status == StatusType.READY
-        print(f"Object position: {'SUCCESS' if success else 'FAILED'}")
+        if self.verbose:
+            print(f"Object position: {'SUCCESS' if success else 'FAILED'}")
         return success
 
     @sends(0x2a)
@@ -1924,7 +1994,8 @@ class CoolscanProtocol:
             DeprecationWarning,
             stacklevel=2,
         )
-        print("Sending LUT data...")
+        if self.verbose:
+            print("Sending LUT data...")
         # SEND with datatype 0xc0 for LUT
         cmd = bytearray(
             [
@@ -1945,7 +2016,8 @@ class CoolscanProtocol:
 
         _, status = self._issue_command(bytes(cmd), lut_data)
         success = status == StatusType.READY
-        print(f"LUT send: {'SUCCESS' if success else 'FAILED'}")
+        if self.verbose:
+            print(f"LUT send: {'SUCCESS' if success else 'FAILED'}")
         return success
 
     def _generate_identity_lut(self) -> bytes:
@@ -1969,7 +2041,8 @@ class CoolscanProtocol:
         """Upload LUT data for a specific channel (1=R, 2=G, 3=B, 9=IR)."""
         expected_size = 2 * (1 << self.maxbits)
         if len(lut_data) != expected_size:
-            print(f"  ⚠️  LUT data must be {expected_size} bytes, got {len(lut_data)}")
+            if self.verbose:
+                print(f"  ⚠️  LUT data must be {expected_size} bytes, got {len(lut_data)}")
             return False
 
         cmd = struct.pack(
@@ -1979,7 +2052,8 @@ class CoolscanProtocol:
         _, status = self._issue_command(cmd, data_out=lut_data)
         if status != StatusType.READY:
             channel_names = {1: "R", 2: "G", 3: "B", 9: "IR"}
-            print(f"  ⚠️  LUT {channel_names.get(channel, channel)} upload failed")
+            if self.verbose:
+                print(f"  ⚠️  LUT {channel_names.get(channel, channel)} upload failed")
             return False
         return True
 
@@ -2295,9 +2369,11 @@ class CoolscanProtocol:
 
         _, status = self._issue_command(mode_select_cmd, data_out=mode_params)
         if status != StatusType.READY:
-            print(f"  ⚠️  MODE_SELECT failed")
+            if self.verbose:
+                print(f"  ⚠️  MODE_SELECT failed")
             return False
-        print("  ✅ MODE_SELECT OK")
+        if self.verbose:
+            print("  ✅ MODE_SELECT OK")
         return True
 
     def _build_scan_window_wdb(
@@ -2474,16 +2550,19 @@ class CoolscanProtocol:
             height=height,
         )
         if wdb is None:
-            print(f"  ⚠️  Unknown window ID {window_id} for scan_type={scan_type}, resolution={resolution}")
+            if self.verbose:
+                print(f"  ⚠️  Unknown window ID {window_id} for scan_type={scan_type}, resolution={resolution}")
             return False
 
         # SET_WINDOW command: 24 00 00 00 00 00 00 00 3a 80
         cmd = struct.pack("BBBBBBBBBB", 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3A, 0x80)
 
-        print(f"    Sending SET_WINDOW {window_id}...")
+        if self.verbose:
+            print(f"    Sending SET_WINDOW {window_id}...")
         _, status = self._issue_command(cmd, data_out=wdb)
         if status != StatusType.READY:
-            print(f"  ⚠️  SET_WINDOW {window_id} failed")
+            if self.verbose:
+                print(f"  ⚠️  SET_WINDOW {window_id} failed")
             return False
         return True
 
@@ -2538,14 +2617,16 @@ class CoolscanProtocol:
                 sense_asc = parsed.get("sense_asc", 0)
                 sense_ascq = parsed.get("sense_ascq", 0)
                 if self._last_status_raw:
-                    print(
-                        f"  START_SCAN status: {status}, sense: key=0x{sense_key:02x}, "
-                        f"ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
-                    )
-                    print(f"  Raw status: {self._last_status_raw.hex()}")
+                    if self.verbose:
+                        print(
+                            f"  START_SCAN status: {status}, sense: key=0x{sense_key:02x}, "
+                            f"ASC=0x{sense_asc:02x}, ASCQ=0x{sense_ascq:02x}"
+                        )
+                        print(f"  Raw status: {self._last_status_raw.hex()}")
 
             if status == StatusType.READY:
-                print("  ✅ Scan started")
+                if self.verbose:
+                    print("  ✅ Scan started")
                 return True
 
             # Retry on REISSUE or on the transient ERROR the fixture shows
@@ -2561,7 +2642,8 @@ class CoolscanProtocol:
             if status == StatusType.REISSUE or is_transient_error:
                 if attempt < max_attempts - 1:
                     label = "REISSUE" if status == StatusType.REISSUE else "TRANSIENT ERROR"
-                    print(f"  ⚠️  {label} — reading status/progress before retry")
+                    if self.verbose:
+                        print(f"  ⚠️  {label} — reading status/progress before retry")
                     # Golden fixture: READ datatype 0x87 (6 bytes) +
                     # 33 bytes after REISSUE, 24 bytes after transient ERROR.
                     try:
@@ -2570,12 +2652,15 @@ class CoolscanProtocol:
                         self.read_scan_data(progress_length, DataType.STATUS_PROGRESS)
                     except Exception:
                         pass  # Non-critical: scanner will continue anyway
-                    print(f"  ⚠️  Re-issuing START_SCAN (attempt {attempt + 2})")
+                    if self.verbose:
+                        print(f"  ⚠️  Re-issuing START_SCAN (attempt {attempt + 2})")
                     continue
-                print(f"  ❌ {status.name} after {max_attempts} attempts")
+                if self.verbose:
+                    print(f"  ❌ {status.name} after {max_attempts} attempts")
                 return False
 
-            print(f"  ⚠️  START_SCAN failed with status: {status}")
+            if self.verbose:
+                print(f"  ⚠️  START_SCAN failed with status: {status}")
             return False
 
         return False
@@ -2668,43 +2753,49 @@ class CoolscanProtocol:
 
                 if status == StatusType.READY:
                     elapsed = time.time() - start_time
-                    print(f"  ✅ Scanner ready after {elapsed:.1f}s ({attempt + 1} polls)")
+                    if self.verbose:
+                        print(f"  ✅ Scanner ready after {elapsed:.1f}s ({attempt + 1} polls)")
                     return True
                 elif status == StatusType.PROCESSING:
                     # Scanner is actively scanning - continue polling
                     if attempt % 20 == 0:  # Print every 2 seconds (20 * 0.1s)
                         elapsed = time.time() - start_time
-                        print(f"  Scanning... ({elapsed:.1f}s, attempt {attempt + 1})")
+                        if self.verbose:
+                            print(f"  Scanning... ({elapsed:.1f}s, attempt {attempt + 1})")
                     # Continue polling - don't return yet
                 elif status == StatusType.ERROR:
                     # Some errors might indicate still processing
                     if attempt % 20 == 0:
                         elapsed = time.time() - start_time
-                        print(
-                            f"  Polling... ({elapsed:.1f}s, attempt {attempt + 1}, status: {status.name})"
-                        )
+                        if self.verbose:
+                            print(
+                                f"  Polling... ({elapsed:.1f}s, attempt {attempt + 1}, status: {status.name})"
+                            )
                     # Continue polling - don't return yet
                 else:
                     # Unknown status - continue polling
                     if attempt % 20 == 0:
                         elapsed = time.time() - start_time
-                        print(
-                            f"  Polling... ({elapsed:.1f}s, attempt {attempt + 1}, status: {status.name})"
-                        )
+                        if self.verbose:
+                            print(
+                                f"  Polling... ({elapsed:.1f}s, attempt {attempt + 1}, status: {status.name})"
+                            )
 
                 time.sleep(poll_interval)
             except Exception as e:
                 self._replay_reraise_if_needed(e)
                 elapsed = time.time() - start_time
                 if attempt % 20 == 0:  # Print errors periodically too
-                    print(f"  Poll error ({elapsed:.1f}s, attempt {attempt + 1}): {e}")
+                    if self.verbose:
+                        print(f"  Poll error ({elapsed:.1f}s, attempt {attempt + 1}): {e}")
                 time.sleep(poll_interval)
                 continue
 
         # Timeout - scanner never became ready
         elapsed = time.time() - start_time
-        print(f"  ⚠️  Scanner not ready after {elapsed:.1f}s ({max_attempts} polls)")
-        print(f"  ⚠️  Last status was PROCESSING - scanner may still be scanning")
+        if self.verbose:
+            print(f"  ⚠️  Scanner not ready after {elapsed:.1f}s ({max_attempts} polls)")
+            print(f"  ⚠️  Last status was PROCESSING - scanner may still be scanning")
         return False
 
     @sends(0x28)
@@ -2730,7 +2821,8 @@ class CoolscanProtocol:
             if self.verbose:
                 print(f"    Read block 1: {len(data1)} bytes")
         except Exception as e:
-            print(f"    ⚠️  Failed to read block 1: {e}")
+            if self.verbose:
+                print(f"    ⚠️  Failed to read block 1: {e}")
             return bytes(all_data)
 
         # Block 2: 130752 bytes (0x01fec0)
@@ -2740,7 +2832,8 @@ class CoolscanProtocol:
             if self.verbose:
                 print(f"    Read block 2: {len(data2)} bytes")
         except Exception as e:
-            print(f"    ⚠️  Failed to read block 2: {e}")
+            if self.verbose:
+                print(f"    ⚠️  Failed to read block 2: {e}")
             return bytes(all_data)
 
         # Residual block: 11520 bytes (0x2d00)
@@ -2750,7 +2843,8 @@ class CoolscanProtocol:
             if self.verbose:
                 print(f"    Read residual block: {len(data3)} bytes")
         except Exception as e:
-            print(f"    ⚠️  Failed to read residual block: {e}")
+            if self.verbose:
+                print(f"    ⚠️  Failed to read residual block: {e}")
             return bytes(all_data)
 
         if self.verbose:
@@ -2774,13 +2868,15 @@ class CoolscanProtocol:
 
         # 1. Poll until ready
         if not self.poll_until_ready(timeout=60, poll_interval=0.1):
-            print("    ⚠️  Scanner not ready for batch capture frame")
+            if self.verbose:
+                print("    ⚠️  Scanner not ready for batch capture frame")
             return b""
 
         # 2. Read back WDBs for IR, R, G, B windows
         for win_id in [9, 1, 2, 3]:
             if self.get_window(win_id) is None:
-                print(f"    ⚠️  Failed to read WDB for window {win_id}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to read WDB for window {win_id}")
                 return b""
 
         # 3. Read image data chunks: 3×258048 + 1×223488
@@ -2794,33 +2890,38 @@ class CoolscanProtocol:
                     print(f"    Stage A block {idx}: got {len(chunk)} bytes")
             except Exception as e:
                 self._replay_reraise_if_needed(e)
-                print(f"    ⚠️  Failed to read Stage A block {idx}: {e}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to read Stage A block {idx}: {e}")
                 return bytes(all_data)
 
         if self.verbose:
             print(f"  ✅ Stage A data: {len(all_data)} bytes")
         return bytes(all_data)
 
-    def batch_full_res_capture_frame(self) -> bytes:
+    def batch_full_res_capture_frame(self, depth: int = 8) -> bytes:
         """Execute a full resolution capture frame in batch mode (Stage C).
 
         On real hardware: reads back WDBs for windows [1, 2, 3], then reads
-        145 image data chunks (144×259200 + 1×103680).  Total returned:
-        ~9,498,660 bytes.
+        image data chunks until the expected byte count for the given depth
+        is reached.  8-bit: ~37.4 MB (2880×4332×3).  12-bit: ~74.8 MB.
 
         In replay mode: dispatches on fixture OUT events, handling interleaved
         TUR polls, autofocus, SET_WINDOW, and LUT uploads between image reads.
+
+        Args:
+            depth: Bit depth (8 or 12).  Determines expected total bytes.
 
         Returns:
             Concatenated full-resolution image bytes.
         """
         if self.verbose:
-            print("  Executing batch full resolution capture frame (Stage C)...")
+            print(f"  Executing batch full resolution capture frame (Stage C, {depth}-bit)...")
 
         # 1. Read back WDBs for RGB windows
         for win_id in [1, 2, 3]:
             if self.get_window(win_id) is None:
-                print(f"    ⚠️  Failed to read WDB for window {win_id}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to read WDB for window {win_id}")
                 return b""
 
         replay = self._usb_capture_replay
@@ -2841,7 +2942,8 @@ class CoolscanProtocol:
                         all_data.extend(chunk)
                     except Exception as e:
                         self._replay_reraise_if_needed(e)
-                        print(f"    ⚠️  Failed to read full-res image chunk: {e}")
+                        if self.verbose:
+                            print(f"    ⚠️  Failed to read full-res image chunk: {e}")
                         return bytes(all_data)
                     continue
 
@@ -2851,7 +2953,8 @@ class CoolscanProtocol:
 
                 if payload[0] == 0xC1 and len(payload) == 6:
                     if not self._execute_command():
-                        print("    ⚠️  Execute command failed in full-res capture")
+                        if self.verbose:
+                            print("    ⚠️  Execute command failed in full-res capture")
                         return bytes(all_data)
                     continue
 
@@ -2859,15 +2962,18 @@ class CoolscanProtocol:
                     alloc_length = payload[4]
                     if alloc_length == 0x04:
                         if not self.stop_scan():
-                            print("    ⚠️  STOP_SCAN failed in full-res capture")
+                            if self.verbose:
+                                print("    ⚠️  STOP_SCAN failed in full-res capture")
                             return bytes(all_data)
                         continue
                     elif alloc_length == 0x03:
                         if not self.start_scan(scan_type=ScanType.NORMAL):
-                            print("    ⚠️  START_SCAN failed in full-res capture")
+                            if self.verbose:
+                                print("    ⚠️  START_SCAN failed in full-res capture")
                             return bytes(all_data)
                         continue
-                    print(f"    ⚠️  Unexpected START_SCAN/STOP_SCAN: {payload.hex()}")
+                    if self.verbose:
+                        print(f"    ⚠️  Unexpected START_SCAN/STOP_SCAN: {payload.hex()}")
                     return bytes(all_data)
 
                 if payload[:4] == bytes([0xE1, 0x00, 0xC1, 0x00]):
@@ -2876,13 +2982,15 @@ class CoolscanProtocol:
 
                 # Generic command: peek phase at offset +2
                 if replay.position + 2 >= replay.total:
-                    print(f"    ⚠️  Cannot peek phase: {payload.hex()}")
+                    if self.verbose:
+                        print(f"    ⚠️  Cannot peek phase: {payload.hex()}")
                     return bytes(all_data)
 
                 phase = replay.events[replay.position + 2][1][0]
                 if phase == 0x02:
                     if replay.position + 3 >= replay.total:
-                        print(f"    ⚠️  Missing data_out: {payload.hex()}")
+                        if self.verbose:
+                            print(f"    ⚠️  Missing data_out: {payload.hex()}")
                         return bytes(all_data)
                     data_out = replay.events[replay.position + 3][1]
                     _, status = self._issue_command(payload, data_out=data_out)
@@ -2898,26 +3006,38 @@ class CoolscanProtocol:
                     if status != StatusType.READY:
                         return bytes(all_data)
                 else:
-                    print(f"    ⚠️  Unexpected phase 0x{phase:02x}: {payload.hex()}")
+                    if self.verbose:
+                        print(f"    ⚠️  Unexpected phase 0x{phase:02x}: {payload.hex()}")
                     return bytes(all_data)
 
             if self.verbose:
                 print(f"  ✅ Stage C data (replay): {len(all_data)} bytes")
             return bytes(all_data)
 
-        # Real hardware mode: 144×259200 + 1×103680
-        chunk_sizes = [259200] * 144 + [103680]
+        # Real hardware mode: read exact chunk pattern matching pcapng capture.
+        # 8-bit:  144 × 259200 + 1 × 103680  (= 37,428,480 bytes)
+        # 12-bit: 288 × 259200 + 1 × 207360  (= 74,856,960 bytes)
+        # Using exact counts avoids probing past EOF and causing hangs.
+        if depth > 8:
+            chunk_sizes = [259200] * 288 + [207360]
+        else:
+            chunk_sizes = [259200] * 144 + [103680]
         all_data = bytearray()
         for idx, length in enumerate(chunk_sizes, start=1):
             try:
                 chunk = self.read_scan_data(length, DataType.IMAGE_DATA)
+                if not chunk:
+                    if self.verbose:
+                        print(f"    ⚠️  Empty chunk at block {idx}, stopping early")
+                    break
                 all_data.extend(chunk)
                 if self.verbose and idx % 20 == 0:
                     mb = len(all_data) / (1024 * 1024)
                     print(f"    Stage C block {idx}: {len(chunk)} bytes (total {mb:.1f} MB)")
             except Exception as e:
                 self._replay_reraise_if_needed(e)
-                print(f"    ⚠️  Failed to read Stage C block {idx}: {e}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to read Stage C block {idx}: {e}")
                 return bytes(all_data)
 
         if self.verbose:
@@ -2932,8 +3052,11 @@ class CoolscanProtocol:
         2. Read image data chunks: 2×259200 + 1×229824.
         3. Poll until READY.
 
+        Stage B is always 8-bit (the SET_WINDOW in batch_between_scan_setup_frame
+        does not pass depth).  Hardcoded chunk sizes match the pcapng capture.
+
         Returns:
-            Concatenated preview image bytes (~196,524 bytes total).
+            Concatenated preview image bytes (~848,400 bytes total).
         """
         if self.verbose:
             print("  Executing batch preview capture frame (Stage B)...")
@@ -3003,6 +3126,9 @@ class CoolscanProtocol:
              ``batch_preview_capture_frame()``.
            - Run Stage C: set windows at 2900 DPI per-frame offset,
              upload LUTs, start scan, capture full-res data.
+           - Wait for the scanner to return READY naturally (no STOP_SCAN
+             between frames; the exact byte-count capture leaves no residual
+             data).
            - If not the last frame: autofocus at next frame center.
            - Yield ``(frame_index, full_res_bytes, previews_dict)``.
 
@@ -3023,12 +3149,15 @@ class CoolscanProtocol:
             (frame_index, full_res_bytes, previews) where previews is
             ``{"stage_a": bytes, "stage_b": bytes}``.
         """
-        print(f"Starting batch scan ({frame_count} frames)...")
+        if self.verbose:
+            print(f"Starting batch scan ({frame_count} frames)...")
 
         # 1. Prescan
-        print("  Running prescan...")
+        if self.verbose:
+            print("  Running prescan...")
         if not self.prescan():
-            print("  ❌ Prescan failed")
+            if self.verbose:
+                print("  ❌ Prescan failed")
             return
 
         # 2. Estimate frame_count from prescan image if available
@@ -3041,8 +3170,9 @@ class CoolscanProtocol:
                     prescan_height = struct.unpack(">I", prescan_wdb[26:30])[0]
                     estimated = max(1, prescan_height // step)
                     if estimated < frame_count:
-                        print(f"  Clamping frame_count from {frame_count} to {estimated} "
-                              f"(prescan height {prescan_height} / step {step})")
+                        if self.verbose:
+                            print(f"  Clamping frame_count from {frame_count} to {estimated} "
+                                  f"(prescan height {prescan_height} / step {step})")
                         frame_count = estimated
             except Exception:
                 pass  # Use requested frame_count if estimation fails
@@ -3055,7 +3185,8 @@ class CoolscanProtocol:
             frame_height=frame_height,
             step=step,
         ):
-            print("  ❌ Failed to set batch boundary")
+            if self.verbose:
+                print("  ❌ Failed to set batch boundary")
             return
 
         # Derive per-frame y-positions from CONTROL_FRAME entries.
@@ -3070,7 +3201,8 @@ class CoolscanProtocol:
         #    Autofocus is performed inside the setup frame, matching the
         #    capture sequence (golden_batch.txt lines 287-295).
         first_frame_center_y = frame_positions[0] + frame_height // 2
-        print("  Running batch full-scan setup frame...")
+        if self.verbose:
+            print("  Running batch full-scan setup frame...")
         if not self.batch_full_scan_setup_frame(
             params=None,
             focus_x=focus_x,
@@ -3079,12 +3211,14 @@ class CoolscanProtocol:
             height=frame_height,
             skip_boundary=True,
         ):
-            print("  ❌ Batch setup failed")
+            if self.verbose:
+                print("  ❌ Batch setup failed")
             return
 
         # 6. Start scan with IR+RGB (BATCH type)
         if not self.start_scan(scan_type=ScanType.BATCH):
-            print("  ❌ Failed to start batch scan")
+            if self.verbose:
+                print("  ❌ Failed to start batch scan")
             return
 
         # 7. Capture Stage A for frame 0 (initial strip scan)
@@ -3095,7 +3229,8 @@ class CoolscanProtocol:
         # 8. Iterate over frames
         for i in range(frame_count):
             frame_y = frame_positions[i]
-            print(f"  Frame {i + 1}/{frame_count} (y={frame_y})...")
+            if self.verbose:
+                print(f"  Frame {i + 1}/{frame_count} (y={frame_y})...")
 
             # For frames 1+, reconfigure and re-capture Stage A.
             # skip_autofocus=True because post_prescan_autofocus already
@@ -3111,11 +3246,13 @@ class CoolscanProtocol:
                     skip_boundary=True,
                     skip_autofocus=True,
                 ):
-                    print(f"    ❌ Stage A setup failed for frame {i}")
+                    if self.verbose:
+                        print(f"    ❌ Stage A setup failed for frame {i}")
                     return
 
                 if not self.start_scan(scan_type=ScanType.BATCH):
-                    print(f"    ❌ Failed to start Stage A for frame {i}")
+                    if self.verbose:
+                        print(f"    ❌ Failed to start Stage A for frame {i}")
                     return
 
                 stage_a_data = self.batch_full_scan_capture_frame()
@@ -3128,19 +3265,27 @@ class CoolscanProtocol:
             if not self.batch_between_scan_setup_frame(
                 y_offset=frame_y, height=frame_height,
             ):
-                print(f"    ❌ Stage B setup failed for frame {i}")
+                if self.verbose:
+                    print(f"    ❌ Stage B setup failed for frame {i}")
                 return
             stage_b_data = self.batch_preview_capture_frame()
 
             # Stage C: 2900 DPI full-res scan
+            # Use table-default exposure (do not auto-apply prescan-calibrated
+            # values).  The golden_batch fixture shows the driver sending the
+            # default WDB exposure for every full-res window; applying the
+            # calibrated prescan exposure in batch mode produces under-exposed
+            # (nearly black) full-res frames.
             for win_id in [1, 2, 3]:
                 if not self.set_scan_window(
                     window_id=win_id, scan_type="normal",
                     depth=depth,
                     y_offset=frame_y,
                     height=frame_height,
+                    use_calibrated_exposure=False,
                 ):
-                    print(f"    ❌ Failed to set full-res window {win_id} for frame {i}")
+                    if self.verbose:
+                        print(f"    ❌ Failed to set full-res window {win_id} for frame {i}")
                     return
 
             self._wait_ready_or_replay_once()
@@ -3148,14 +3293,28 @@ class CoolscanProtocol:
                 return
 
             if not self.start_scan(scan_type=ScanType.NORMAL):
-                print(f"    ❌ Failed to start full-res scan for frame {i}")
+                if self.verbose:
+                    print(f"    ❌ Failed to start full-res scan for frame {i}")
                 return
 
             if not self.poll_until_ready(timeout=120):
-                print(f"    ❌ Full-res scan not ready for frame {i}")
+                if self.verbose:
+                    print(f"    ❌ Full-res scan not ready for frame {i}")
                 return
 
-            full_res_data = self.batch_full_res_capture_frame()
+            full_res_data = self.batch_full_res_capture_frame(depth=depth)
+
+            # Wait for the scanner to finish the full-res scan naturally before
+            # transitioning to the next frame.  The golden batch pcapng does NOT
+            # issue STOP_SCAN between frames; the scanner returns to READY after
+            # the exact expected byte count is consumed.  Drain is NOT called
+            # between frames: the full-res capture reads the exact expected byte
+            # count, so there is no residual data.  Calling _drain_buffered_scan_data()
+            # here causes an extra READ that times out and leaves the scanner unresponsive.
+            if not self.poll_until_ready(timeout=30, poll_interval=0.5):
+                if self.verbose:
+                    print(f"    ❌ Scanner not ready after frame {i}")
+                return
 
             # Build previews dict
             previews: Dict[str, bytes] = {}
@@ -3169,13 +3328,18 @@ class CoolscanProtocol:
             if i < frame_count - 1:
                 next_y = frame_positions[i + 1]
                 next_center_y = next_y + frame_height // 2
-                print(f"    Autofocus for next frame at y={next_center_y}...")
+                if self.verbose:
+                    print(f"    Autofocus for next frame at y={next_center_y}...")
                 self.post_prescan_autofocus(focus_x=focus_x, focus_y=next_center_y)
 
-        # 9. Teardown
-        print("  Running scan teardown...")
+        # 9. Teardown.  The scanner naturally returns to READY after the final
+        # full-res capture; no STOP_SCAN is needed.  Drain is handled inside
+        # scan_teardown() with a short timeout so a clean scan does not stall.
+        if self.verbose:
+            print("  Running scan teardown...")
         self.scan_teardown()
-        print("✅ Batch scan complete")
+        if self.verbose:
+            print("✅ Batch scan complete")
 
     @sends(0x28)
     def read_ir_preview_data(self) -> bytes:
@@ -3200,7 +3364,8 @@ class CoolscanProtocol:
 
         # 1. Wait for scanner to be ready after STOP_SCAN (lines 543-554).
         if not self.poll_until_ready(timeout=60, poll_interval=0.1):
-            print("    ⚠️  Scanner not ready before IR preview read")
+            if self.verbose:
+                print("    ⚠️  Scanner not ready before IR preview read")
             return b""
 
         # 2. Read back WDBs for IR + RGB windows (lines 555-574).
@@ -3218,7 +3383,8 @@ class CoolscanProtocol:
                     print(f"    IR preview block {idx}: requested {length}, got {len(chunk)} bytes")
             except Exception as e:
                 self._replay_reraise_if_needed(e)
-                print(f"    ⚠️  Failed to read IR preview block {idx}: {e}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to read IR preview block {idx}: {e}")
                 return bytes(all_data)
 
         # 4. TUR before capture frame reconfiguration (lines 595-598).
@@ -3252,7 +3418,8 @@ class CoolscanProtocol:
                 print(f"    Read exposure header: {len(header)} bytes")
 
             if len(header) < 6:
-                print("    ⚠️  Exposure header too short")
+                if self.verbose:
+                    print("    ⚠️  Exposure header too short")
                 return None
 
             # Table length is in bytes 4-5 of the header, big-endian.
@@ -3270,7 +3437,8 @@ class CoolscanProtocol:
             return {"header": header, "table": table}
         except Exception as e:
             self._replay_reraise_if_needed(e)
-            print(f"    ⚠️  Failed to read exposure data: {e}")
+            if self.verbose:
+                print(f"    ⚠️  Failed to read exposure data: {e}")
             return None
 
     @sends(0x25)
@@ -3313,11 +3481,13 @@ class CoolscanProtocol:
                     print(f"    Read WDB for window {window_id}: {len(data)} bytes")
                 return data
             else:
-                print(f"    ⚠️  Failed to read WDB: status={status}, len={len(data) if data else 0}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to read WDB: status={status}, len={len(data) if data else 0}")
                 return None
         except Exception as e:
             self._replay_reraise_if_needed(e)
-            print(f"    ⚠️  Error reading WDB: {e}")
+            if self.verbose:
+                print(f"    ⚠️  Error reading WDB: {e}")
             return None
 
     def extract_exposure_from_wdb(self, wdb: bytes) -> Optional[int]:
@@ -3366,7 +3536,8 @@ class CoolscanProtocol:
         for window_id in colors:
             wdb = self.get_window(window_id)
             if wdb is None:
-                print(f"    ⚠️  Failed to read WDB for window {window_id}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to read WDB for window {window_id}")
                 continue
 
             exposure = self.extract_exposure_from_wdb(wdb)
@@ -3378,10 +3549,12 @@ class CoolscanProtocol:
                     exposure_ms = exposure / 100000.0  # 10ns units -> ms
                     print(f"    {color_name}: {exposure} (10ns) = {exposure_ms:.2f} ms")
             else:
-                print(f"    ⚠️  Failed to extract exposure from WDB for window {window_id}")
+                if self.verbose:
+                    print(f"    ⚠️  Failed to extract exposure from WDB for window {window_id}")
 
         if len(exposure_values) == 0:
-            print("    ⚠️  No exposure values extracted")
+            if self.verbose:
+                print("    ⚠️  No exposure values extracted")
             return None
 
         return exposure_values
@@ -3423,14 +3596,16 @@ class CoolscanProtocol:
                     print(f"    CONTROL_FRAME read OK: {data.hex()}")
                 return data
             else:
-                print(
-                    f"    ⚠️  CONTROL_FRAME read failed: status={status}, "
-                    f"len={len(data) if data else 0}"
-                )
+                if self.verbose:
+                    print(
+                        f"    ⚠️  CONTROL_FRAME read failed: status={status}, "
+                        f"len={len(data) if data else 0}"
+                    )
                 return None
         except Exception as e:
             self._replay_reraise_if_needed(e)
-            print(f"    ⚠️  Error reading CONTROL_FRAME: {e}")
+            if self.verbose:
+                print(f"    ⚠️  Error reading CONTROL_FRAME: {e}")
             return None
 
     @sends(0x1a)
@@ -3533,11 +3708,13 @@ class CoolscanProtocol:
                     )
                 return {"raw": data, "exposure": exposure}
             else:
-                print(f"    ⚠️  Channel state read failed: status={status}, len={len(data) if data else 0}")
+                if self.verbose:
+                    print(f"    ⚠️  Channel state read failed: status={status}, len={len(data) if data else 0}")
                 return None
         except Exception as e:
             self._replay_reraise_if_needed(e)
-            print(f"    ⚠️  Error reading channel state: {e}")
+            if self.verbose:
+                print(f"    ⚠️  Error reading channel state: {e}")
             return None
 
     def set_calibrated_exposure(self, channel: int, exposure: int) -> None:
@@ -3599,7 +3776,8 @@ class CoolscanProtocol:
                     pass  # Non-critical: scanner will continue anyway
                 continue
 
-            print(f"  ⚠️  STOP_SCAN returned status: {status}")
+            if self.verbose:
+                print(f"  ⚠️  STOP_SCAN returned status: {status}")
             return False
 
         return False
@@ -3629,7 +3807,7 @@ class CoolscanProtocol:
         return ok
 
     @sends(0xe1)
-    def read_focus(self) -> Optional[int]:
+    def read_focus(self, retries: int = 3) -> Optional[int]:
         """Read current focus position from scanner.
 
         Golden fixture lines 172-176 and 457-461: e1 00 c1 00 00 00 00 00 09 00
@@ -3640,6 +3818,12 @@ class CoolscanProtocol:
         (9-byte response: 00000000f300000000) has zeros at bytes 0-3.
         The actual focus position is at byte 4 (0xf3=243 in fixture).
 
+        Args:
+            retries: Number of times to retry after a non-READY status.
+                Focus reads can fail with ILLEGAL_REQ / COMMAND SEQUENCE ERROR
+                when the scanner is still transitioning out of scan state; a
+                short ready-poll usually resolves it.
+
         Returns:
             Focus position value, or None on failure.
         """
@@ -3647,15 +3831,22 @@ class CoolscanProtocol:
             print("  Reading focus position...")
         # Allocation length matches the golden fixture (9 bytes).
         cmd = bytes([0xE1, 0x00, 0xC1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00])
-        data, status = self._issue_command(cmd, data_in_length=9)
-        if status != StatusType.READY or len(data) < 5:
+        for attempt in range(retries + 1):
+            data, status = self._issue_command(cmd, data_in_length=9)
+            if status == StatusType.READY and len(data) >= 5:
+                focus = data[4]
+                if self.verbose:
+                    print(f"    Focus position: {focus} (0x{focus:04X})")
+                return focus
             if self.verbose:
-                print(f"    Focus read failed (status={status}, len={len(data)})")
-            return None
-        focus = data[4]
-        if self.verbose:
-            print(f"    Focus position: {focus} (0x{focus:04X})")
-        return focus
+                print(f"    Focus read failed (status={status}, len={len(data)}, attempt {attempt + 1})")
+            if attempt < retries:
+                # Scanner may need a moment to leave scan/execute state.
+                if not self._wait_ready_or_replay_once(timeout=5):
+                    if self.verbose:
+                        print("    Scanner not ready for focus read retry")
+                    return None
+        return None
 
     @sends(0xe1)
     def read_focus_info(self) -> Optional[bytes]:
@@ -3824,6 +4015,12 @@ class CoolscanProtocol:
         if self.verbose:
             print("Performing auto-focus...")
 
+        # Step 0: Ensure scanner is ready before focus operations.
+        if not self.poll_until_ready(timeout=30, poll_interval=0.5):
+            if self.verbose:
+                print("    Scanner not ready for auto-focus")
+            return None
+
         # Step 1: Read current focus
         old_focus = self.read_focus()
         if old_focus is not None and self.verbose:
@@ -3856,6 +4053,14 @@ class CoolscanProtocol:
         """
         if self.verbose:
             print("Performing post-prescan autofocus...")
+
+        # Step 0: Ensure scanner is ready. This method is often called right
+        # after a scan completes, and focus reads fail with ILLEGAL_REQ if the
+        # scanner is still transitioning out of scan state.
+        if not self.poll_until_ready(timeout=30, poll_interval=0.5):
+            if self.verbose:
+                print("    Scanner not ready for post-prescan autofocus")
+            return None
 
         # Step 1: Read current focus
         old_focus = self.read_focus()
@@ -4106,25 +4311,38 @@ class CoolscanProtocol:
 
         On real hardware the scanner may buffer more image data than we
         consumed; unread data causes eject_medium() to fail with
-        ILLEGAL REQUEST / COMMAND SEQUENCE ERROR.  Read 64 KB chunks
-        until a short read or stall occurs.
+        ILLEGAL REQUEST / COMMAND SEQUENCE ERROR.  Read 259 KB chunks
+        (matching scan chunk size) until a short read or stall occurs.
+
+        Uses a short timeout (1 second) per read so a stalled scanner
+        does not block teardown for 30 seconds.
 
         Returns:
             Number of bytes drained (may include a short final chunk).
         """
         drained = 0
-        for _ in range(20):
-            try:
-                chunk = self.read_scan_data(65536, DataType.IMAGE_DATA)
-                if not chunk:
+        chunk_size = 259200
+        usb = self.usb_device
+        if usb is None:
+            return 0
+        original_timeout = usb.default_timeout
+        try:
+            for _ in range(600):
+                # Use short timeout so drain never blocks teardown
+                usb.default_timeout = 1000
+                try:
+                    chunk = self.read_scan_data(chunk_size, DataType.IMAGE_DATA)
+                    if not chunk:
+                        break
+                    drained += len(chunk)
+                    if len(chunk) < chunk_size:
+                        # Short read — scanner has no more data
+                        break
+                except Exception:
+                    # Stall or timeout — scanner has no more data
                     break
-                drained += len(chunk)
-                if len(chunk) < 65536:
-                    # Short read — scanner has no more data
-                    break
-            except Exception:
-                # Stall or timeout — scanner has no more data
-                break
+        finally:
+            usb.default_timeout = original_timeout
         if drained and self.verbose:
             print(f"  Drained {drained} trailing overscan bytes before eject")
         return drained
@@ -4187,12 +4405,43 @@ class CoolscanProtocol:
             pass
 
         try:
+            # 1.5. Drain any buffered scan data before eject.
+            # Unconsumed data causes eject_medium() to fail with
+            # ILLEGAL REQUEST / COMMAND SEQUENCE ERROR (ASC=0x2C).
+            self._drain_buffered_scan_data()
+        except Exception:
+            if self.verbose:
+                print("  Drain step raised exception")
+
+        try:
             # 2. Eject medium (called once per teardown; batch mode calls
             # scan_teardown() between frames, so we never retry eject to avoid
             # ILLEGAL_REQ from duplicate eject commands).
             eject_ok = self.eject_medium()
             if not eject_ok and self.verbose:
                 print("  Eject command returned non-ready status")
+
+            # 2a. If eject failed with COMMAND SEQUENCE ERROR, the scanner
+            # still has unconsumed scan data in its buffers. Stop the scan,
+            # drain the data, and retry eject once.
+            parsed = self._last_status_parsed or {}
+            if (
+                not eject_ok
+                and parsed.get("sense_key") == 0x05
+                and parsed.get("sense_asc") == 0x2C
+                and parsed.get("sense_ascq") == 0x00
+            ):
+                if self.verbose:
+                    print("  Eject got COMMAND SEQUENCE ERROR; stopping scan and draining...")
+                try:
+                    self.stop_scan()
+                except Exception:
+                    pass
+                try:
+                    self._drain_buffered_scan_data()
+                except Exception:
+                    pass
+                eject_ok = self.eject_medium()
         except Exception:
             if self.verbose:
                 print("  Eject step raised exception")
@@ -4266,17 +4515,20 @@ class CoolscanProtocol:
         Returns:
             True if the scanner is ready after polling, False otherwise.
         """
-        print("Starting prescan frame...")
+        if self.verbose:
+            print("Starting prescan frame...")
         deadline = time.time() + timeout
 
         # 1. Border position for prescan (golden fixture line 203).
         if not self.set_boundary_for_prescan():
-            print("  ❌ Failed to set prescan boundary")
+            if self.verbose:
+                print("  ❌ Failed to set prescan boundary")
             return False
 
         # 2. Exposure/calibration table (golden fixture lines 208-216).
         if self.read_exposure_data() is None:
-            print("  ⚠️  Failed to read exposure data")
+            if self.verbose:
+                print("  ⚠️  Failed to read exposure data")
 
         # 3. CONTROL_FRAME state read (golden fixture lines 219-223).
         self.read_control_frame()
@@ -4296,7 +4548,8 @@ class CoolscanProtocol:
         # 7. Prescan windows at low resolution (96 DPI) for R, G, B only.
         for win_id in [1, 2, 3]:
             if not self.set_scan_window(win_id, scan_type="prescan"):
-                print(f"  ❌ Failed to set prescan window {win_id}")
+                if self.verbose:
+                    print(f"  ❌ Failed to set prescan window {win_id}")
                 return False
 
         # 8. TUR before LUT uploads (lines 278-281).
@@ -4308,20 +4561,25 @@ class CoolscanProtocol:
 
         # 10. Start scan (lines 297-331, with retries handled internally).
         if not self.start_scan():
-            print("  ❌ Failed to start prescan")
+            if self.verbose:
+                print("  ❌ Failed to start prescan")
             return False
 
         # 11. Poll until scanner is ready (lines 332-343).
         remaining = max(1, int(deadline - time.time()))
         if remaining <= 0:
-            print("  ❌ Prescan frame timeout: setup exceeded budget")
+            if self.verbose:
+                print("  ❌ Prescan frame timeout: setup exceeded budget")
             return False
-        print("  Waiting for prescan frame to complete...")
+        if self.verbose:
+            print("  Waiting for prescan frame to complete...")
         if not self.poll_until_ready(timeout=remaining, poll_interval=0.1):
-            print("  ⚠️  Scanner not ready after prescan frame")
+            if self.verbose:
+                print("  ⚠️  Scanner not ready after prescan frame")
             return False
 
-        print("  ✅ Prescan frame ready")
+        if self.verbose:
+            print("  ✅ Prescan frame ready")
         return True
 
     def prescan(self, timeout: int = 120) -> bool:
@@ -4331,20 +4589,24 @@ class CoolscanProtocol:
         reads image data and post-scan calibration/state. It is kept for
         backward compatibility with the high-level scanner API.
         """
-        print("Starting prescan...")
+        if self.verbose:
+            print("Starting prescan...")
         deadline = time.time() + timeout
 
         # Ensure scanner is responsive before starting.
         if not self.test_unit_ready():
-            print("  ⚠️  Scanner not ready, attempting reset...")
+            if self.verbose:
+                print("  ⚠️  Scanner not ready, attempting reset...")
             self.reset_scanner()
             time.sleep(0.5)
             if not self.wait_scanner(timeout=5.0, delay=0.5):
-                print("  ❌ Scanner not responsive after reset")
+                if self.verbose:
+                    print("  ❌ Scanner not responsive after reset")
                 return False
 
         if time.time() >= deadline:
-            print("  ❌ Prescan timeout: scanner recovery exceeded budget")
+            if self.verbose:
+                print("  ❌ Prescan timeout: scanner recovery exceeded budget")
             return False
 
         # Run the capture-informed prescan frame.
@@ -4382,18 +4644,21 @@ class CoolscanProtocol:
                 finally:
                     self.usb_device.default_timeout = original_timeout
                 if drained > 0:
-                    print(f"  Drained {drained} bytes from USB buffer before data read")
+                    if self.verbose:
+                        print(f"  Drained {drained} bytes from USB buffer before data read")
             except Exception as e:
                 if self.verbose:
                     print(f"  (Buffer clear: {e})")
 
         # Read prescan image data.
         if not self._check_scanner_alive():
-            print("  ❌ Scanner dead, aborting prescan data read")
+            if self.verbose:
+                print("  ❌ Scanner dead, aborting prescan data read")
             return False
         image_data = self.read_prescan_image_data()
         if len(image_data) == 0:
-            print("  ❌ No image data read — prescan failed")
+            if self.verbose:
+                print("  ❌ No image data read — prescan failed")
             return False
 
         # Post-prescan transition sequence.
@@ -4404,9 +4669,11 @@ class CoolscanProtocol:
         # CONTROL_FRAME command.  Skipping this transition causes the scanner
         # to reject set_boundary with ILLEGAL REQUEST / COMMAND SEQUENCE ERROR
         # (sense 0x052c).
-        print("  Post-prescan transition...")
+        if self.verbose:
+            print("  Post-prescan transition...")
         if not self.poll_until_ready(timeout=10, poll_interval=0.1):
-            print("  ⚠️  Scanner not ready after prescan image read, continuing...")
+            if self.verbose:
+                print("  ⚠️  Scanner not ready after prescan image read, continuing...")
 
         try:
             self.inquiry(page=0xC1)
@@ -4442,7 +4709,8 @@ class CoolscanProtocol:
             except Exception:
                 pass  # Expected if scanner already moved to scan state
 
-        print("✅ Prescan completed")
+        if self.verbose:
+            print("✅ Prescan completed")
         return True
 
     def full_scan_setup_frame(
@@ -4479,12 +4747,14 @@ class CoolscanProtocol:
         Returns:
             True if the setup frame completes successfully.
         """
-        print("Starting full-scan setup frame...")
+        if self.verbose:
+            print("Starting full-scan setup frame...")
         deadline = time.time() + timeout
 
         # 1. CONTROL_FRAME / frame boundary (golden fixture line 427).
         if not self.set_boundary(params):
-            print("  ❌ Failed to set full-scan boundary")
+            if self.verbose:
+                print("  ❌ Failed to set full-scan boundary")
             return False
 
         # 2. One TUR poll before autofocus (golden fixture lines 432-435).
@@ -4492,7 +4762,8 @@ class CoolscanProtocol:
 
         # 3. Autofocus command + execute (golden fixture lines 436-444).
         if not self._auto_focus_command(focus_x, focus_y):
-            print("  ❌ Autofocus command failed")
+            if self.verbose:
+                print("  ❌ Autofocus command failed")
             return False
 
         # 4. Three TUR polls before read_focus (golden fixture lines 445-456).
@@ -4500,7 +4771,10 @@ class CoolscanProtocol:
             self._wait_ready_or_replay_once()
 
         # 5. Read resulting focus position (golden fixture lines 457-461).
-        self.read_focus()
+        if self.read_focus() is None:
+            if self.verbose:
+                print("  ❌ Failed to read focus position")
+            return False
 
         # 6. One TUR poll before IR channel state read (golden fixture lines 462-465).
         self._wait_ready_or_replay_once()
@@ -4515,7 +4789,8 @@ class CoolscanProtocol:
         # 9. Low-res windows for IR + RGB at 290 DPI (golden fixture lines 479-498).
         for win_id in [9, 1, 2, 3]:
             if not self.set_scan_window(win_id, scan_type="setup"):
-                print(f"  ❌ Failed to set setup window {win_id}")
+                if self.verbose:
+                    print(f"  ❌ Failed to set setup window {win_id}")
                 return False
 
         # 10. TUR before LUT uploads (golden fixture lines 499-502).
@@ -4527,10 +4802,12 @@ class CoolscanProtocol:
 
         # 10. STOP_SCAN to finalize setup (golden fixture lines 523-542).
         if not self.stop_scan():
-            print("  ❌ STOP_SCAN failed during full-scan setup")
+            if self.verbose:
+                print("  ❌ STOP_SCAN failed during full-scan setup")
             return False
 
-        print("  ✅ Full-scan setup frame complete")
+        if self.verbose:
+            print("  ✅ Full-scan setup frame complete")
         return True
 
     def full_scan_capture_frame(
@@ -4564,7 +4841,8 @@ class CoolscanProtocol:
         Returns:
             True if the scanner is ready after polling.
         """
-        print("Starting full-scan capture frame...")
+        if self.verbose:
+            print("Starting full-scan capture frame...")
         deadline = time.time() + timeout
 
         # 1. Two TUR polls before reconfiguration (golden fixture lines 599-606).
@@ -4574,7 +4852,8 @@ class CoolscanProtocol:
         # 2. High-res RGB windows at 2900 DPI (golden fixture lines 607-621).
         for win_id in [1, 2, 3]:
             if not self.set_scan_window(win_id, scan_type="single_bw"):
-                print(f"  ❌ Failed to set capture window {win_id}")
+                if self.verbose:
+                    print(f"  ❌ Failed to set capture window {win_id}")
                 return False
 
         # 3. TUR before LUT uploads (golden fixture lines 622-625).
@@ -4588,20 +4867,25 @@ class CoolscanProtocol:
 
         # 5. Start scan (golden fixture lines 641-660, retries handled internally).
         if not self.start_scan():
-            print("  ❌ Failed to start full scan")
+            if self.verbose:
+                print("  ❌ Failed to start full scan")
             return False
 
         # 6. Poll until scanner is ready (golden fixture lines 661-672).
         remaining = max(1, int(deadline - time.time()))
         if remaining <= 0:
-            print("  ❌ Full-scan capture frame timeout: setup exceeded budget")
+            if self.verbose:
+                print("  ❌ Full-scan capture frame timeout: setup exceeded budget")
             return False
-        print("  Waiting for full-scan capture frame to complete...")
+        if self.verbose:
+            print("  Waiting for full-scan capture frame to complete...")
         if not self.poll_until_ready(timeout=remaining, poll_interval=0.1):
-            print("  ⚠️  Scanner not ready after full-scan capture frame")
+            if self.verbose:
+                print("  ⚠️  Scanner not ready after full-scan capture frame")
             return False
 
-        print("  ✅ Full-scan capture frame ready")
+        if self.verbose:
+            print("  ✅ Full-scan capture frame ready")
         return True
 
     def batch_full_scan_setup_frame(
@@ -4657,13 +4941,15 @@ class CoolscanProtocol:
         Returns:
             True if the batch setup frame completes successfully.
         """
-        print("Starting batch full-scan setup frame...")
+        if self.verbose:
+            print("Starting batch full-scan setup frame...")
         deadline = time.time() + timeout
 
         # 1. CONTROL_FRAME for batch (golden_batch.txt line 278).
         if not skip_boundary:
             if not self.set_boundary(params, batch=True):
-                print("  ❌ Failed to set batch full-scan boundary")
+                if self.verbose:
+                    print("  ❌ Failed to set batch full-scan boundary")
                 return False
 
         if skip_autofocus:
@@ -4679,7 +4965,8 @@ class CoolscanProtocol:
 
             # 3. Autofocus command + execute (golden_batch.txt lines 287-295).
             if not self._auto_focus_command(focus_x, focus_y):
-                print("  ❌ Batch autofocus command failed")
+                if self.verbose:
+                    print("  ❌ Batch autofocus command failed")
                 return False
 
             # 4. Three TUR polls before read_focus (golden_batch.txt lines 296-307).
@@ -4687,7 +4974,10 @@ class CoolscanProtocol:
                 self._wait_ready_or_replay_once()
 
             # 5. Read resulting focus position (golden_batch.txt lines 308-312).
-            self.read_focus()
+            if self.read_focus() is None:
+                if self.verbose:
+                    print("  Failed to read focus position")
+                return False
 
             # 6. One TUR poll before IR channel state read (lines 313-316).
             self._wait_ready_or_replay_once()
@@ -4700,12 +4990,16 @@ class CoolscanProtocol:
             self._wait_ready_or_replay_once()
 
         # 9. Batch windows for IR + RGB at 290 DPI (golden_batch.txt lines 330-349).
+        # Use table-default exposure; the capture shows the driver sending the
+        # default WDB exposure values for batch preview windows.
         for win_id in [9, 1, 2, 3]:
             if not self.set_scan_window(
                 window_id=win_id, scan_type="batch",
                 y_offset=y_offset, height=height,
+                use_calibrated_exposure=False,
             ):
-                print(f"  ❌ Failed to set batch window {win_id}")
+                if self.verbose:
+                    print(f"  ❌ Failed to set batch window {win_id}")
                 return False
 
         # 10. TUR before LUT uploads (golden_batch.txt lines 350-353).
@@ -4715,7 +5009,8 @@ class CoolscanProtocol:
         if not self.upload_identity_luts(include_ir=True):
             return False
 
-        print("  ✅ Batch full-scan setup frame complete")
+        if self.verbose:
+            print("  ✅ Batch full-scan setup frame complete")
         return True
 
     @sends(0x24, 0x28)
@@ -4745,7 +5040,8 @@ class CoolscanProtocol:
         Returns:
             True if the full scan frame completes successfully.
         """
-        print("Starting full scan frame...")
+        if self.verbose:
+            print("Starting full scan frame...")
         deadline = time.time() + timeout
 
         setup_timeout = max(1, int(deadline - time.time()) // 3)
@@ -4763,7 +5059,8 @@ class CoolscanProtocol:
         ):
             return False
 
-        print("✅ Full scan frame complete")
+        if self.verbose:
+            print("✅ Full scan frame complete")
         return True
 
     @sends(0x25)
@@ -4775,7 +5072,8 @@ class CoolscanProtocol:
           Window 0: 25 00 00 00 00 00 00 00 3a 80
           Other:   25 01 00 00 00 {win} 00 00 3a 80
         """
-        print("Reading capacity...")
+        if self.verbose:
+            print("Reading capacity...")
         try:
             # Byte 1: 0x00 for window 0, 0x01 for other windows
             flag_byte = 0x00 if window_id == 0 else 0x01
@@ -4794,15 +5092,17 @@ class CoolscanProtocol:
                     "raw_data": data.hex(),
                 }
             else:
-                print(
-                    f"  ⚠️  READ_CAPACITY failed: status={status}, data_len={len(data) if data else 0}"
-                )
+                if self.verbose:
+                    print(
+                        f"  ⚠️  READ_CAPACITY failed: status={status}, data_len={len(data) if data else 0}"
+                    )
                 return None
         except Exception as e:
-            print(f"  ❌ READ_CAPACITY error: {e}")
-            import traceback
+            if self.verbose:
+                print(f"  ❌ READ_CAPACITY error: {e}")
+                import traceback
 
-            traceback.print_exc()
+                traceback.print_exc()
             return None
 
     @sends(0x12, 0x00, 0x16, 0x25, 0x15)
@@ -4817,11 +5117,13 @@ class CoolscanProtocol:
         4. RESERVE_UNIT
         5. READ_CAPACITY
         """
-        print("Initializing scanner with USB capture sequence...")
+        if self.verbose:
+            print("Initializing scanner with USB capture sequence...")
 
         try:
             # 1. Standard INQUIRY (36 bytes)
-            print("\n1. Standard INQUIRY...")
+            if self.verbose:
+                print("\n1. Standard INQUIRY...")
             try:
                 inquiry_data = self.inquiry(page=-1)
                 if inquiry_data and len(inquiry_data) >= 36:
@@ -4829,20 +5131,25 @@ class CoolscanProtocol:
                     vendor = inquiry_data[8:16].decode("ascii", errors="ignore").strip()
                     product = inquiry_data[16:32].decode("ascii", errors="ignore").strip()
                     revision = inquiry_data[32:36].decode("ascii", errors="ignore").strip()
-                    print(f"  ✅ Device: {vendor} {product} {revision}")
+                    if self.verbose:
+                        print(f"  ✅ Device: {vendor} {product} {revision}")
                 else:
-                    print(f"  ❌ Standard INQUIRY returned insufficient data")
+                    if self.verbose:
+                        print(f"  ❌ Standard INQUIRY returned insufficient data")
                     return False
             except Exception as e:
                 self._replay_reraise_if_needed(e)
-                print(f"  ❌ Standard INQUIRY failed: {e}")
-                print("  Aborting initialization - scanner is not responding")
+                if self.verbose:
+                    print(f"  ❌ Standard INQUIRY failed: {e}")
+                    print("  Aborting initialization - scanner is not responding")
                 return False
 
             # 2. Wait for scanner ready (multiple TEST_UNIT_READY)
-            print("\n2. Waiting for scanner ready...")
+            if self.verbose:
+                print("\n2. Waiting for scanner ready...")
             if not self.wait_scanner(timeout=10.0, delay=0.5, min_polls=3):
-                print("  ⚠️  Scanner not ready, continuing anyway...")
+                if self.verbose:
+                    print("  ⚠️  Scanner not ready, continuing anyway...")
 
             # 3. INQUIRY pages (two-step: get length, then full data)
             pages = [
@@ -4854,17 +5161,21 @@ class CoolscanProtocol:
                 (0xF8, "Page 0xf8"),
             ]
 
-            print("\n3. Reading INQUIRY pages...")
+            if self.verbose:
+                print("\n3. Reading INQUIRY pages...")
             for page, description in pages:
                 try:
-                    print(f"  {description}...")
+                    if self.verbose:
+                        print(f"  {description}...")
                     data = self.inquiry(page=page)
                     if data:
-                        print(f"    ✅ Got {len(data)} bytes")
+                        if self.verbose:
+                            print(f"    ✅ Got {len(data)} bytes")
                         # Extract maxbits from page 0xc1 byte 82 (SANE coolscan3.c:2443)
                         if page == 0xC1 and len(data) >= 83:
                             self.maxbits = data[82]
-                            print(f"    maxbits = {self.maxbits} (LUT size = {2 * (1 << self.maxbits)} bytes)")
+                            if self.verbose:
+                                print(f"    maxbits = {self.maxbits} (LUT size = {2 * (1 << self.maxbits)} bytes)")
                         # Store MUD if this is page 0xd1
                         if page == 0xD1 and len(data) >= 28:
                             # Extract MUD from page 0xd1 data
@@ -4873,29 +5184,36 @@ class CoolscanProtocol:
                             pass
                 except Exception as e:
                     self._replay_reraise_if_needed(e)
-                    print(f"    ⚠️  Page 0x{page:02x} failed: {e}")
+                    if self.verbose:
+                        print(f"    ⚠️  Page 0x{page:02x} failed: {e}")
 
             # 4. RESERVE_UNIT
-            print("\n4. Reserving unit...")
+            if self.verbose:
+                print("\n4. Reserving unit...")
             if not self.reserve_unit():
-                print("  ⚠️  Failed to reserve unit, continuing anyway...")
+                if self.verbose:
+                    print("  ⚠️  Failed to reserve unit, continuing anyway...")
 
             # 5. READ_CAPACITY for all scan windows
             # Golden fixture lines 89-118, pcapng t=36.025-36.048s
             # Required before focus commands and scan operations.
-            print("\n5. Reading capacity...")
+            if self.verbose:
+                print("\n5. Reading capacity...")
             capacity = self.read_capacity(window_id=0)
             if capacity:
-                print(f"  ✅ Capacity info retrieved (window 0)")
+                if self.verbose:
+                    print(f"  ✅ Capacity info retrieved (window 0)")
             else:
-                print(f"  ⚠️  READ_CAPACITY window 0 failed, continuing anyway...")
+                if self.verbose:
+                    print(f"  ⚠️  READ_CAPACITY window 0 failed, continuing anyway...")
 
             for win_id in [1, 2, 3, 9]:
                 self.read_capacity(window_id=win_id)
 
             # 6. MODE_SELECT - required before SET_WINDOW operations
             # USB capture shows MODE_SELECT at line 239 (~36s) during initialization
-            print("\n6. Sending MODE_SELECT...")
+            if self.verbose:
+                print("\n6. Sending MODE_SELECT...")
             mode_select_cmd = self._build_6byte_command(0x15, page=0x10, alloc_length=0x14, control=0x00)
             mode_params = bytes([
                 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
@@ -4904,21 +5222,25 @@ class CoolscanProtocol:
             ])
             _, status = self._issue_command(mode_select_cmd, data_out=mode_params)
             if status != StatusType.READY:
-                print("  ⚠️  MODE_SELECT failed")
+                if self.verbose:
+                    print("  ⚠️  MODE_SELECT failed")
                 return False
-            print("  ✅ MODE_SELECT OK")
+            if self.verbose:
+                print("  ✅ MODE_SELECT OK")
             # Small delay after MODE_SELECT (USB capture shows ~150ms)
             time.sleep(0.15)
 
-            print("\n✅ Scanner initialization completed")
+            if self.verbose:
+                print("\n✅ Scanner initialization completed")
             return True
 
         except Exception as e:
             self._replay_reraise_if_needed(e)
-            print(f"❌ Scanner initialization failed: {e}")
-            import traceback
+            if self.verbose:
+                print(f"❌ Scanner initialization failed: {e}")
+                import traceback
 
-            traceback.print_exc()
+                traceback.print_exc()
             return False
 
     def perform_scan_sequence(self, params: ScanParameters, timeout: int = 300) -> bool:
@@ -4944,21 +5266,25 @@ class CoolscanProtocol:
             DeprecationWarning,
             stacklevel=2,
         )
-        print("Performing complete scan sequence...")
+        if self.verbose:
+            print("Performing complete scan sequence...")
         deadline = time.time() + timeout
 
         try:
             # 1. Wait for scanner ready
             if not self.scanner_ready(timeout=min(10, max(1, timeout - 5))):
-                print("Scanner not ready")
+                if self.verbose:
+                    print("Scanner not ready")
                 return False
 
             if not self._check_scanner_alive():
-                print("❌ Scanner became unresponsive")
+                if self.verbose:
+                    print("❌ Scanner became unresponsive")
                 return False
 
             if time.time() >= deadline:
-                print("❌ Scan timeout: scanner_ready exceeded budget")
+                if self.verbose:
+                    print("❌ Scan timeout: scanner_ready exceeded budget")
                 return False
 
             # Session-level reservation happens once during initialize_scanner().
@@ -4968,11 +5294,13 @@ class CoolscanProtocol:
             self.read_capacity()
 
             if not self._check_scanner_alive():
-                print("❌ Scanner became unresponsive")
+                if self.verbose:
+                    print("❌ Scanner became unresponsive")
                 return False
 
             if time.time() >= deadline:
-                print("❌ Scan timeout: reserve/capacity exceeded budget")
+                if self.verbose:
+                    print("❌ Scan timeout: reserve/capacity exceeded budget")
                 return False
 
             # 4. READ CONTROL_FRAME (golden fixture lines 219-223)
@@ -5001,7 +5329,8 @@ class CoolscanProtocol:
             # Prescan WDBs (96 DPI) produce tiny calibration data, not film images.
             for win_id in [1, 2, 3]:
                 if not self.set_scan_window(win_id, scan_type="normal", depth=params.depth):
-                    print(f"Failed to set scan window {win_id}")
+                    if self.verbose:
+                        print(f"Failed to set scan window {win_id}")
                     return False
             if self.verbose:
                 print("  ✅ Scan windows set (RGB, 2900 DPI)")
@@ -5029,38 +5358,46 @@ class CoolscanProtocol:
             self.test_unit_ready()
 
             if not self._check_scanner_alive():
-                print("❌ Scanner became unresponsive")
+                if self.verbose:
+                    print("❌ Scanner became unresponsive")
                 return False
 
             if time.time() >= deadline:
-                print("❌ Scan timeout: setup exceeded budget")
+                if self.verbose:
+                    print("❌ Scan timeout: setup exceeded budget")
                 return False
 
             # 10. Send proper identity LUTs per channel (golden fixture lines 282-296)
             # Fire-and-forget like SANE: cs3_send_lut() is unchecked in cs3_scan().
             if not self.upload_identity_luts():
-                print("  ⚠️  Failed to upload LUTs, continuing anyway")
+                if self.verbose:
+                    print("  ⚠️  Failed to upload LUTs, continuing anyway")
 
             # 11. Start scan (golden fixture lines 297-331, 3 attempts with status reads)
             if not self.start_scan():
-                print("Failed to start scan")
+                if self.verbose:
+                    print("Failed to start scan")
                 return False
 
             # 12. Poll until scanner is ready (golden fixture lines 332-343)
             # Scanner returns PROCESSING (0x02020401) then READY (0x00000000).
             remaining = max(1, int(deadline - time.time()))
             if remaining <= 0:
-                print("❌ Scan timeout: start_scan exceeded budget")
+                if self.verbose:
+                    print("❌ Scan timeout: start_scan exceeded budget")
                 return False
             if not self.poll_until_ready(timeout=remaining, poll_interval=0.5):
-                print("Scanner did not become ready after scan start")
+                if self.verbose:
+                    print("Scanner did not become ready after scan start")
                 return False
 
-            print("Scan sequence completed successfully")
+            if self.verbose:
+                print("Scan sequence completed successfully")
             return True
 
         except Exception as e:
-            print(f"Scan sequence failed: {e}")
+            if self.verbose:
+                print(f"Scan sequence failed: {e}")
             return False
 
     def batch_full_res_setup_frame(
@@ -5080,8 +5417,13 @@ class CoolscanProtocol:
                 here, not identity ramps, so callers should supply the actual
                 8192-byte payloads when doing strict replay.
         """
+        # Use table-default exposure for batch full-res setup, matching
+        # golden_batch.txt; calibrated prescan exposure produces dark frames.
         for win_id in [1, 2, 3]:
-            if not self.set_scan_window(window_id=win_id, scan_type="normal"):
+            if not self.set_scan_window(
+                window_id=win_id, scan_type="normal",
+                use_calibrated_exposure=False,
+            ):
                 return False
 
         if not self._wait_ready_or_replay_once():
@@ -5114,13 +5456,17 @@ class CoolscanProtocol:
                 beyond the first, this MUST be set to the frame's y position.
             height: Optional scan height that overrides the table default.
         """
-        print("Starting batch between-scan setup frame...")
+        if self.verbose:
+            print("Starting batch between-scan setup frame...")
 
         # 1. SET_WINDOW for windows 1, 2, 3 with correct y_offset
+        # Use table-default exposure for batch preview frames (matches
+        # golden_batch.txt between-scan WDBs).
         for win_id in [1, 2, 3]:
             if not self.set_scan_window(
                 win_id, scan_type="batch_between",
                 y_offset=y_offset, height=height,
+                use_calibrated_exposure=False,
             ):
                 return False
 
@@ -5268,6 +5614,7 @@ class CoolscanProtocol:
              g. ``batch_full_res_setup_frame()`` — full-resolution RGB setup
              h. ``batch_full_res_start_frame()`` — full-resolution scan start
              i. ``batch_full_res_capture_frame()`` — full-resolution data read
+             j. ``poll_until_ready()`` — wait for scanner to finish naturally
           2. ``scan_teardown()`` — final release / eject / reset
 
         Args:
@@ -5330,6 +5677,16 @@ class CoolscanProtocol:
 
             if not self.batch_full_res_capture_frame():
                 print(f"  ❌ Batch frame {frame + 1} full-res capture failed")
+                return False
+
+            # Wait for the scanner to finish the full-res scan naturally before
+            # the next frame.  The golden batch pcapng does NOT issue STOP_SCAN
+            # between frames; the scanner returns to READY after the exact expected
+            # byte count is consumed.  Drain is NOT called between frames: the
+            # full-res capture reads the exact expected byte count, so there is
+            # no residual data.
+            if not self.poll_until_ready(timeout=30, poll_interval=0.5):
+                print(f"  ❌ Scanner not ready after batch frame {frame + 1}")
                 return False
 
         # Final teardown (matches the end of ls40-batch.pcapng).

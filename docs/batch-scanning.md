@@ -156,6 +156,7 @@ configuration, LUT upload, and SIMPLE_SET activation:
 - SIMPLE_SET reissue
 - Processing wait
 - **145 image READ blocks**: 144x259200 + 1x103680 (each returns 65508 bytes)
+- **No STOP_SCAN between segments.** The scanner returns to READY naturally after the exact byte count is consumed; the next segment begins with auto-focus and TUR polling.
 
 ### Segment 0 (initial) -- Modified Pipeline
 
@@ -168,10 +169,11 @@ Segment 0 differs from segments 1-5:
 ### Segments 1-5 (after autofocus) -- Full Pipeline
 
 Each follows the complete three-stage pattern:
-1. **Autofocus** -- `e0 00 a0` + 9-byte payload + `c1` execute + `e1 00 c1` + 9-byte response
-2. **Stage A** (290 DPI with IR): 4 READ blocks
-3. **Stage B** (290 DPI RGB): 3 READ blocks
-4. **Stage C** (2900 DPI full-res): 145 READ blocks
+1. **Wait / TUR polling** after the previous segment's Stage C; no STOP_SCAN is issued
+2. **Autofocus** -- `e0 00 a0` + 9-byte payload + `c1` execute + `e1 00 c1` + 9-byte response
+3. **Stage A** (290 DPI with IR): 4 READ blocks
+4. **Stage B** (290 DPI RGB): 3 READ blocks
+5. **Stage C** (2900 DPI full-res): 145 READ blocks
 - Total READ blocks: 4 + 3 + 145 = **152 blocks**
 
 ### READ Block Allocation Pattern

@@ -297,14 +297,16 @@ class TestHelperContracts:
 
     @pytest.mark.property_test
     def test_auto_focus_sequence(self):
-        """auto_focus calls read_focus, _auto_focus_command, read_focus."""
+        """auto_focus calls poll_until_ready, read_focus, _auto_focus_command, read_focus."""
         proto = _make_protocol()
+        proto.poll_until_ready = Mock(return_value=True)
         proto.read_focus = Mock(side_effect=[100, 200])
         proto._auto_focus_command = Mock(return_value=True)
 
         result = proto.auto_focus(focus_x=0x059B, focus_y=0x0894)
 
         assert result == 200
+        assert proto.poll_until_ready.call_count == 1
         assert proto.read_focus.call_count == 2
         assert proto._auto_focus_command.call_count == 1
         args, _ = proto._auto_focus_command.call_args
@@ -1136,6 +1138,9 @@ class TestBatchContracts:
         proto.batch_full_res_setup_frame = Mock(return_value=True)
         proto.batch_full_res_start_frame = Mock(return_value=True)
         proto.batch_full_res_capture_frame = Mock(return_value=b"\x00" * 200)
+        proto.stop_scan = Mock(return_value=True)
+        proto._drain_buffered_scan_data = Mock(return_value=0)
+        proto.poll_until_ready = Mock(return_value=True)
         proto.scan_teardown = Mock(return_value=True)
 
         with patch("coolscan.protocol.time.time", side_effect=lambda: 0.0):
@@ -1153,6 +1158,12 @@ class TestBatchContracts:
         assert proto.batch_full_res_setup_frame.call_count == 2
         assert proto.batch_full_res_start_frame.call_count == 2
         assert proto.batch_full_res_capture_frame.call_count == 2
+        # stop_scan is NOT called between frames; the scanner returns to READY
+        # naturally after the exact full-res byte count is consumed.
+        assert proto.stop_scan.call_count == 0
+        # Drain is NOT called between frames (removed to prevent hangs)
+        assert proto._drain_buffered_scan_data.call_count == 0
+        assert proto.poll_until_ready.call_count == 2
         assert proto.scan_teardown.call_count == 1
 
     @pytest.mark.property_test
@@ -1168,9 +1179,14 @@ class TestBatchContracts:
         proto.batch_full_res_setup_frame = Mock(return_value=True)
         proto.batch_full_res_start_frame = Mock(return_value=True)
         proto.batch_full_res_capture_frame = Mock(return_value=b"\x00" * 200)
+        proto.stop_scan = Mock(return_value=True)
+        proto._drain_buffered_scan_data = Mock(return_value=0)
+        proto.poll_until_ready = Mock(return_value=True)
         proto.scan_teardown = Mock(return_value=True)
 
         with patch("coolscan.protocol.time.time", side_effect=lambda: 0.0):
             proto.batch_scan(frames=1, teardown=False)
 
         assert proto.scan_teardown.call_count == 0
+        # Drain is NOT called between frames
+        assert proto._drain_buffered_scan_data.call_count == 0

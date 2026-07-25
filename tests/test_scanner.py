@@ -762,22 +762,22 @@ class TestParseScanData:
         np.testing.assert_array_equal(result, expected)
 
     def test_12bit_depth(self):
-        """12-bit depth: >>4 then uint8 extracts middle 8 bits of 12-bit value."""
+        """12-bit depth preserves full uint16 values without shifting."""
         width, height = 4, 2
-        # Scanner sends 12-bit values in top 12 bits of big-endian uint16.
-        # >>4 then uint8 extracts bits 11..4 (the "middle" byte).
-        # 0x0ABC >> 4 = 0x0AB -> uint8 = 0xAB
-        # 0x0123 >> 4 = 0x012 -> uint8 = 0x12
+        # Scanner sends 12-bit values in big-endian uint16.
+        # Values are preserved as-is (no >>4 shift).
+        # 0x0ABC stays as 2748, 0x0123 stays as 291
         data = bytearray()
-        data.extend(b"\x0A\xBC")  # 0x0ABC -> 0xAB
-        data.extend(b"\x01\x23")  # 0x0123 -> 0x12
+        data.extend(b"\x0A\xBC")  # 0x0ABC -> 2748
+        data.extend(b"\x01\x23")  # 0x0123 -> 291
         total_samples = height * width * 3
         data.extend(b"\x00\x00" * (total_samples - 2))
 
         result, _ = _parse_scan_data(data, width, height, 3, 12, "pixel", (0, 0, 0))
 
-        assert result[0, 0, 0] == 0xAB
-        assert result[0, 0, 1] == 0x12
+        assert result[0, 0, 0] == 0x0ABC
+        assert result[0, 0, 1] == 0x0123
+        assert result.dtype == np.uint16
 
 
 # ---------------------------------------------------------------------------

@@ -317,8 +317,15 @@ def test_focus_setup_includes_read_focus_info():
 
 @pytest.mark.property_test
 def test_post_prescan_autofocus_sequence():
-    """post_prescan_autofocus: read focus -> e0/a0 -> execute -> poll -> read focus."""
+    """post_prescan_autofocus: poll -> read focus -> e0/a0 -> execute -> poll -> read focus."""
     events = []
+    # Initial poll_until_ready before first read_focus
+    events.extend([
+        ("out", bytes([0x00] * 6)),
+        ("out", b"\xd0"),
+        ("in", b"\x01"),
+        ("in", b"\x00" * 8),
+    ])
     events.extend([
         ("out", bytes([0xE1, 0x00, 0xC1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00])),
         ("out", b"\xd0"),

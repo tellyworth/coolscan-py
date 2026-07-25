@@ -273,6 +273,7 @@ full_res_setup → full_res_start → full_res_capture →
 | 7 | data → full_res_setup | `batch_full_res_setup_frame()` | Configure 2900 DPI at per-frame offset |
 | 8 | full_res_setup → full_res_start | `batch_full_res_start_frame()` | START_SCAN + poll |
 | 9 | full_res_start → full_res_capture | `batch_full_res_capture_frame()` | Read full-res RGB data |
+| 10 | full_res_capture → next setup | `poll_until_ready()` | Wait for scanner to finish naturally; **no STOP_SCAN between frames** |
 | — | (before loop) | `post_prescan_autofocus()` + `_wait_ready_or_replay_once()` ×2 | Auto-focus at next frame center |
 
 ### Teardown
@@ -284,6 +285,7 @@ full_res_setup → full_res_start → full_res_capture →
 
 **Key differences from single-BW:**
 - Batch setup does NOT call `stop_scan()` after LUT upload (the next event is `start_scan()`)
+- **No `stop_scan()` between full-res frames.** The scanner returns to READY naturally after the exact byte-count capture; the next frame begins with auto-focus and TUR polling.
 - Stage A, Stage B, and full-res stages are three separate scan passes per frame
 - Auto-focus runs between frames at the next frame's center coordinates
 - Per-frame Y offset is applied during `batch_full_res_setup_frame()` WDB configuration
