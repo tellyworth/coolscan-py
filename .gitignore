@@ -185,6 +185,9 @@ cython_debug/
 
 # Reference code
 backends-1.4.0/
+
+# Generated fixtures (regenerated from pcapng locally)
+reference/
 # Scan capture files, logs etc
 *.pcapng
 usb_capture_timing.txt
