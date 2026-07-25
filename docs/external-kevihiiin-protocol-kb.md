@@ -31,6 +31,49 @@
 
 **Where they agree**: USB transport protocol (0xD0 phase query, 0x06 sense), core opcodes, phase byte values, CDB padding, data chunking, sense data format -- all consistent between projects. This is strong evidence that the wire protocol is the same at the transport layer.
 
+### 1.1 Cross-Model Protocol Compatibility
+
+Their LS-40 firmware analysis (`binaries/firmware/PT17035.bin`, v1.20, H8/3003) and
+host-side `LS4000.md3` decompilation verify that the SCSI command set is
+**protocol-compatible across all Coolscan models** at the wire level:
+
+| Side | What | Result | Source |
+|---|---|---|---|
+| Host | LS4000.md3 vs LS5000.md3 CDB builders | All 17 opcodes byte-identical; minor internal buffer offset differences in MODE SELECT v1, no wire-format changes | `ls-4000-protocol-deltas.md` §1-2 |
+| Device | LS-40 vs LS-50 firmware dispatch tables | **21/21 entries identical `perm16` AND identical `exec`** — only handler addresses differ (different RAM layout: early-RAM block shifted by Δ ≈ -0x378) | `ls-4000-protocol-deltas.md` §3 |
+| Device | Representative handler bodies (TUR, INQUIRY, MODE SELECT, READ, SET WINDOW, VENDOR\_E0, VENDOR\_C1) | Same algorithmic structure, same magic numbers, same sense codes — differ only in relocated RAM addresses | `ls-4000-protocol-deltas.md` §4 |
+
+The LS-40 uses the `LS4000.md3` module (shared with FireWire LS-4000), NOT
+`LS5000.md3`.  Despite this, the CDB bytes sent over the wire are bytewise
+identical between the two host modules for every SCSI command.
+
+**Implication for driver writers** (paraphrased from `coolscan-iv-ls40.md`):
+
+> Use the LS-50 protocol documentation as your starting point — every SCSI
+> command, every CDB layout, every sense code, every state-machine value
+> documented in the LS-50 KB applies bit-for-bit to the LS-40.
+
+**Caveat**: Vendor sub-codes for `0xE0`/`0xE1`/`0xC1` and READ DTC qualifiers
+are *probably* the same across models but **not yet exhaustively verified**
+at the sub-command level (per `ls-4000-protocol-deltas.md` §7).  The 23-entry
+VENDOR\_E0 table in §5 is from LS-50 firmware; most sub-commands likely work on
+LS-40, but only sub-codes `0xA0`, `0xB4`, `0xD0` (E0) and `0x91`, `0xC1` (E1)
+have been confirmed on LS-40 wire captures.
+
+The **dispatcher gate algorithm** (state-bin → perm16 bit lookup, sense codes,
+eject/uninit pre-gate) is byte-identical on LS-40 firmware.  TUR state byte at
+`@0x40077C` (LS-50) has a relocated equivalent in LS-40's RAM map.
+
+**INQUIRY response** identifies the model: `"Nikon LS-40 ED 1.XX"` vs LS-50's
+`"Nikon LS-50 ED"`.  Drivers should match on the first 12 bytes (`"Nikon LS-`)
+and branch on the next 5 bytes if model-specific behavior is needed.
+
+**Model differences** that do not affect wire protocol:
+- LS-40: 2,900 DPI optical, 12-bit per channel, single-pass, basic ICE only
+- LS-50: 4,000 DPI optical, 16-bit per channel, multi-sample, full ROC/GEM/Fine ICE
+- Module: LS4000.md3 (824KB, MAID v1 MD3.01) vs LS5000.md3 (1028KB, MAID v5 MD3.50)
+- LS-8000/9000: host-side builders verified byte-identical; device-side blocked on missing firmware dumps
+
 ---
 
 ## 2. USB Transport Layer
@@ -114,7 +157,7 @@ Their full list of 15 DTCs (12-byte entries, 0xFF terminated):
 | `0x87` | Scan Parameters / Status | 24 | None (ignored) | Verified | **Yes** |
 | `0x88` | Boundary / Per-Channel Cal | 644 | 0-3 (R/G/B/all) | Verified | No (but see note) |
 | `0x8A` | Exposure / Gain Parameters | 14 | 0-3 (R/G/B/all) | High | No |
-| `0x8C` | Offset / Dark Current | 10 | 0-3 (R/G/B/all) | High | **Yes** (channel state) |
+| `0x8C` | Offset / Dark Current | 10 | 0-3 (R/G/B/all), 0x09 (IR) | High | **Yes** (channel state) |
 | `0x8D` | Extended Scan Line Data | Variable | 0/1/3 (modes) | High | No |
 | `0x8E` | Focus / Measurement Data | Variable | 0 or 1 | High | **Yes** (exposure cal) |
 | `0x8F` | Histogram / Profile | 324 | 0/1/3 (R/G/B) | High | **Yes** (control frame read) |
@@ -133,6 +176,26 @@ Qualifier category byte from DTC table:
 **DTC 0x88 note**: They report DTC 0x88 appears in 0 out of 2058 READ exchanges across all 6 real LS-50 captures. The only factory that emits it (Type D PhaseB) is gated behind MAID cap 0x4129 ("Start Scan") which NikonScan never reaches in the current HIL setup. This suggests DTC 0x88 may exist but is rarely/never used in practice on LS-50.
 
 **DTC 0x93 note** (NEW): Returns a fixed 12-byte response: 6-byte header + 6-byte payload from firmware flash at 0x6042. The payload is three 16-bit big-endian values: `0x03F2` (1010), `0x03C8` (968), `0x02D7` (727) — interpreted as R/G/B calibration-reference levels. The host reads this at each cal-pass boundary during full scans. Appears in LS-50 captures 003/004/005 but NOT in preview (002). The firmware handler at FW:0x024FC4 has a scan-state gate (`@0x40077C & 0xFF == 1` = scan active).
+
+**DTC 0x8C qualifier → ASIC RAM bank mapping** (from `read-dtc-8c.md` firmware RE):
+
+| CDB qual | Channel | ASIC Bank | Handler source address |
+|---|---|---|---|
+| `0x00` | G (composite) | `0x808000` | `*(0x40107C) + *(0x40108C)` |
+| `0x01` | R | `0x800000` | `*(0x401078) + *(0x401088)` |
+| `0x02` | G | `0x808000` | `*(0x40107C) + *(0x40108C)` |
+| `0x03` | B | `0x810000` | `*(0x401080) + *(0x401090)` |
+| `0x04` | R (special) | `0x800000` | `*(0x401078) + *(0x401088)` |
+| `0x09` | IR | `0x818000` | `*(0x401084) + *(0x401094)` |
+
+**Note**: The firmware response builder at FW:0x025060 DMAs from the **ASIC bank
+base** address, not from the handler's computed per-channel pointer (which is
+stored but possibly unused — this is an open question in their KB).  On LS-50,
+NikonScan reads DTC 0x8C with large transfer lengths (hundreds of bytes per
+channel); on LS-40, only 10-byte reads have been observed.  The source also
+notes an unresolved "2688-byte mystery" where NikonScan sends a length that
+violates the firmware's `(len-6)%4==0` alignment rule.  **This DTC's behavior
+differs between LS-40 and LS-50 at the sub-handler level.**
 
 ### WRITE DTCs (opcode 0x2A, FW:0x025506, dispatch table at FW:0x49B98)
 
@@ -680,6 +743,38 @@ Neither LS-40 nor LS-50 captures ever send this opcode. It comes from SANE's `ob
 In single-bw only: `2a 00 92 00 00 03 00 00 00 04 00` (4-byte payload, qualifier=3).
 Not present in any batch capture. The payload semantics (motor control vs border position) cannot be resolved from the fixture alone — we'd need to decode the 4-byte data-out payload.
 
+### 12.10 SCAN Firmware Operation Types
+
+From `scan.md` (FW:0x0220B8, ~1800 bytes): the firmware's SCAN handler supports
+6 operation types encoded in a scan descriptor at `er6[0]`:
+
+| Code | Operation | Description |
+|---|---|---|
+| 0 | Preview scan | Quick low-resolution preview |
+| 1 | Fine scan (single pass) | Full-resolution single exposure |
+| 2 | Fine scan (multi-pass) | Multi-sample averaging scan |
+| 3 | Calibration scan | CCD/LED calibration |
+| 4 | Move to position | Motor positioning only (no CCD); dispatches motor task `0x0440` |
+| 9 | Eject film | Film transport to eject position; dispatches motor task `0x0430` |
+
+These are **firmware-internal task codes**, NOT fields in the wire-level SCAN
+CDB.  On the wire, SCAN (0x1B) uses byte 4 for transfer length (allocating
+space for the window ID list) and the data-out payload carries the window ID
+list (`01 02 03` for RGB, `09 01 02 03` for IR+RGB).  The firmware determines
+the operation type from the scan descriptor built during SET WINDOW processing,
+not from the SCAN CDB itself.
+
+The SCAN handler also interfaces with the motor subsystem:
+- Operation 4 (move) dispatches motor task 0x0440 (relative move)
+- Operation 9 (eject) dispatches motor task 0x0430 (home)
+- Scan operations configure motor speed based on resolution (ramp tables at
+  `FW:0x16C38`)
+
+Scan state variables set by the handler:
+- `0x400D43`: scan operation active flag
+- `0x400E7A`: scan operation state
+- `0x400D3C`: max operations for current adapter
+
 ---
 
 ## 13. Key Discrepancies / Conflicts Between Projects
@@ -715,6 +810,8 @@ Both NikonScan (LS-50) and SANE (LS-40) send 9-byte payloads for sub=0xD0. Their
 ### 13.4 RELEASE UNIT (0x17) — CONFIRMED UNNECESSARY
 
 **Never sent in any LS-40 capture (all 5 pcapngs).** Their finding that NikonScan never sends it is confirmed on LS-40 too. Our code should remove it to match observed behavior.
+
+The RELEASE handler **exists** in both LS-40 firmware (`FW:0x0221F2`) and LS-50 firmware (`FW:0x021EA0`) with identical `perm16` flags (`0x07FC`) and execution mode — it is part of the standard SCSI-2 reservation pair that both scanners implement at the firmware level. Neither host driver (NikonScan for LS-50, SANE coolscan3 for LS-40) ever emits it on the wire; reservation is implicitly cleared on USB disconnect. (See `ls-4000-protocol-deltas.md` §1, §3 for dispatch table verification including opcode 0x17.)
 
 ### 13.5 OBJECT POSITION (0x31) — CONFIRMED UNNECESSARY
 
@@ -758,3 +855,89 @@ SANE does INQUIRY VPD pages before MODE SELECT; NikonScan does MODE SELECT earli
   - `docs/kb/scsi-commands/vendor-e1.md` — host-side parser decode
   - `docs/kb/scsi-commands/read-dtc-93.md` — DTC 0x93 full decode
   - `docs/kb/architecture/usb-protocol.md` — USB transport details
+  - `docs/kb/scsi-commands/scan.md` — SCAN command (6 firmware operation types)
+  - `docs/kb/scsi-commands/read-dtc-8c.md` — DTC 0x8C qualifier→ASIC bank mapping
+  - `docs/kb/scsi-commands/mode-sense.md` — MODE SENSE PC values + page sources
+  - `docs/kb/scanners/coolscan-iv-ls40.md` — LS-40 model entry with firmware sample info
+  - `docs/kb/scanners/ls-4000-protocol-deltas.md` — byte-level LS-40 vs LS-50 diff
+  - `docs/kb/scanners/model-comparison.md` — all 6 scanner models cross-reference
+
+---
+
+## 15. Firmware Internals Quick Reference
+
+Internal details from LS-50 firmware RE (H8/3003, `docs/kb/` source verified).
+These are firmware addresses, not wire-level fields. Included for context when
+interpreting scanner behavior.
+
+### 15.1 NkDriverEntry Function Codes
+
+| FC | Symbol | Purpose |
+|---|---|---|
+| 1 | Initialize | Magic-check "1200", allocate handle, build command/session managers |
+| 2 | OpenSession | Open or reopen a scanner session |
+| 3 | CloseCommand | Cancel and free a specific command |
+| 4 | ReleaseResource | Session-side cancel callback |
+| 5 | ExecuteCommand | Build a SCSI command and enqueue for execution (hot path) |
+| 6 | GetCommandStatus | Retrieve stored status code for a command |
+| 7 | Shutdown | Release all resources, clear thread execution state |
+
+### 15.2 ASIC RAM Banks
+
+| Address | Channel | Used By |
+|---|---|---|
+| `0x800000` | R (Red) | DTC 0x8C qual 0x01/0x04, DTC 0x00 image data |
+| `0x808000` | G (Green) | DTC 0x8C qual 0x00/0x02 |
+| `0x810000` | B (Blue) | DTC 0x8C qual 0x03 |
+| `0x818000` | IR (Infrared) | DTC 0x8C qual 0x09 |
+
+Source: ASIC RAM Bank Descriptor Table at `FW:0x49A94..0x49AAC`.
+
+### 15.3 MODE SENSE Page Control Sources
+
+| PC Value | Mode | Data Source |
+|---|---|---|
+| 0 | Current values | RAM `@0x400D2A` (8 bytes per page) |
+| 1 | Changeable values | RAM `@0x400D32` (8 bytes) |
+| 2 | Default values | Flash `FW:0x0168AF` (8 bytes): base resolution=1200 DPI, max X/Y=4000 |
+| 3 | Saved values | Not supported → sense 0x0059 |
+
+Supported pages: 0x03 (device-specific: resolution, max scan area) and 0x3F (all pages).
+
+### 15.4 Interrupt Vector Table
+
+| Vector | Address | Source | Purpose |
+|---|---|---|---|
+| 0 | 0x000 | Reset | Startup code |
+| 7 | 0x01C | NMI | Tight loop |
+| 8 | 0x020 | TRAP #0 | Context switch (cooperative yield) |
+| 13 | 0x034 | IRQ1 | ISP1581 USB interrupt |
+| 15 | 0x03C | IRQ3 | Motor encoder pulses |
+| 32 | 0x080 | IMIA2 (ITU2) | Motor mode dispatcher |
+| 36 | 0x090 | IMIA3 (ITU3) | Timer 3 compare match |
+| 40 | 0x0A0 | IMIA4 (ITU4) | System tick timer (`push_to_usb` runs here) |
+| 45 | 0x0B4 | DEND0B | DMA ch0B transfer end |
+
+### 15.5 Key I/O Port Registers
+
+| Port | Address | Primary Function |
+|---|---|---|
+| Port A DR | `0xD3` | Stepper motor phase output (primary motor port) |
+| Port 1 DR | `0x82` | Multi-purpose I/O (bus status, motor feedback) |
+| Port 7 DR | `0x8E` | Adapter/sensor status input (read during SCAN) |
+| Port 9 DR | `0xC8` | Motor encoder input + stepper phase output |
+| Port 8 DR | `0xC9` | Lamp state readback |
+
+### 15.6 Scanner State Byte (`@0x40077C` in LS-50)
+
+| State | Meaning | TUR Response |
+|---|---|---|
+| `0x00` | Idle (ready) | Good |
+| `0x01` | Active scan | Checks DMA/motor sub-states |
+| `0x20`–`0x2F` | Setup phase | Returns status |
+| `0xF0` | Sensor error | Sense 0x0008 (Communication Failure) |
+| `0xF1` | Motor error | Sense 0x0009 (Track Following Error) |
+| `0xF3` | Motor busy (positioning) | Sense 0x0079 |
+| `0xF4` | Calibration busy | Sense 0x007A |
+
+LS-40 equivalent register at relocated address (Δ ≈ -0x378 from LS-50 addresses).
