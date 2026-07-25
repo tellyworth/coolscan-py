@@ -368,7 +368,10 @@ class WindowDescriptorBlock:
             Byte   49:   film/preview flag (0x81=prescan/low-res, 0x80=IR, 0x00=main)
             Byte   50:   sub-mode (0x01=prescan/main, 0x02=low-res 96 DPI)
             Bytes 51-53: ``02 02 ff`` (constant tail)
-            Bytes 54-57: exposure (32-bit big-endian, 10ns units)
+            Bytes 54-57: exposure (32-bit big-endian, 10ns units).
+                Vendor extension 0x102 — per-channel CCD integration time.
+                LS-50 firmware stores at RAM 0x400FAE + (channel_id * 4).
+                Updated by the E0/C1/E1 auto-exposure calibration loop.
 
         Returns:
             58-byte WDB suitable for SET_WINDOW (SCAN) commands.
@@ -2050,13 +2053,30 @@ class CoolscanProtocol:
         frame_height: int = 4332,
         step: int = 4330,
     ) -> bool:
-        """Send CONTROL_FRAME before full scan.
+        """Send CONTROL_FRAME (WRITE DTC 0x8F) before full scan.
 
-        Frame boundaries are determined from scanner physical dimensions
-        (INQUIRY pages 0xc1/0xd1) and requested scan area, NOT from
-        prescan image data analysis. The prescan provides exposure
-        calibration and focus data, but frame positions are computed
-        from the scan parameters.
+        Frame boundaries are defined by the CONTROL_FRAME payload — a 52-byte
+        structure with 3 entries that define coarse scan regions (each entry
+        covers a pair of frames in the "every-2-frames" pattern).  Fine-grained
+        per-frame positioning is handled by the ``frame_offset`` field in each
+        SET_WINDOW descriptor (WDB bytes 18-21).
+
+        The positioning pipeline for a scan is two-layered:
+
+        1. **CONTROL_FRAME** — coarse region definitions.  3 entries of 16 bytes
+           each (y_start/u32, x1/u32, y_end/u32, x2/u32).  Entry ``i`` covers
+           frames ``2*i`` and ``2*i+1``.  The x1/x2 fields are not fully
+           reverse-engineered (see ``_build_control_frame_payload`` for heuristic).
+        2. **WDB frame_offset** — precise per-window Y position.  Each SET_WINDOW
+           (one per channel) carries its own ``frame_offset`` (WDB bytes 18-21,
+           big-endian uint32) that tells the scanner exactly where to start the
+           CCD readout for that channel window.
+
+        Frame edge detection is **host-side**: NikonScan (and SANE coolscan3)
+        analyze low-resolution prescan pixel data to find frame boundaries
+        (contrast transitions at film frame gaps).  The scanner firmware has no
+        built-in frame detection — it simply scans the region specified by
+        SET_WINDOW geometry.
 
         The SANE coolscan3 backend sends SEND with datatype 0x88
         (IMAGE_POSITIONS) for set_boundary, but the LS-40 ED rejects
@@ -2123,28 +2143,42 @@ class CoolscanProtocol:
         Header (4 bytes): ``00 32 06 00`` (matches both single-BW and batch
         captures from golden fixtures).
 
-        Per-entry fields (16 bytes each). The capture shows exactly 3 entries
-        regardless of the actual number of frames scanned; the scanner appears
-        to use these to define coarse scan regions rather than individual
-        frame boundaries.
+        Per-entry fields (16 bytes each), 3 entries per payload.  The scanner
+        uses these to define coarse scan regions rather than individual frame
+        boundaries (the per-frame precision comes from WDB frame_offset).
 
-        **Every-2-frames pattern** (golden_batch.txt line 281): each entry
-        covers a pair of frames.  Entry ``i`` covers frames ``2*i`` and
-        ``2*i+1``.
+        Entry layout (per kevihiiin/Nikon-Coolscan-RE firmware RE):
+
+        ::
+
+            bytes  0-3:  y_start  (uint32 BE) — first scan line in region
+            bytes  4-7:  x1       (uint32 BE) — region left bound / mode select
+            bytes  8-11: y_end    (uint32 BE) — last scan line in region
+            bytes 12-15: x2       (uint32 BE) — region right bound / stride
+
+        The ``x1`` and ``x2`` fields are **not fully reverse-engineered** —
+        even the LS-50 firmware RE project labels them as conf=Medium.  Our
+        pcapng-observed pattern is::
+
+            x1[i] = (i*0x10 << 16) | (0x06 + i*0x08)
+            x2[i] = (i*0x10 << 16) | (0x0c  if i < last else 0x10)
+
+        The low byte of ``x2`` increments to 0x10 for the last entry (entry 2),
+        which matches both single-BW and batch captures.  The high byte
+        (shifting 0x00 → 0x10 → 0x20) may encode region index or channel offset.
+
+        **Every-2-frames grouping pattern**: entry ``i`` covers frames ``2*i``
+        and ``2*i+1``::
+
+            y_start[i] = first_y + 2*i*step
+            y_end[i]   = y_start[i] + 2*step
 
         For the default batch geometry (frame_count=6, first_y=30,
         frame_height=4332, step=4330), the exact golden payload is returned
         for byte-for-byte match with golden_batch.txt line 281.
 
-        For other geometries, the y values are computed as:
-
-        - ``y_start[i] = first_y + 2*i*step``
-        - ``y_end[i]   = y_start[i] + 2*step``
-
-        The X-related fields follow a fixed pattern from the golden capture:
-
-        - ``x1[i] = (i*0x10 << 16) | (0x06 + i*0x08)``
-        - ``x2[i] = (i*0x10 << 16) | (0x0c  if i < last else 0x10)``
+        For other geometries, the y values are computed per the formulas above.
+        The x values follow the heuristic pattern documented above.
 
         Args:
             frame_count: Number of frames (always generates 3 entries, clamped
@@ -2221,6 +2255,20 @@ class CoolscanProtocol:
         edge detection adjustments that vary by ±20-30 around the nominal
         step value, and cannot be reproduced by a simple formula.
 
+        The per-frame adjustment pattern is:
+        - frame 0: first_y (30)        — first frame starts at reference position
+        - frame 1: first_y + step (4360)  — nominal, no adjustment
+        - frame 2: 8710 (vs nominal 8690) — shifted +20
+        - frame 3: 13020 (vs nominal 13020) — nominal
+        - frame 4: 17380 (vs nominal 17350) — shifted +30
+        - frame 5: 21680 (vs nominal 21680) — nominal
+
+        These ±20-30 adjustments reflect the scanner's film edge detection:
+        the prescan image is analyzed to find exact frame boundaries, and the
+        CONTROL_FRAME positions are shifted to align scan windows precisely
+        with each detected frame edge.  The adjustment is per-frame-position,
+        not a global offset, so it cannot be captured by a linear formula.
+
         For other geometries, falls back to ``first_y + i * step``. This is
         an approximation; non-default geometries have not been verified against
         hardware captures.
@@ -2263,6 +2311,19 @@ class CoolscanProtocol:
         Golden fixture (line 203-207):
           CDB:  2a009200000300000400  (SEND, datatype=0x92, length=4)
           Data: 04000000              (4 bytes, frame count = 1)
+
+        per kevihiiin/Nikon-Coolscan-RE firmware RE (FW:0x25908), the LS-50
+        uses WRITE DTC 0x92 for motor/positioning control with a 4-byte payload
+        interpreted as::
+
+            byte 0: motor selector (0x01=scan motor, 0x02=focus motor)
+            byte 1: operation mode / step count multiplier
+            byte 2: direction/flags (bit 0=direction, bits 4-7=speed profile)
+            byte 3: step count parameter
+
+        The LS-40's ``04 00 00 00`` payload may encode a similar single-frame
+        positioning command.  The DTC and payload size are identical across
+        models; the semantic interpretation may differ.
 
         Returns:
             True if scanner accepted the command.
@@ -4120,6 +4181,45 @@ class CoolscanProtocol:
     # 0xD2     5       Diagnostic data
     # 0xD5     5       Extended diagnostic
     # 0xD6     5       Persistent settings
+    #
+    # Motor positioning sub-commands (from LS-50 firmware RE):
+    #
+    #   0x44 — Motor target position (5 bytes):
+    #     byte 0: motor selector (0x01=scan motor, 0x02=AF/focus motor)
+    #     byte 1: operation mode / step count multiplier
+    #     byte 2: direction/flags (bit 0=direction, bits 4-7=speed profile)
+    #     bytes 3-4: step count (16-bit big-endian)
+    #     FW:0x25908 handler; writes to 0x400790 (motor_state), dispatches via 0x25B6A.
+    #
+    #   0x91 — Motor step (5 bytes): direction + step count, used for incremental moves.
+    #     Same payload format as 0x44 (host driver emits identical 5B layout).
+    #
+    #   0xC1 — Carriage position / frame select (9 bytes):
+    #     byte 5: single-byte frame offset (0-255), used for per-frame setup in batch
+    #     scans.  Rest of payload zeros.  LS-40 pcapng shows this before each batch
+    #     frame: e0/c1 → execute(C1) sequence.
+    #
+    #   0xA0 — Load / cal preheat (9 bytes):
+    #     bytes 3-4: motor step target (varies per scan: 0x07b5 in capture 003)
+    #     bytes 5-8: cal-session counter / scan ID (monotonic across sessions)
+    #     LS-40 uses this for autofocus: payload 00 00 00 05 9b 00 00 XX YY where
+    #     XX YY = focus target position.
+    #
+    # E0 sub=0xB4 host-data validation gate (FW:0x029510):
+    #   The LS-50 firmware validates the first two 32-bit parameters of the 9-byte
+    #   data-out payload: param1 must be in [60, 3600] (μs exposure range) and
+    #   param2 must be 0 or 1. Scanner state @0x400773 must be in {1,2,4,5}
+    #   (active-scan family). If either check fails → sense 0x53.
+    #
+    # Per-channel exposure storage (LS-50 firmware RAM):
+    #   Vendor extension 0x102 (WDB bytes 54-57) values are stored per-channel:
+    #   - Window 1 (Red):   RAM 0x400FAE
+    #   - Window 2 (Green): RAM 0x400FB2
+    #   - Window 3 (Blue):  RAM 0x400FB6
+    #   - Window 9 (IR):    special path (firmware uses different offset).
+    #   Values are in 50ns clock ticks (20 MHz CPU).  Updated by the E0/C1/E1
+    #   auto-exposure calibration loop (E0 sub=0x45 write → C1 trigger → E1 read).
+    #   The scanner reads these ~20 times across scan + calibration routines.
 
     @sends(0xe0, 0xc1)
     def vendor_e0(self, subcode: int, data: bytes) -> bool:
@@ -4197,9 +4297,13 @@ class CoolscanProtocol:
 
     @sends(0xe0, 0xc1)
     def vendor_e0_c1(self, frame_offset: int = 0) -> bool:
-        """Frame select (VENDOR_E0 subcode 0xc1).
+        """Frame select / carriage position (VENDOR_E0 subcode 0xc1).
 
-        Positions the carriage for selective batch scanning.
+        Positions the carriage for selective batch scanning. This is part of
+        the motor positioning family of sub-commands (alongside 0x44 = motor
+        target position, 0x91 = motor step).  The LS-50 firmware dispatches
+        this to the motor/calibration subsystem at FW:0x028B08.
+
         The offset goes in byte 5 of the 9-byte payload.
         The offset is a single byte (0-255) in the capture-derived format.
 
