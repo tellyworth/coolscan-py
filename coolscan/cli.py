@@ -62,26 +62,38 @@ def _setup_usb_logging(protocol: CoolscanProtocol, logs_dir: Path) -> str:
 def _apply_auto_adjust(image_array: np.ndarray) -> np.ndarray:
     """Apply negative inversion + histogram stretch + gamma correction.
 
-    Returns an 8-bit uint8 array.
+    Accepts uint16 (0-65535) or uint8 (0-255) input and returns uint8.
+    Uses percentile-based stretching (0.5%/99.5%) to avoid outliers causing
+    posterization, and normalizes to 0-1 float before processing.
     """
     arr = image_array.astype(np.float64)
 
-    # Negative inversion
-    arr = 255.0 - arr
+    # Normalize to 0-1 range based on input dtype
+    if image_array.dtype == np.uint16:
+        arr = arr / 65535.0
+    elif image_array.dtype == np.uint8:
+        arr = arr / 255.0
+    else:
+        # Already float or other: assume 0-1 range
+        pass
 
-    # Histogram stretch per channel
+    # Negative inversion (for negative film)
+    arr = 1.0 - arr
+
+    # Percentile-based histogram stretch per channel (avoids outlier posterization)
     for ch in range(arr.shape[2]):
-        ch_min = arr[:, :, ch].min()
-        ch_max = arr[:, :, ch].max()
-        if ch_max > ch_min:
-            arr[:, :, ch] = (arr[:, :, ch] - ch_min) / (ch_max - ch_min) * 255.0
+        ch_data = arr[:, :, ch]
+        low = np.percentile(ch_data, 0.5)
+        high = np.percentile(ch_data, 99.5)
+        if high > low:
+            ch_data = (ch_data - low) / (high - low)
+            arr[:, :, ch] = np.clip(ch_data, 0, 1)
         else:
-            arr[:, :, ch] = 0
+            arr[:, :, ch] = 0.0
 
     # Gamma correction (2.2)
-    arr = np.clip(arr, 0, 255)
-    arr = 255.0 * np.power(arr / 255.0, 1.0 / 2.2)
-    return arr.astype(np.uint8)
+    arr = 255.0 * np.power(np.clip(arr, 0, 1), 1.0 / 2.2)
+    return np.clip(arr, 0, 255).astype(np.uint8)
 
 
 def _build_exif_data(
@@ -110,35 +122,22 @@ def _build_exif_data(
 def _write_tiff_16bit_rgb(
     rgb_array: np.ndarray,
     output_path: Path,
-    ir_array: Optional[np.ndarray] = None,
-    compression: str = "zstd",
     exif_data: Optional[dict] = None,
 ) -> None:
-    """Write a 16-bit per channel RGB TIFF (with optional IR as 4th channel).
+    """Write a 16-bit per channel RGB TIFF (uncompressed).
 
     Writes a proper multi-channel 16-bit TIFF using manual TIFF format.
     Pillow cannot handle uint16 RGB arrays directly.
+    Compression is not implemented; TIFFs are written uncompressed.
     """
     height, width, channels = rgb_array.shape
     assert channels == 3
 
     # Ensure contiguous uint16 data
     data = np.ascontiguousarray(rgb_array, dtype=np.uint16)
-
-    # If IR is present, include it as a 4th channel
-    if ir_array is not None:
-        ir_cont = np.ascontiguousarray(ir_array, dtype=np.uint16)
-        samples_per_pixel = 4
-        bits_per_sample = [16, 16, 16, 16]
-        # Pack RGB + IR: reshape IR to match RGB shape
-        ir_3d = ir_cont.reshape(height, width, 1)
-        combined = np.concatenate([data, ir_3d], axis=2)
-        combined = np.ascontiguousarray(combined)
-        raw_bytes = combined.tobytes()
-    else:
-        samples_per_pixel = 3
-        bits_per_sample = [16, 16, 16]
-        raw_bytes = data.tobytes()
+    samples_per_pixel = 3
+    bits_per_sample = [16, 16, 16]
+    raw_bytes = data.tobytes()
 
     # TIFF Header
     # Little-endian, magic 42, first IFD offset
@@ -205,19 +204,13 @@ def _save_tiff_dual_ifd(
     rgb_array: np.ndarray,
     ir_array: Optional[np.ndarray],
     output_path: Path,
-    compression: str = "zstd",
     exif_data: Optional[dict] = None,
 ) -> None:
-    """Save a TIFF with RGB in main IFD and IR in second IFD.
+    """Save a TIFF with RGB in main IFD and IR in second IFD (8-bit only).
 
-    Uses Pillow's append mode for the second IFD.
+    For 16-bit TIFFs, IR is not included (would require upsample/multi-IFD).
+    For 8-bit TIFFs, uses Pillow's append mode for the second IFD.
     """
-    # Determine compression string
-    if compression == "zstd":
-        compress_str = "tiff_zstd"
-    else:
-        compress_str = "tiff_deflate"
-
     # Build TIFF metadata tags (only applied to first IFD)
     tiff_info: dict = {}
     if exif_data:
@@ -247,17 +240,19 @@ def _save_tiff_dual_ifd(
     is_16bit = rgb_array.dtype == np.uint16
 
     if is_16bit:
-        _write_tiff_16bit_rgb(
-            rgb_array, output_path, ir_array=ir_array,
-            compression=compress_str, exif_data=tiff_info,
-        )
+        _write_tiff_16bit_rgb(rgb_array, output_path, exif_data=tiff_info)
+        if ir_array is not None:
+            click.echo(
+                "  ⚠️  IR channel not yet supported for 16-bit TIFF; skipping IR",
+                err=True,
+            )
     else:
         # 8-bit RGB: standard "RGB" mode
         rgb_image = Image.fromarray(np.ascontiguousarray(rgb_array), "RGB")
         rgb_image.save(
             str(output_path),
             format="TIFF",
-            compression=compress_str,
+            compression="tiff_deflate",
             info=tiff_info,
         )
 
@@ -268,7 +263,7 @@ def _save_tiff_dual_ifd(
             ir_image.save(
                 str(output_path),
                 format="TIFF",
-                compression=compress_str,
+                compression="tiff_deflate",
                 append=True,
             )
 
@@ -279,7 +274,12 @@ def _save_jpeg(
     exif_data: Optional[dict] = None,
     orientation: Optional[int] = None,
 ) -> None:
-    """Save a JPEG with EXIF metadata."""
+    """Save a JPEG with EXIF metadata.
+
+    When called from the auto-adjust path, image_array is already uint8
+    (returned by _apply_auto_adjust).  Otherwise, uint16 data is down-converted
+    via >> 4 (12-bit to 8-bit).
+    """
     # JPEG only supports 8-bit; down-convert uint16 (12-bit >> 4)
     if image_array.dtype != np.uint8:
         image_array = (image_array >> 4).astype(np.uint8)
@@ -763,13 +763,26 @@ def _do_batch_scan(
                 channel_offsets=channel_offsets,
             )
 
-            rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
+            rgb_arr_raw = np.ascontiguousarray(img_arr[:, :, 0:3])
+
+            # Log raw per-channel statistics before scaling (diagnostic)
+            if depth > 8 and rgb_arr_raw.dtype == np.uint16:
+                for ch, name in enumerate(("R", "G", "B")):
+                    ch_data = rgb_arr_raw[:, :, ch]
+                    click.echo(
+                        f"  Raw stats — {name}: "
+                        f"min={int(ch_data.min())} "
+                        f"max={int(ch_data.max())} "
+                        f"mean={ch_data.mean():.1f}"
+                    )
 
             # Scale 12-bit raw values to full 16-bit range for TIFF storage.
             # Without this, 12-bit data (0-4095) in a uint16 container appears
             # nearly black in viewers that expect the full 0-65535 range.
-            if depth > 8 and rgb_arr.dtype == np.uint16:
-                rgb_arr = (rgb_arr.astype(np.uint32) * 65535 // 4095).astype(np.uint16)
+            if depth > 8 and rgb_arr_raw.dtype == np.uint16:
+                rgb_arr = (rgb_arr_raw.astype(np.uint32) * 65535 // 4095).astype(np.uint16)
+            else:
+                rgb_arr = rgb_arr_raw
 
             ir_arr = None
 
@@ -785,7 +798,7 @@ def _do_batch_scan(
                     num_channels=4,
                     depth=12,
                     format="plane",
-                    channel_offsets=(0, 1, 2, 0),
+                    channel_offsets=(0, 0, 0, 0),
                 )
                 ir_arr = np.ascontiguousarray(stage_arr[:, :, 3])
 
@@ -802,7 +815,7 @@ def _do_batch_scan(
             if auto_adjust:
                 jpeg_arr = _apply_auto_adjust(rgb_arr)
             else:
-                jpeg_arr = rgb_arr if rgb_arr.dtype == np.uint8 else (rgb_arr >> 4).astype(np.uint8)
+                jpeg_arr = rgb_arr_raw if rgb_arr_raw.dtype == np.uint8 else (rgb_arr_raw >> 4).astype(np.uint8)
             jpeg_arr = np.ascontiguousarray(jpeg_arr)
 
             orientation = _detect_orientation(jpeg_arr)
