@@ -3680,7 +3680,22 @@ class CoolscanProtocol:
 
     @sends(0xc0)
     def cancel_scan(self) -> bool:
-        """Cancel the current scan operation."""
+        """Cancel the current scan operation.
+
+        Sends VENDOR_C0 (0xC0) which sets bit 7 of the firmware's abort
+        flag at ``@0x400776``.  The scanner's inner scan loop detects it,
+        exits cleanly, and recovery task 0x0F10 runs cleanup.
+
+        .. warning::
+
+           C0 only signals the scanner firmware — it does NOT clear stale
+           image data from the **host-side** USB controller buffer.  If the
+           abort happens mid-transfer, subsequent USB reads will return
+           leftover image bytes instead of command responses.  On a real
+           Windows driver, ``usb_clear_halt(EP2_IN)`` is required after
+           abort.  With pyusb this may require a device reset.
+           See kevihiiin/Nikon-Coolscan-RE scan-data-transfer.md Q3.
+        """
         cmd = self._parse_command("c0 00 00 00 00 00")
         _, status = self._issue_command(cmd)
         return status == StatusType.READY

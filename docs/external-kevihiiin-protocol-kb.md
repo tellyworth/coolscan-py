@@ -487,7 +487,15 @@ Step 5 MUST come before step 6. This is **not a hack — it is the correct proto
 | 7-18 | 12 | Per-channel line geometry (bytes_per_line, line_count) |
 | 19-23 | 5 | Additional params |
 
-The total image byte count is the key field. The host uses this to read exactly the right number of bytes, avoiding buffer corruption from over-reading.
+The total image byte count is the key field. The host uses this to read
+exactly the right number of bytes, avoiding buffer corruption from
+over-reading.
+
+The DTC 0x87 sub-handler at FW:0x244D2 is a direct RAM copy from
+``0x400D45`` — it is the **only** DTC whose handler does not compose its
+response dynamically.  The firmware populates this buffer during SET
+WINDOW processing and scan initialization, and the values reflect the
+actual scan geometry after any CCD alignment rounding.
 
 ### 9.3 MODE SELECT Page Layout (20 bytes)
 
