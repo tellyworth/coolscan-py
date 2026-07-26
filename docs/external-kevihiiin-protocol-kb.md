@@ -775,6 +775,60 @@ Scan state variables set by the handler:
 - `0x400E7A`: scan operation state
 - `0x400D3C`: max operations for current adapter
 
+### 12.11 Per-Resolution-Band Line Count Limits
+
+The LS-40 firmware enforces a **maximum line count per SET_WINDOW that  
+depends on the resolution band**.  Empirically verified via hardware testing:
+
+| Resolution | Max line_count | Used for | Prescan |
+|---|---|---|---|
+| 96 DPI | ≥ 34656 (0x8760) | Whole-strip prescan | Yes |
+| 290 DPI | Unknown | IR preview pass | No |
+| 2900 DPI | ≤ 4332 (0x10EC) | Per-frame full-res scan | No |
+
+At 2900 DPI, values of 7776 (2×) and 23328 (6×) are rejected with sense 5 /
+ASC 0x26 ("Invalid field in parameter list").  The 96 DPI band accepts 34656
+(the full strip length used by the prescan across all 5 captures).
+
+The rejection originates inside `parse_window_descriptor` at FW:0x0279BE,
+the firmware function that validates individual WDB fields.  This function's
+body was **not decompiled** by their Ghidra run, so the exact validation
+formula is unknown.  No constant matching 0x10EC (4332) appears in the
+decompiled SET_WINDOW handler code, suggesting the limit is computed
+dynamically from resolution and adapter parameters rather than hardcoded.
+
+**Practical implication**: Full-strip scanning at 2900 DPI is not possible
+on the LS-40.  Use batch mode (`--batch --frames 6`) for multi-frame
+scanning — it scans frame-by-frame with effectively zero gap between
+consecutive frames.
+
+### 12.12 CONTROL_FRAME Defines Tri-Linear CCD Color Rows
+
+The 3 entries in every CONTROL_FRAME payload define **per-color-channel
+CCD line regions**, not per-frame scan areas:
+
+- **Entry 0**: R (red) channel region — y_start, y_end, x1, x2
+- **Entry 1**: G (green) channel region — offset by ∼8680 CCD lines from R
+- **Entry 2**: B (blue) channel region — offset by ∼8660 CCD lines from G
+
+The ∼8680-line offset between entries is the **physical tri-linear CCD
+sensor row spacing** — each color sensor row is positioned at a different
+location in the linear CCD array, so the same physical film line passes
+through R, then G (8680 CCD lines later), then B (another 8660 lines
+later).  The entry y_start shifts per capture because the film is loaded
+at a slightly different position each time.
+
+This means the CONTROL_FRAME does NOT define per-frame boundaries for
+batch scanning — batch scans use the same 3-entry structure with entries
+covering frame *pairs* (entry 0 covers frames 0-1, entry 1 covers frames
+2-3, entry 2 covers frames 4-5).  Per-frame precision comes from the
+WDB `frame_offset` field (bytes 18-21), which positions each frame's scan
+window within the coarse region defined by its CONTROL_FRAME entry.
+
+The x1/x2 fields remain **not fully reverse-engineered** — even their
+firmware RE project labels the semantics as "not known."  Our heuristic
+(`[i*0x10 << 16] | [0x06 + i*0x08]` for x1) matches all observed captures.
+
 ---
 
 ## 13. Key Discrepancies / Conflicts Between Projects
@@ -793,7 +847,16 @@ Scan state variables set by the handler:
 
 ### 13.2 DTC 0x8F: Histogram vs Control Frame — CONFIRMED OUR INTERPRETATION
 
-Our `--extract-control-frames` analyzer correctly parses the 0x8F payloads as frame boundary data (y_start, y_end, height per entry). The "histogram" label in their KB is for READ DTC 0x8F in autofocus context — a different lifecycle phase. The WRITE DTC 0x8F in LS-40 captures IS control frame data (52-byte boundary positions).
+Our `--extract-control-frames` analyzer correctly parses the 0x8F payloads as
+frame boundary data (y_start, y_end, height per entry). The "histogram" label
+in their KB is for READ DTC 0x8F in autofocus context — a different lifecycle
+phase. The WRITE DTC 0x8F in LS-40 captures IS control frame data (52-byte
+boundary positions).
+
+Further confirmed by the **tri-linear CCD color-row interpretation**:
+the 3 entries define per-color-channel CCD line regions with ∼8680-line
+offsets between R/G/B sensor rows (see §12.12).  The entries cover frame
+pairs for batch scanning, with per-frame precision from WDB `frame_offset`.
 
 ### 13.3 VENDOR_E0 Payload Lengths — OPEN (their table is likely wrong for D0)
 

@@ -2180,6 +2180,13 @@ class CoolscanProtocol:
         For other geometries, the y values are computed per the formulas above.
         The x values follow the heuristic pattern documented above.
 
+        The 3-entry structure reflects the **tri-linear CCD sensor**: each
+        entry defines the CCD line region for one color channel (R/G/B),
+        offset by ∼8680 CCD lines between sensor rows.  Batch scans use the
+        same 3-entry structure with entries covering frame *pairs*; per-frame
+        position comes from the WDB ``frame_offset`` field, not from
+        CONTROL_FRAME.
+
         Args:
             frame_count: Number of frames (always generates 3 entries, clamped
                 to ``min(frame_count, 3)`` for padding purposes).
@@ -2520,6 +2527,18 @@ class CoolscanProtocol:
             height: Optional scan height (length) that overrides the table
                 default at WDB bytes 26–29.  Used for batch scanning to set
                 per-frame height.
+
+                .. warning::
+
+                   The LS-40 firmware enforces a **per-resolution-band maximum
+                   line count**.  At 2900 DPI, values > 4332 (0x10EC) are
+                   rejected with sense 5 / ASC 0x26 ("Invalid field in
+                   parameter list").  At 96 DPI, values up to 34656 are
+                   accepted (the prescan scans the entire film strip).  The
+                   limit is validated inside ``parse_window_descriptor`` at
+                   FW:0x0279BE (per kevihiiin/Nikon-Coolscan-RE firmware RE;
+                   function body not decompiled).  Use batch mode for
+                   multi-frame full-res scanning.
         """
         # Resolve effective scan_type (resolution is a deprecated override)
         if resolution == 96:
