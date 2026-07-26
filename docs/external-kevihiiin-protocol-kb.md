@@ -911,6 +911,29 @@ SANE does INQUIRY VPD pages before MODE SELECT; NikonScan does MODE SELECT earli
 
 ### P2 — Protocol improvements to adopt
 
+1. **E0/C1/E1 auto-exposure calibration loop** (future enhancement): The
+   kevihiiin repo documents an auto-exposure calibration loop (E0 sub=0x45
+   write → C1 trigger → E1 read → repeat until converged) that NikonScan
+   runs before every SCAN.  Two benefits: (a) computes optimal per-channel
+   exposure for WDB bytes 54-57, and (b) forces firmware recalibration
+   creating a ~500ms safe window for DTC 0x87 reads.  Our code uses
+   ``read_channel_state`` (DTC 0x8C) to read existing calibrated values
+   which is sufficient for LS-40.  Implementing the full loop would improve
+   exposure accuracy and provide LS-50 compatibility.
+
+2. **``_auto_focus_command`` payload format** (fixed): Was sending ``00
+   [focus_x:4B] [focus_y:4B]`` instead of the pcapng-verified format
+   ``00 00 00 05 9b 00 00 [position:2B]`` (motor step target at bytes 3-4,
+   position at bytes 7-8).  Scanner tolerated the wrong format.  Fixed in
+   protocol.py.
+
+3. **E0 sub=0xB4 validation gate** (documented): The LS-50 firmware at
+   FW:0x029510 validates bytes 1-4 of the payload must be in [60, 3600].
+   Our ``set_focus_param`` payload places the focus value at bytes 0-3,
+   which would fail the LS-50 gate if it applied to LS-40.  The LS-40
+   accepts the payload regardless.  Flagged as a potential LS-50
+   compatibility issue.
+
 ---
 
 ## 14. References

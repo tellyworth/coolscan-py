@@ -3903,12 +3903,22 @@ class CoolscanProtocol:
 
         Golden fixture line 190: e0 00 b4 00 00 00 00 00 09 00
         Golden fixture line 193: 9-byte data payload.
-        Data format: [focus 32-bit BE][4 padding bytes][0x01]
-        e.g. fixture: 00 00 00 e1 00 00 00 00 01
+        Data format (9 bytes): ``[focus 32-bit BE][4 padding bytes][0x01]``
+        Fixture example: ``00 00 00 e1 00 00 00 00 01`` (focus_value=0xe1=225).
 
         Note: SANE uses e0/c1 with different data format (leading 0x00
         byte + focus + trailing zeros). The e0/b4 command (from pcapng
         capture) requires the trailing 0x01 byte.
+
+        .. note::
+
+           Per kevihiiin/Nikon-Coolscan-RE firmware RE, the LS-50 E0 sub=0xB4
+           handler at FW:0x029510 validates that the first 32-bit parameter
+           (bytes 1-4 of the data-out payload) is in **[60, 3600]**.  The
+           LS-40 firmware may or may not enforce this gate.  Our fixture
+           ``00 00 00 e1 00 00 00 00 01`` has bytes 1-4 = ``00 00 e1 00``
+           = 57600 decimal, which would FAIL the LS-50 gate if it applies.
+           The LS-40 accepts it regardless.
 
         Returns:
             True if command accepted.
@@ -3998,22 +4008,30 @@ class CoolscanProtocol:
     def _auto_focus_command(self, focus_x: int = 0, focus_y: int = 0) -> bool:
         """Send the autofocus command and execute it (fixture-matching core).
 
-        Golden fixture lines 436-441: e0/a0 with 9-byte payload, then c1 execute.
-        This helper does only those two commands, leaving focus read-back and
-        polling to the caller so it composes cleanly into setup frames.
+        Golden fixture line 433: E0/A0 data-out payload ``00 00 00 05 9b
+        00 00 0a c4`` — 9 bytes with motor step target (0x059b) at bytes
+        3-4 and carriage position at bytes 7-8 (big-endian 16-bit).
+
+        This format is verified against both our LS-40 pcapng captures and
+        the LS-50 captures from kevihiiin/Nikon-Coolscan-RE (003 exchange
+        #5: ``00 00 00 07 b5 00 00 0f 69``).  The ``focus_x`` parameter
+        is accepted for backwards compatibility but is not present in the
+        wire format — only a single position value fits in the 16-bit field.
 
         Args:
-            focus_x: X coordinate for autofocus target (0 = center).
-            focus_y: Y coordinate for autofocus target (0 = center).
+            focus_x: Accepted for backwards compatibility (unused on wire).
+            focus_y: Carriage Y position (0-65535) for autofocus target.
 
         Returns:
             True if both the autofocus command and execute succeed.
         """
         if self.verbose:
-            print(f"  Sending AUTOFOCUS (0xe0/a0) at ({focus_x}, {focus_y})...")
+            print(f"  Sending AUTOFOCUS (0xe0/a0) at position {focus_y}...")
+        payload = bytes([0x00, 0x00, 0x00, 0x05, 0x9b, 0x00, 0x00]) + struct.pack(
+            ">H", focus_y
+        )
         cmd = bytes([0xE0, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00])
-        data_out = b"\x00" + struct.pack(">II", focus_x, focus_y)
-        _, status = self._issue_command(cmd, data_out=data_out)
+        _, status = self._issue_command(cmd, data_out=payload)
         if status != StatusType.READY:
             if self.verbose:
                 print(f"    Autofocus command failed (status={status})")
