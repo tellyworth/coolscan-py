@@ -37,13 +37,13 @@ coolscan list
 coolscan status
 
 # Single-frame scan at 2700 DPI
-coolscan scan -o ./output --depth 12 --film-type negative
+coolscan scan -o ./output_dir --depth 12 --film-type negative
 
 # Batch scan (6 frames, with infrared channel)
-coolscan scan -o ./output --batch --frames 6 --infrared --depth 12
+coolscan scan -o ./output_dir --batch --frames 6 --infrared --depth 12
 
 # Preview/prescan only
-coolscan scan -o ./output --preview
+coolscan scan -o ./output_dir --preview
 
 # Eject film
 coolscan eject
