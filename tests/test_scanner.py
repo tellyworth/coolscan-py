@@ -148,7 +148,7 @@ class TestCoolscanScannerConnect:
 class TestCoolscanScannerDisconnect:
     """Test disconnection functionality."""
 
-    def test_disconnect_releases_unit(self):
+    def test_disconnect_calls_close(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
         mock = _mock_with_info()
@@ -158,7 +158,6 @@ class TestCoolscanScannerDisconnect:
 
         scanner.disconnect()
 
-        assert mock.release_unit.call_count == 1
         assert mock.close.call_count == 1
         assert scanner.protocol is None
         assert scanner.is_connected is False
@@ -176,11 +175,11 @@ class TestCoolscanScannerDisconnect:
 
         assert mock.cancel_scan.call_count == 1
 
-    def test_disconnect_handles_release_error(self):
+    def test_disconnect_handles_close_error(self):
         device = _make_device()
         scanner = CoolscanScanner(device)
         mock = make_protocol_mock()
-        mock.release_unit.side_effect = Exception("Release failed")
+        mock.close.side_effect = Exception("Close failed")
         scanner.protocol = mock
         scanner.is_connected = True
 
@@ -283,7 +282,6 @@ class TestCoolscanScannerPrescan:
         assert result is True
         assert mock.prescan.call_count == 1
         assert mock.reserve_unit.call_count == 0
-        assert mock.release_unit.call_count == 0
 
     def test_prescan_failure(self):
         device = _make_device()
@@ -508,7 +506,6 @@ class TestCoolscanScannerContextManager:
             with CoolscanScanner(device) as scanner:
                 pass
 
-        assert mock.release_unit.call_count >= 1
         assert mock.close.call_count >= 1
 
     def test_context_manager_connect_fails(self):

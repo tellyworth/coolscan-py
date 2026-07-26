@@ -37,8 +37,7 @@ Key types:
     ``StatusType`` — ``READY``, ``ERROR``, ``REISSUE``, ``BUSY``, ...
     ``DataType`` — datatype codes used in ``READ(0x28)``/``WRITE(0x2a)`` byte 2
     ``WindowDescriptorBlock`` — 58-byte LS-40 ED WDB (``to_bytes_58`` /
-        ``from_bytes_58`` match pcapng captures; ``to_bytes`` / ``from_bytes``
-        implement the legacy 117-byte SANE format)
+        ``from_bytes_58`` match pcapng captures)
 
 Wire-format authority: ``ls40-single-bw.pcapng`` (primary) and
 ``reference/golden_single_bw.txt`` (auto-derived from pcapng).  The
@@ -163,8 +162,11 @@ class DataType(Enum):
     STATUS_PROGRESS = 0x87  # Internal status/progress information
     EXPOSURE_CALIBRATION = 0x8E  # Exposure/calibration tables
     CONTROL_FRAME = 0x8F  # Control/frame position data (WRITE)
-    IMAGE_POSITIONS = 0x88  # SANE coolscan3 uses this for set_boundary; LS-40 ED rejects it
     BORDER_POSITION = 0x92  # LS-40 ED golden fixture line 203: prescan boundary
+    CALIBRATION_REFERENCE  = 0x93   # LS-50 only: fixed 12B flash constant (R/G/B reference triplet)
+                                     # Absent from all LS-40 captures. DTC exists in LS-50 firmware
+                                     # at FW:0x024FC4. Returns 6-byte header + 03F203C802D7 payload.
+                                     # Documented for cross-reference; not emitted by this driver.
     CHANNEL_STATE = 0x8C  # LS-40 ED golden fixture line 236: per-channel state read
     SHADING_DATA = 0xA0
     USER_REG_GAMMA = 0xC0
@@ -177,8 +179,6 @@ class WindowDescriptorBlock:
 
     The 58-byte WDB format derived from the LS-40 ED pcapng captures stores
     exposure as a single 32-bit big-endian value at bytes 54–57 (10ns units).
-    The legacy per-channel fields (exposure_r/g/b, shift_r/g/b, offset_r/g/b)
-    are deprecated; use the ``exposure`` field instead.
     """
 
     window_id: int = 0x00
@@ -205,17 +205,7 @@ class WindowDescriptorBlock:
     contrast_b: int = 128
     # Calibrated exposure (32-bit, 10ns units) written at WDB bytes 54–57.
     exposure: int = 0
-    # Deprecated: per-channel exposure bytes at 0x49–0x4B (SANE format).
-    exposure_r: int = 120
-    exposure_g: int = 120
-    exposure_b: int = 100
-    shift_r: int = 128
-    shift_g: int = 128
-    shift_b: int = 128
-    offset_r: int = 0
-    offset_g: int = 0
-    offset_b: int = 0
-    # 58-byte capture WDB fields (not present in SANE 117-byte format)
+    # 58-byte capture WDB fields
     channel: int = 1  # Channel: 1=R, 2=G, 3=B, 9=IR
     frame_offset: int = 0  # Frame/boundary offset from WRITE 0x8f table
     wdb_mode: int = 0x0005  # 0x0002=prescan, 0x0005=preview/main
@@ -223,123 +213,6 @@ class WindowDescriptorBlock:
     status_byte: int = 0x00  # 0x00=normal, 0x03=post-eject ch1
     film_flag: int = 0x00  # 0x81=prescan/low-res preview, 0x80=IR preview, 0x00=main
     sub_mode: int = 0x01  # 0x01=prescan/main, 0x02=low-res 96 DPI preview
-
-    def to_bytes(self) -> bytes:
-        """Convert WDB to bytes."""
-        data = bytearray(117)  # Standard WDB size
-
-        # Basic fields
-        data[0x00] = self.window_id
-        data[0x01] = self.auto_flag
-
-        # Resolution (big-endian)
-        data[0x02:0x04] = struct.pack(">H", self.x_resolution)
-        data[0x04:0x06] = struct.pack(">H", self.y_resolution)
-
-        # Position and size (big-endian)
-        data[0x06:0x0A] = struct.pack(">L", self.ulx)
-        data[0x0A:0x0E] = struct.pack(">L", self.uly)
-        data[0x0E:0x12] = struct.pack(">L", self.width)
-        data[0x12:0x16] = struct.pack(">L", self.length)
-
-        # Image parameters
-        data[0x16] = self.brightness
-        data[0x18] = self.contrast
-        data[0x19] = self.composition
-        data[0x1A] = self.bits_per_pixel
-
-        # Pixel counts (big-endian)
-        data[0x28:0x2C] = struct.pack(">L", self.width)
-        data[0x2C:0x30] = struct.pack(">L", self.length)
-
-        # Scan parameters (SANE coolscan-scsidef.h:349-367)
-        # byte 0x30: bit 4 = negative flag, bits 0-1 = dropout color
-        neg_flag = 0x10 if self.negative_dropout else 0x00
-        dropout_color = self.negative_dropout & 0x03 if self.negative_dropout else 0x00
-        data[0x30] = neg_flag | dropout_color
-        # byte 0x31: bits 4-5 = scan mode (0x00=normal, 0x01=prescan)
-        data[0x31] = (self.scan_mode & 0x03) << 4
-        data[0x32] = self.transfer_mode
-        data[0x33] = self.gamma_selection
-
-        # Color adjustments
-        data[0x37] = self.brightness_r
-        data[0x38] = self.brightness_g
-        data[0x39] = self.brightness_b
-        data[0x3A] = self.contrast_r
-        data[0x3B] = self.contrast_g
-        data[0x3C] = self.contrast_b
-
-        # Exposure settings (deprecated per-channel bytes at 0x49-0x4B)
-        data[0x49] = self.exposure_r
-        data[0x4A] = self.exposure_g
-        data[0x4B] = self.exposure_b
-
-        # Color shifts
-        data[0x52] = self.shift_r
-        data[0x53] = self.shift_g
-
-        # Bytes 54–57: 32-bit big-endian exposure (10ns units).
-        # This is the canonical exposure field per the capture-derived WDB format.
-        data[0x54:0x58] = struct.pack(">I", self.exposure)
-
-        return bytes(data)
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "WindowDescriptorBlock":
-        """Create WDB from bytes."""
-        if len(data) < 117:
-            raise ValueError("WDB data too short")
-
-        wdb = cls()
-
-        # Parse basic fields
-        wdb.window_id = data[0x00]
-        wdb.auto_flag = data[0x01]
-
-        # Resolution
-        wdb.x_resolution = struct.unpack(">H", data[0x02:0x04])[0]
-        wdb.y_resolution = struct.unpack(">H", data[0x04:0x06])[0]
-
-        # Position and size
-        wdb.ulx = struct.unpack(">L", data[0x06:0x0A])[0]
-        wdb.uly = struct.unpack(">L", data[0x0A:0x0E])[0]
-        wdb.width = struct.unpack(">L", data[0x0E:0x12])[0]
-        wdb.length = struct.unpack(">L", data[0x12:0x16])[0]
-
-        # Image parameters
-        wdb.brightness = data[0x16]
-        wdb.contrast = data[0x18]
-        wdb.composition = data[0x19]
-        wdb.bits_per_pixel = data[0x1A]
-
-        # Scan parameters (SANE coolscan-scsidef.h:349-367)
-        wdb.negative_dropout = (data[0x30] >> 4) & 0x01
-        wdb.scan_mode = (data[0x31] >> 4) & 0x03
-        wdb.transfer_mode = data[0x32]
-        wdb.gamma_selection = data[0x33]
-
-        # Color adjustments
-        wdb.brightness_r = data[0x37]
-        wdb.brightness_g = data[0x38]
-        wdb.brightness_b = data[0x39]
-        wdb.contrast_r = data[0x3A]
-        wdb.contrast_g = data[0x3B]
-        wdb.contrast_b = data[0x3C]
-
-        # Exposure settings (deprecated per-channel bytes at 0x49-0x4B)
-        wdb.exposure_r = data[0x49]
-        wdb.exposure_g = data[0x4A]
-        wdb.exposure_b = data[0x4B]
-
-        # Color shifts
-        wdb.shift_r = data[0x52]
-        wdb.shift_g = data[0x53]
-
-        # Bytes 54–57: 32-bit big-endian exposure (10ns units)
-        wdb.exposure = struct.unpack(">I", data[0x54:0x58])[0]
-
-        return wdb
 
     def to_bytes_58(self) -> bytes:
         """Build the 58-byte capture-aligned WDB from dataclass fields.
@@ -364,7 +237,10 @@ class WindowDescriptorBlock:
             Byte   49:   film/preview flag (0x81=prescan/low-res, 0x80=IR, 0x00=main)
             Byte   50:   sub-mode (0x01=prescan/main, 0x02=low-res 96 DPI)
             Bytes 51-53: ``02 02 ff`` (constant tail)
-            Bytes 54-57: exposure (32-bit big-endian, 10ns units)
+            Bytes 54-57: exposure (32-bit big-endian, 10ns units).
+                Vendor extension 0x102 — per-channel CCD integration time.
+                LS-50 firmware stores at RAM 0x400FAE + (channel_id * 4).
+                Updated by the E0/C1/E1 auto-exposure calibration loop.
 
         Returns:
             58-byte WDB suitable for SET_WINDOW (SCAN) commands.
@@ -493,9 +369,6 @@ class ScanParameters:
     x_max: int = 0
     y_max: int = 0
     exposure: float = 1.0
-    exposure_r: float = 1200.0
-    exposure_g: float = 1200.0
-    exposure_b: float = 1000.0
 
 
 @dataclass
@@ -1735,20 +1608,7 @@ class CoolscanProtocol:
             print(f"Unit reservation: {'SUCCESS' if success else 'FAILED'}")
         return success
 
-    @sends(0x17)
-    def release_unit(self) -> bool:
-        """Release the scanner unit."""
-        if self.verbose:
-            print("Releasing unit...")
-        # Format: 17 00 00 00 00 00 (from USB capture)
-        cmd = self._build_6byte_command(0x17, control=0x00)
-        _, status = self._issue_command(cmd)
-        success = status == StatusType.READY
-        if self.verbose:
-            print(f"Unit release: {'SUCCESS' if success else 'FAILED'}")
-        return success
-
-    @sends(0x1b, 0x17, 0x00)
+    @sends(0x1b, 0x00)
     def reset_scanner(self) -> bool:
         """
         Reset/cleanup scanner to restore it to a responsive state.
@@ -1815,26 +1675,7 @@ class CoolscanProtocol:
                     if self.verbose:
                         print(f"    (stop scan: {e})")
 
-                # Step 4: Send RELEASE_UNIT
-                if self.verbose:
-                    print("  Sending RELEASE_UNIT...")
-                try:
-                    if hasattr(self, "bulk_out") and self.bulk_out:
-                        release_cmd = bytes([0x17, 0x00, 0x00, 0x00, 0x00, 0x00])
-                        self.usb_device.write(
-                            self.bulk_out.bEndpointAddress, release_cmd, timeout=200
-                        )
-                        time.sleep(0.1)
-                        # Try to read any response
-                        try:
-                            self.usb_device.read(self.bulk_in.bEndpointAddress, 64, timeout=100)
-                        except:
-                            pass
-                except Exception as e:
-                    if self.verbose:
-                        print(f"    (release unit: {e})")
-
-                # Step 5: Final drain
+                # Step 4: Final drain
                 time.sleep(0.2)
                 if hasattr(self, "bulk_in") and self.bulk_in:
                     for _ in range(5):
@@ -1843,7 +1684,7 @@ class CoolscanProtocol:
                         except:
                             break
 
-                # Step 6: Try a TEST_UNIT_READY to check responsiveness
+                # Step 5: Try a TEST_UNIT_READY to check responsiveness
                 if self.verbose:
                     print("  Testing responsiveness...")
                 try:
@@ -1952,32 +1793,6 @@ class CoolscanProtocol:
             if self.verbose:
                 print("Internal info read failed")
             return None
-
-    @sends(0x31)
-    def object_position(self, auto_feed: int = 0x00) -> bool:
-        """Send OBJECT_POSITION command (like SANE coolscan_object_feed)."""
-        if self.verbose:
-            print("Sending object position command...")
-        cmd = bytearray(
-            [
-                0x31,  # OBJECT_POSITION
-                0x00,  # Auto feeder function
-                0x00,
-                0x00,
-                0x00,  # Count
-                0x00,
-                0x00,
-                0x00,
-                0x00,  # Reserved
-                0x00,  # Control byte
-            ]
-        )
-
-        _, status = self._issue_command(bytes(cmd))
-        success = status == StatusType.READY
-        if self.verbose:
-            print(f"Object position: {'SUCCESS' if success else 'FAILED'}")
-        return success
 
     @sends(0x2a)
     def send_lut(self, lut_data: bytes) -> bool:
@@ -2104,18 +1919,32 @@ class CoolscanProtocol:
         frame_height: int = 4332,
         step: int = 4330,
     ) -> bool:
-        """Send CONTROL_FRAME before full scan.
+        """Send CONTROL_FRAME (WRITE DTC 0x8F) before full scan.
 
-        Frame boundaries are determined from scanner physical dimensions
-        (INQUIRY pages 0xc1/0xd1) and requested scan area, NOT from
-        prescan image data analysis. The prescan provides exposure
-        calibration and focus data, but frame positions are computed
-        from the scan parameters.
+        Frame boundaries are defined by the CONTROL_FRAME payload — a 52-byte
+        structure with 3 entries that define coarse scan regions (each entry
+        covers a pair of frames in the "every-2-frames" pattern).  Fine-grained
+        per-frame positioning is handled by the ``frame_offset`` field in each
+        SET_WINDOW descriptor (WDB bytes 18-21).
 
-        The SANE coolscan3 backend sends SEND with datatype 0x88
-        (IMAGE_POSITIONS) for set_boundary, but the LS-40 ED rejects
-        0x88 with ILLEGAL REQUEST (ASC=0x26). The capture shows the
-        LS-40 ED uses SEND 0x8f (CONTROL_FRAME) with a 52-byte payload.
+        The positioning pipeline for a scan is two-layered:
+
+        1. **CONTROL_FRAME** — coarse region definitions.  3 entries of 16 bytes
+           each (y_start/u32, x1/u32, y_end/u32, x2/u32).  Entry ``i`` covers
+           frames ``2*i`` and ``2*i+1``.  The x1/x2 fields are not fully
+           reverse-engineered (see ``_build_control_frame_payload`` for heuristic).
+        2. **WDB frame_offset** — precise per-window Y position.  Each SET_WINDOW
+           (one per channel) carries its own ``frame_offset`` (WDB bytes 18-21,
+           big-endian uint32) that tells the scanner exactly where to start the
+           CCD readout for that channel window.
+
+        Frame edge detection is **host-side**: NikonScan (and SANE coolscan3)
+        analyze low-resolution prescan pixel data to find frame boundaries
+        (contrast transitions at film frame gaps).  The scanner firmware has no
+        built-in frame detection — it simply scans the region specified by
+        SET_WINDOW geometry.
+
+        The LS-40 ED uses WRITE DTC 0x8F (CONTROL_FRAME) with a 52-byte payload.
 
         Args:
             params: Scan parameters (unused; payload is fixed from capture).
@@ -2177,28 +2006,49 @@ class CoolscanProtocol:
         Header (4 bytes): ``00 32 06 00`` (matches both single-BW and batch
         captures from golden fixtures).
 
-        Per-entry fields (16 bytes each). The capture shows exactly 3 entries
-        regardless of the actual number of frames scanned; the scanner appears
-        to use these to define coarse scan regions rather than individual
-        frame boundaries.
+        Per-entry fields (16 bytes each), 3 entries per payload.  The scanner
+        uses these to define coarse scan regions rather than individual frame
+        boundaries (the per-frame precision comes from WDB frame_offset).
 
-        **Every-2-frames pattern** (golden_batch.txt line 281): each entry
-        covers a pair of frames.  Entry ``i`` covers frames ``2*i`` and
-        ``2*i+1``.
+        Entry layout (per kevihiiin/Nikon-Coolscan-RE firmware RE):
+
+        ::
+
+            bytes  0-3:  y_start  (uint32 BE) — first scan line in region
+            bytes  4-7:  x1       (uint32 BE) — region left bound / mode select
+            bytes  8-11: y_end    (uint32 BE) — last scan line in region
+            bytes 12-15: x2       (uint32 BE) — region right bound / stride
+
+        The ``x1`` and ``x2`` fields are **not fully reverse-engineered** —
+        even the LS-50 firmware RE project labels them as conf=Medium.  Our
+        pcapng-observed pattern is::
+
+            x1[i] = (i*0x10 << 16) | (0x06 + i*0x08)
+            x2[i] = (i*0x10 << 16) | (0x0c  if i < last else 0x10)
+
+        The low byte of ``x2`` increments to 0x10 for the last entry (entry 2),
+        which matches both single-BW and batch captures.  The high byte
+        (shifting 0x00 → 0x10 → 0x20) may encode region index or channel offset.
+
+        **Every-2-frames grouping pattern**: entry ``i`` covers frames ``2*i``
+        and ``2*i+1``::
+
+            y_start[i] = first_y + 2*i*step
+            y_end[i]   = y_start[i] + 2*step
 
         For the default batch geometry (frame_count=6, first_y=30,
         frame_height=4332, step=4330), the exact golden payload is returned
         for byte-for-byte match with golden_batch.txt line 281.
 
-        For other geometries, the y values are computed as:
+        For other geometries, the y values are computed per the formulas above.
+        The x values follow the heuristic pattern documented above.
 
-        - ``y_start[i] = first_y + 2*i*step``
-        - ``y_end[i]   = y_start[i] + 2*step``
-
-        The X-related fields follow a fixed pattern from the golden capture:
-
-        - ``x1[i] = (i*0x10 << 16) | (0x06 + i*0x08)``
-        - ``x2[i] = (i*0x10 << 16) | (0x0c  if i < last else 0x10)``
+        The 3-entry structure reflects the **tri-linear CCD sensor**: each
+        entry defines the CCD line region for one color channel (R/G/B),
+        offset by ∼8680 CCD lines between sensor rows.  Batch scans use the
+        same 3-entry structure with entries covering frame *pairs*; per-frame
+        position comes from the WDB ``frame_offset`` field, not from
+        CONTROL_FRAME.
 
         Args:
             frame_count: Number of frames (always generates 3 entries, clamped
@@ -2275,6 +2125,20 @@ class CoolscanProtocol:
         edge detection adjustments that vary by ±20-30 around the nominal
         step value, and cannot be reproduced by a simple formula.
 
+        The per-frame adjustment pattern is:
+        - frame 0: first_y (30)        — first frame starts at reference position
+        - frame 1: first_y + step (4360)  — nominal, no adjustment
+        - frame 2: 8710 (vs nominal 8690) — shifted +20
+        - frame 3: 13020 (vs nominal 13020) — nominal
+        - frame 4: 17380 (vs nominal 17350) — shifted +30
+        - frame 5: 21680 (vs nominal 21680) — nominal
+
+        These ±20-30 adjustments reflect the scanner's film edge detection:
+        the prescan image is analyzed to find exact frame boundaries, and the
+        CONTROL_FRAME positions are shifted to align scan windows precisely
+        with each detected frame edge.  The adjustment is per-frame-position,
+        not a global offset, so it cannot be captured by a linear formula.
+
         For other geometries, falls back to ``first_y + i * step``. This is
         an approximation; non-default geometries have not been verified against
         hardware captures.
@@ -2309,14 +2173,25 @@ class CoolscanProtocol:
     def set_boundary_for_prescan(self) -> bool:
         """Send BORDER_POSITION before prescan (golden fixture line 203).
 
-        The SANE coolscan3 backend sends SEND with datatype 0x88 (IMAGE_POSITIONS)
-        for set_boundary, but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST.
-        The golden fixture shows the LS-40 ED uses SEND 0x92 (BORDER_POSITION)
+        The golden fixture shows the LS-40 ED uses WRITE DTC 0x92 (BORDER_POSITION)
         with a 4-byte payload before prescan.
 
         Golden fixture (line 203-207):
           CDB:  2a009200000300000400  (SEND, datatype=0x92, length=4)
           Data: 04000000              (4 bytes, frame count = 1)
+
+        per kevihiiin/Nikon-Coolscan-RE firmware RE (FW:0x25908), the LS-50
+        uses WRITE DTC 0x92 for motor/positioning control with a 4-byte payload
+        interpreted as::
+
+            byte 0: motor selector (0x01=scan motor, 0x02=focus motor)
+            byte 1: operation mode / step count multiplier
+            byte 2: direction/flags (bit 0=direction, bits 4-7=speed profile)
+            byte 3: step count parameter
+
+        The LS-40's ``04 00 00 00`` payload may encode a similar single-frame
+        positioning command.  The DTC and payload size are identical across
+        models; the semantic interpretation may differ.
 
         Returns:
             True if scanner accepted the command.
@@ -2513,6 +2388,18 @@ class CoolscanProtocol:
             height: Optional scan height (length) that overrides the table
                 default at WDB bytes 26–29.  Used for batch scanning to set
                 per-frame height.
+
+                .. warning::
+
+                   The LS-40 firmware enforces a **per-resolution-band maximum
+                   line count**.  At 2900 DPI, values > 4332 (0x10EC) are
+                   rejected with sense 5 / ASC 0x26 ("Invalid field in
+                   parameter list").  At 96 DPI, values up to 34656 are
+                   accepted (the prescan scans the entire film strip).  The
+                   limit is validated inside ``parse_window_descriptor`` at
+                   FW:0x0279BE (per kevihiiin/Nikon-Coolscan-RE firmware RE;
+                   function body not decompiled).  Use batch mode for
+                   multi-frame full-res scanning.
         """
         # Resolve effective scan_type (resolution is a deprecated override)
         if resolution == 96:
@@ -2599,6 +2486,15 @@ class CoolscanProtocol:
         Golden fixture / pcapng: up to 3 attempts; the scanner may return a
         transient ERROR (sense 0x09800100) before becoming READY, so we retry
         on both REISSUE and that specific transient ERROR.
+
+        Between retry attempts, the method reads DTC 0x87 status blocks
+        (6B + 33B or 24B) to signal to the scanner that the host is ready
+        to receive scan data.  This ordering — status reads BEFORE the
+        retry SCAN and BEFORE any TUR polling — is critical: if scan image
+        data reaches the EP2 FIFO before the host completes the status
+        exchange, subsequent USB reads return image bytes instead of
+        command responses, corrupting all further communication.  See
+        kevihiiin/Nikon-Coolscan-RE scan-data-transfer.md Q7.
         """
         if scan_type == ScanType.BATCH:
             cmd = self._build_6byte_command(0x1B, alloc_length=0x04, control=0x00)
@@ -3784,7 +3680,22 @@ class CoolscanProtocol:
 
     @sends(0xc0)
     def cancel_scan(self) -> bool:
-        """Cancel the current scan operation."""
+        """Cancel the current scan operation.
+
+        Sends VENDOR_C0 (0xC0) which sets bit 7 of the firmware's abort
+        flag at ``@0x400776``.  The scanner's inner scan loop detects it,
+        exits cleanly, and recovery task 0x0F10 runs cleanup.
+
+        .. warning::
+
+           C0 only signals the scanner firmware — it does NOT clear stale
+           image data from the **host-side** USB controller buffer.  If the
+           abort happens mid-transfer, subsequent USB reads will return
+           leftover image bytes instead of command responses.  On a real
+           Windows driver, ``usb_clear_halt(EP2_IN)`` is required after
+           abort.  With pyusb this may require a device reset.
+           See kevihiiin/Nikon-Coolscan-RE scan-data-transfer.md Q3.
+        """
         cmd = self._parse_command("c0 00 00 00 00 00")
         _, status = self._issue_command(cmd)
         return status == StatusType.READY
@@ -3877,12 +3788,22 @@ class CoolscanProtocol:
 
         Golden fixture line 190: e0 00 b4 00 00 00 00 00 09 00
         Golden fixture line 193: 9-byte data payload.
-        Data format: [focus 32-bit BE][4 padding bytes][0x01]
-        e.g. fixture: 00 00 00 e1 00 00 00 00 01
+        Data format (9 bytes): ``[focus 32-bit BE][4 padding bytes][0x01]``
+        Fixture example: ``00 00 00 e1 00 00 00 00 01`` (focus_value=0xe1=225).
 
         Note: SANE uses e0/c1 with different data format (leading 0x00
         byte + focus + trailing zeros). The e0/b4 command (from pcapng
         capture) requires the trailing 0x01 byte.
+
+        .. note::
+
+           Per kevihiiin/Nikon-Coolscan-RE firmware RE, the LS-50 E0 sub=0xB4
+           handler at FW:0x029510 validates that the first 32-bit parameter
+           (bytes 1-4 of the data-out payload) is in **[60, 3600]**.  The
+           LS-40 firmware may or may not enforce this gate.  Our fixture
+           ``00 00 00 e1 00 00 00 00 01`` has bytes 1-4 = ``00 00 e1 00``
+           = 57600 decimal, which would FAIL the LS-50 gate if it applies.
+           The LS-40 accepts it regardless.
 
         Returns:
             True if command accepted.
@@ -3972,22 +3893,30 @@ class CoolscanProtocol:
     def _auto_focus_command(self, focus_x: int = 0, focus_y: int = 0) -> bool:
         """Send the autofocus command and execute it (fixture-matching core).
 
-        Golden fixture lines 436-441: e0/a0 with 9-byte payload, then c1 execute.
-        This helper does only those two commands, leaving focus read-back and
-        polling to the caller so it composes cleanly into setup frames.
+        Golden fixture line 433: E0/A0 data-out payload ``00 00 00 05 9b
+        00 00 0a c4`` — 9 bytes with motor step target (0x059b) at bytes
+        3-4 and carriage position at bytes 7-8 (big-endian 16-bit).
+
+        This format is verified against both our LS-40 pcapng captures and
+        the LS-50 captures from kevihiiin/Nikon-Coolscan-RE (003 exchange
+        #5: ``00 00 00 07 b5 00 00 0f 69``).  The ``focus_x`` parameter
+        is accepted for backwards compatibility but is not present in the
+        wire format — only a single position value fits in the 16-bit field.
 
         Args:
-            focus_x: X coordinate for autofocus target (0 = center).
-            focus_y: Y coordinate for autofocus target (0 = center).
+            focus_x: Accepted for backwards compatibility (unused on wire).
+            focus_y: Carriage Y position (0-65535) for autofocus target.
 
         Returns:
             True if both the autofocus command and execute succeed.
         """
         if self.verbose:
-            print(f"  Sending AUTOFOCUS (0xe0/a0) at ({focus_x}, {focus_y})...")
+            print(f"  Sending AUTOFOCUS (0xe0/a0) at position {focus_y}...")
+        payload = bytes([0x00, 0x00, 0x00, 0x05, 0x9b, 0x00, 0x00]) + struct.pack(
+            ">H", focus_y
+        )
         cmd = bytes([0xE0, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00])
-        data_out = b"\x00" + struct.pack(">II", focus_x, focus_y)
-        _, status = self._issue_command(cmd, data_out=data_out)
+        _, status = self._issue_command(cmd, data_out=payload)
         if status != StatusType.READY:
             if self.verbose:
                 print(f"    Autofocus command failed (status={status})")
@@ -4148,6 +4077,71 @@ class CoolscanProtocol:
     # ------------------------------------------------------------------
     # VENDOR_E0 command family (10-byte CDB + 9-byte OUT + EXECUTE)
     # ------------------------------------------------------------------
+    # Sub-command register table (23 entries from LS-50 firmware FW:0x4A134)
+    # Sub-cmds used by LS-40: 0xA0 (autofocus), 0xB4 (extended config), 0xD0 (eject)
+    # Sub-cmd  MaxLen  Purpose
+    # 0x40     11      Scan parameters
+    # 0x41     11      Calibration data
+    # 0x42     11      Gain values (host-side parser consumes this)
+    # 0x43     11      Offset values
+    # 0x44     5       Motor position
+    # 0x45     11      Exposure time (auto-exposure calibration loop)
+    # 0x46     11      Focus position
+    # 0x47     11      Lamp settings
+    # 0x80     0       Lamp on/off (trigger only)
+    # 0x81     0       Motor init (trigger only)
+    # 0x91     5       Motor step (direction + count)
+    # 0xA0     9       CCD setup / load preheat [USED BY LS-40]
+    # 0xB0     0       State change (trigger only)
+    # 0xB1     0       State change (trigger only)
+    # 0xB3     13      Config write
+    # 0xB4     9       Extended config [USED BY LS-40]
+    # 0xC0     5       Gain calibration
+    # 0xC1     5       Offset calibration [USED BY LS-40 as frame_select]
+    # 0xD0     0/9     Diagnostic / eject motor [USED BY LS-40]
+    # 0xD1     0       Diagnostic (trigger only)
+    # 0xD2     5       Diagnostic data
+    # 0xD5     5       Extended diagnostic
+    # 0xD6     5       Persistent settings
+    #
+    # Motor positioning sub-commands (from LS-50 firmware RE):
+    #
+    #   0x44 — Motor target position (5 bytes):
+    #     byte 0: motor selector (0x01=scan motor, 0x02=AF/focus motor)
+    #     byte 1: operation mode / step count multiplier
+    #     byte 2: direction/flags (bit 0=direction, bits 4-7=speed profile)
+    #     bytes 3-4: step count (16-bit big-endian)
+    #     FW:0x25908 handler; writes to 0x400790 (motor_state), dispatches via 0x25B6A.
+    #
+    #   0x91 — Motor step (5 bytes): direction + step count, used for incremental moves.
+    #     Same payload format as 0x44 (host driver emits identical 5B layout).
+    #
+    #   0xC1 — Carriage position / frame select (9 bytes):
+    #     byte 5: single-byte frame offset (0-255), used for per-frame setup in batch
+    #     scans.  Rest of payload zeros.  LS-40 pcapng shows this before each batch
+    #     frame: e0/c1 → execute(C1) sequence.
+    #
+    #   0xA0 — Load / cal preheat (9 bytes):
+    #     bytes 3-4: motor step target (varies per scan: 0x07b5 in capture 003)
+    #     bytes 5-8: cal-session counter / scan ID (monotonic across sessions)
+    #     LS-40 uses this for autofocus: payload 00 00 00 05 9b 00 00 XX YY where
+    #     XX YY = focus target position.
+    #
+    # E0 sub=0xB4 host-data validation gate (FW:0x029510):
+    #   The LS-50 firmware validates the first two 32-bit parameters of the 9-byte
+    #   data-out payload: param1 must be in [60, 3600] (μs exposure range) and
+    #   param2 must be 0 or 1. Scanner state @0x400773 must be in {1,2,4,5}
+    #   (active-scan family). If either check fails → sense 0x53.
+    #
+    # Per-channel exposure storage (LS-50 firmware RAM):
+    #   Vendor extension 0x102 (WDB bytes 54-57) values are stored per-channel:
+    #   - Window 1 (Red):   RAM 0x400FAE
+    #   - Window 2 (Green): RAM 0x400FB2
+    #   - Window 3 (Blue):  RAM 0x400FB6
+    #   - Window 9 (IR):    special path (firmware uses different offset).
+    #   Values are in 50ns clock ticks (20 MHz CPU).  Updated by the E0/C1/E1
+    #   auto-exposure calibration loop (E0 sub=0x45 write → C1 trigger → E1 read).
+    #   The scanner reads these ~20 times across scan + calibration routines.
 
     @sends(0xe0, 0xc1)
     def vendor_e0(self, subcode: int, data: bytes) -> bool:
@@ -4202,10 +4196,19 @@ class CoolscanProtocol:
         """Autofocus (VENDOR_E0 subcode 0xa0).
 
         Builds the 9-byte payload with the carriage position in bytes 7-8
-        (big-endian).  Bytes 3-4 are fixed at ``05 9b``.
+        (big-endian 16-bit).  Bytes 3-4 are hardcoded to ``05 9b`` (motor
+        step target), matching the golden fixture and LS-50 capture 003.
 
         The position encodes the Y-axis carriage position for each image
         in the carrier (see plan autofocus-position-tracking data).
+
+        Verified payload format (9 bytes)::
+
+            00 00 00 05 9b 00 00 <pos_hi> <pos_lo>
+            |        |         |  |          |
+            |        |         +--+----------+ position (BE16)
+            |        +-- motor step target (0x059b)
+            +----------- prefix (zeros)
 
         Args:
             position: Carriage Y position (0–65535).
@@ -4214,20 +4217,18 @@ class CoolscanProtocol:
             True if both the command and execute succeed.
         """
         pos_bytes = struct.pack(">H", position)
-        # Payload: 00 00 00 00 05 9b 00 00 <pos_hi> <pos_lo>
-        # That's 10 bytes, but we need exactly 9.
-        # The capture shows: 00 00 00 05 9b 00 00 XX YY (9 bytes)
-        # Actually the plan says bytes 3-4 are 05 9b, position in 7-8.
-        # Layout: [0][1][2][3][4][5][6][7][8]
-        #        00  00  00  05  9b  00  00  XX  YY
         data = bytes([0x00, 0x00, 0x00, 0x05, 0x9b, 0x00, 0x00]) + pos_bytes
         return self.vendor_e0(0xA0, data)
 
     @sends(0xe0, 0xc1)
     def vendor_e0_c1(self, frame_offset: int = 0) -> bool:
-        """Frame select (VENDOR_E0 subcode 0xc1).
+        """Frame select / carriage position (VENDOR_E0 subcode 0xc1).
 
-        Positions the carriage for selective batch scanning.
+        Positions the carriage for selective batch scanning. This is part of
+        the motor positioning family of sub-commands (alongside 0x44 = motor
+        target position, 0x91 = motor step).  The LS-50 firmware dispatches
+        this to the motor/calibration subsystem at FW:0x028B08.
+
         The offset goes in byte 5 of the 9-byte payload.
         The offset is a single byte (0-255) in the capture-derived format.
 
