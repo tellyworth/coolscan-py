@@ -2625,6 +2625,15 @@ class CoolscanProtocol:
         Golden fixture / pcapng: up to 3 attempts; the scanner may return a
         transient ERROR (sense 0x09800100) before becoming READY, so we retry
         on both REISSUE and that specific transient ERROR.
+
+        Between retry attempts, the method reads DTC 0x87 status blocks
+        (6B + 33B or 24B) to signal to the scanner that the host is ready
+        to receive scan data.  This ordering — status reads BEFORE the
+        retry SCAN and BEFORE any TUR polling — is critical: if scan image
+        data reaches the EP2 FIFO before the host completes the status
+        exchange, subsequent USB reads return image bytes instead of
+        command responses, corrupting all further communication.  See
+        kevihiiin/Nikon-Coolscan-RE scan-data-transfer.md Q7.
         """
         if scan_type == ScanType.BATCH:
             cmd = self._build_6byte_command(0x1B, alloc_length=0x04, control=0x00)
@@ -4311,10 +4320,19 @@ class CoolscanProtocol:
         """Autofocus (VENDOR_E0 subcode 0xa0).
 
         Builds the 9-byte payload with the carriage position in bytes 7-8
-        (big-endian).  Bytes 3-4 are fixed at ``05 9b``.
+        (big-endian 16-bit).  Bytes 3-4 are hardcoded to ``05 9b`` (motor
+        step target), matching the golden fixture and LS-50 capture 003.
 
         The position encodes the Y-axis carriage position for each image
         in the carrier (see plan autofocus-position-tracking data).
+
+        Verified payload format (9 bytes)::
+
+            00 00 00 05 9b 00 00 <pos_hi> <pos_lo>
+            |        |         |  |          |
+            |        |         +--+----------+ position (BE16)
+            |        +-- motor step target (0x059b)
+            +----------- prefix (zeros)
 
         Args:
             position: Carriage Y position (0–65535).
@@ -4323,12 +4341,6 @@ class CoolscanProtocol:
             True if both the command and execute succeed.
         """
         pos_bytes = struct.pack(">H", position)
-        # Payload: 00 00 00 00 05 9b 00 00 <pos_hi> <pos_lo>
-        # That's 10 bytes, but we need exactly 9.
-        # The capture shows: 00 00 00 05 9b 00 00 XX YY (9 bytes)
-        # Actually the plan says bytes 3-4 are 05 9b, position in 7-8.
-        # Layout: [0][1][2][3][4][5][6][7][8]
-        #        00  00  00  05  9b  00  00  XX  YY
         data = bytes([0x00, 0x00, 0x00, 0x05, 0x9b, 0x00, 0x00]) + pos_bytes
         return self.vendor_e0(0xA0, data)
 
