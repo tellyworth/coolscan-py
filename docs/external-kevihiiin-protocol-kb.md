@@ -802,6 +802,15 @@ on the LS-40.  Use batch mode (`--batch --frames 6`) for multi-frame
 scanning — it scans frame-by-frame with effectively zero gap between
 consecutive frames.
 
+**Best available approach for full-strip output**: batch scan with
+consecutive-frame positioning.  The scanner returns to READY naturally
+after each frame's exact byte count — no STOP_SCAN between frames.
+Set each frame's WDB ``frame_offset`` = previous offset + frame_height,
+producing zero-gap output (offsets differ by ~4330–4360, within ±30 of
+the nominal 4332 frame height).  The motor runs continuously across frames
+and the ∼20–30 unit shift per frame is the prescan edge detection
+adjustment; omit the edge-detection pass for fully-uniform spacing.
+
 ### 12.12 CONTROL_FRAME Defines Tri-Linear CCD Color Rows
 
 The 3 entries in every CONTROL_FRAME payload define **per-color-channel
