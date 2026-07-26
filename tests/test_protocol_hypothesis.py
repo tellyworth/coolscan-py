@@ -72,57 +72,72 @@ class TestLutGeneration:
 
 @pytest.mark.property_test
 class TestWdbRoundTrip:
-    """Property-based tests for WindowDescriptorBlock serialization."""
+    """Property-based tests for WindowDescriptorBlock 58-byte serialization."""
 
     @given(
-        window_id=st.integers(min_value=0, max_value=255),
+        channel=st.integers(min_value=1, max_value=9),
         x_res=st.integers(min_value=96, max_value=5000),
         y_res=st.integers(min_value=96, max_value=5000),
-        ulx=st.integers(min_value=0, max_value=50000),
-        uly=st.integers(min_value=0, max_value=50000),
+        frame_offset=st.integers(min_value=0, max_value=50000),
         width=st.integers(min_value=100, max_value=5000),
         length=st.integers(min_value=100, max_value=50000),
         exposure=st.integers(min_value=1, max_value=0xFFFFFFFF),
+        wdb_mode=st.integers(min_value=0, max_value=0xFFFF),
+        transfer_byte=st.integers(min_value=0, max_value=255),
+        status_byte=st.integers(min_value=0, max_value=255),
+        film_flag=st.integers(min_value=0, max_value=255),
+        sub_mode=st.integers(min_value=0, max_value=255),
     )
     @settings(max_examples=100)
-    def test_wdb_roundtrip(self, window_id, x_res, y_res, ulx, uly, width, length, exposure):
-        """WDB to_bytes/from_bytes round-trip preserves all fields."""
+    def test_wdb_roundtrip(
+        self, channel, x_res, y_res, frame_offset, width, length,
+        exposure, wdb_mode, transfer_byte, status_byte, film_flag, sub_mode,
+    ):
+        """WDB to_bytes_58/from_bytes_58 round-trip preserves all 58-byte fields."""
         original = WindowDescriptorBlock(
-            window_id=window_id,
+            channel=channel,
             x_resolution=x_res,
             y_resolution=y_res,
-            ulx=ulx,
-            uly=uly,
+            frame_offset=frame_offset,
             width=width,
             length=length,
             exposure=exposure,
+            wdb_mode=wdb_mode,
+            transfer_byte=transfer_byte,
+            status_byte=status_byte,
+            film_flag=film_flag,
+            sub_mode=sub_mode,
         )
 
-        data = original.to_bytes()
-        restored = WindowDescriptorBlock.from_bytes(data)
+        data = original.to_bytes_58()
+        restored = WindowDescriptorBlock.from_bytes_58(data)
 
-        assert restored.window_id == window_id
+        assert restored.channel == channel
         assert restored.x_resolution == x_res
         assert restored.y_resolution == y_res
-        assert restored.ulx == ulx
-        assert restored.uly == uly
+        assert restored.frame_offset == frame_offset
         assert restored.width == width
         assert restored.length == length
         assert restored.exposure == exposure
+        assert restored.wdb_mode == wdb_mode
+        assert restored.transfer_byte == transfer_byte
+        assert restored.status_byte == status_byte
+        assert restored.film_flag == film_flag
+        assert restored.sub_mode == sub_mode
 
     @given(exposure=st.integers(min_value=0, max_value=0xFFFFFFFF))
     @settings(max_examples=50)
     def test_exposure_bytes_roundtrip(self, exposure):
-        """Exposure value stored at bytes 0x54-0x57 round-trips correctly."""
+        """Exposure value stored at bytes 54-57 round-trips correctly."""
         wdb = WindowDescriptorBlock(exposure=exposure)
-        data = wdb.to_bytes()
+        data = wdb.to_bytes_58()
 
-        stored = struct.unpack(">I", data[0x54:0x58])[0]
+        stored = struct.unpack(">I", data[54:58])[0]
         assert stored == exposure, (
-            f"exposure {exposure} stored as {stored} at bytes 0x54-0x57"
+            f"exposure {exposure} stored as {stored} at bytes 54-57"
         )
 
-        restored = WindowDescriptorBlock.from_bytes(data)
+        restored = WindowDescriptorBlock.from_bytes_58(data)
         assert restored.exposure == exposure
 
 

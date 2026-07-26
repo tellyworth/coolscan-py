@@ -398,56 +398,38 @@ class TestProtocolBuildMethods:
 
 @pytest.mark.property_test
 class TestWDBProperties:
-    """Verify WindowDescriptorBlock serialization properties."""
+    """Verify WindowDescriptorBlock 58-byte serialization properties."""
 
     def test_wdb_size(self):
-        """WDB serialization produces 117 bytes."""
+        """WDB serialization produces 58 bytes."""
         wdb = WindowDescriptorBlock()
-        data = wdb.to_bytes()
-        assert len(data) == 117
-
-    def test_wdb_scan_mode_encoding(self):
-        """scan_mode=0x01 encodes as bits 4-5 of byte 0x31."""
-        wdb = WindowDescriptorBlock()
-        wdb.scan_mode = 0x01
-        data = wdb.to_bytes()
-        assert data[0x31] == 0x10  # 0x01 << 4
-
-    def test_wdb_scan_mode_normal(self):
-        """scan_mode=0x00 (normal) encodes as 0x00 at byte 0x31."""
-        wdb = WindowDescriptorBlock()
-        wdb.scan_mode = 0x00
-        data = wdb.to_bytes()
-        assert data[0x31] == 0x00
+        data = wdb.to_bytes_58()
+        assert len(data) == 58
 
     def test_wdb_exposure_field(self):
         """Canonical exposure is 32-bit big-endian at bytes 54-57."""
         wdb = WindowDescriptorBlock()
         wdb.exposure = 0x12345678
-        data = wdb.to_bytes()
-        assert data[0x54:0x58] == struct.pack(">I", 0x12345678)
+        data = wdb.to_bytes_58()
+        assert data[54:58] == struct.pack(">I", 0x12345678)
 
     def test_wdb_roundtrip(self):
-        """WDB to_bytes -> from_bytes round-trips correctly."""
+        """WDB to_bytes_58 -> from_bytes_58 round-trips correctly."""
         original = WindowDescriptorBlock(
-            window_id=0x09,
             x_resolution=2900,
             y_resolution=2900,
             width=2592,
             length=3888,
             exposure=123456,
-            scan_mode=0x01,
         )
-        data = original.to_bytes()
-        restored = WindowDescriptorBlock.from_bytes(data)
+        data = original.to_bytes_58()
+        restored = WindowDescriptorBlock.from_bytes_58(data)
 
-        assert restored.window_id == original.window_id
         assert restored.x_resolution == original.x_resolution
         assert restored.y_resolution == original.y_resolution
         assert restored.width == original.width
         assert restored.length == original.length
         assert restored.exposure == original.exposure
-        assert restored.scan_mode == original.scan_mode
 
 
 # =========================================================================
@@ -599,7 +581,6 @@ class TestDataTypeEnum:
             0x87: "STATUS_PROGRESS",
             0x8E: "EXPOSURE_CALIBRATION",
             0x8F: "CONTROL_FRAME",
-            0x88: "IMAGE_POSITIONS",
             0x92: "BORDER_POSITION",
             0x8C: "CHANNEL_STATE",
             0xA0: "SHADING_DATA",

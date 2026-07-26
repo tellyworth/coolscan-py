@@ -37,8 +37,7 @@ Key types:
     ``StatusType`` — ``READY``, ``ERROR``, ``REISSUE``, ``BUSY``, ...
     ``DataType`` — datatype codes used in ``READ(0x28)``/``WRITE(0x2a)`` byte 2
     ``WindowDescriptorBlock`` — 58-byte LS-40 ED WDB (``to_bytes_58`` /
-        ``from_bytes_58`` match pcapng captures; ``to_bytes`` / ``from_bytes``
-        implement the legacy 117-byte SANE format)
+        ``from_bytes_58`` match pcapng captures)
 
 Wire-format authority: ``ls40-single-bw.pcapng`` (primary) and
 ``reference/golden_single_bw.txt`` (auto-derived from pcapng).  The
@@ -163,7 +162,6 @@ class DataType(Enum):
     STATUS_PROGRESS = 0x87  # Internal status/progress information
     EXPOSURE_CALIBRATION = 0x8E  # Exposure/calibration tables
     CONTROL_FRAME = 0x8F  # Control/frame position data (WRITE)
-    IMAGE_POSITIONS = 0x88  # SANE coolscan3 uses this for set_boundary; LS-40 ED rejects it
     BORDER_POSITION = 0x92  # LS-40 ED golden fixture line 203: prescan boundary
     CALIBRATION_REFERENCE  = 0x93   # LS-50 only: fixed 12B flash constant (R/G/B reference triplet)
                                      # Absent from all LS-40 captures. DTC exists in LS-50 firmware
@@ -181,8 +179,6 @@ class WindowDescriptorBlock:
 
     The 58-byte WDB format derived from the LS-40 ED pcapng captures stores
     exposure as a single 32-bit big-endian value at bytes 54–57 (10ns units).
-    The legacy per-channel fields (exposure_r/g/b, shift_r/g/b, offset_r/g/b)
-    are deprecated; use the ``exposure`` field instead.
     """
 
     window_id: int = 0x00
@@ -209,17 +205,7 @@ class WindowDescriptorBlock:
     contrast_b: int = 128
     # Calibrated exposure (32-bit, 10ns units) written at WDB bytes 54–57.
     exposure: int = 0
-    # Deprecated: per-channel exposure bytes at 0x49–0x4B (SANE format).
-    exposure_r: int = 120
-    exposure_g: int = 120
-    exposure_b: int = 100
-    shift_r: int = 128
-    shift_g: int = 128
-    shift_b: int = 128
-    offset_r: int = 0
-    offset_g: int = 0
-    offset_b: int = 0
-    # 58-byte capture WDB fields (not present in SANE 117-byte format)
+    # 58-byte capture WDB fields
     channel: int = 1  # Channel: 1=R, 2=G, 3=B, 9=IR
     frame_offset: int = 0  # Frame/boundary offset from WRITE 0x8f table
     wdb_mode: int = 0x0005  # 0x0002=prescan, 0x0005=preview/main
@@ -227,123 +213,6 @@ class WindowDescriptorBlock:
     status_byte: int = 0x00  # 0x00=normal, 0x03=post-eject ch1
     film_flag: int = 0x00  # 0x81=prescan/low-res preview, 0x80=IR preview, 0x00=main
     sub_mode: int = 0x01  # 0x01=prescan/main, 0x02=low-res 96 DPI preview
-
-    def to_bytes(self) -> bytes:
-        """Convert WDB to bytes."""
-        data = bytearray(117)  # Standard WDB size
-
-        # Basic fields
-        data[0x00] = self.window_id
-        data[0x01] = self.auto_flag
-
-        # Resolution (big-endian)
-        data[0x02:0x04] = struct.pack(">H", self.x_resolution)
-        data[0x04:0x06] = struct.pack(">H", self.y_resolution)
-
-        # Position and size (big-endian)
-        data[0x06:0x0A] = struct.pack(">L", self.ulx)
-        data[0x0A:0x0E] = struct.pack(">L", self.uly)
-        data[0x0E:0x12] = struct.pack(">L", self.width)
-        data[0x12:0x16] = struct.pack(">L", self.length)
-
-        # Image parameters
-        data[0x16] = self.brightness
-        data[0x18] = self.contrast
-        data[0x19] = self.composition
-        data[0x1A] = self.bits_per_pixel
-
-        # Pixel counts (big-endian)
-        data[0x28:0x2C] = struct.pack(">L", self.width)
-        data[0x2C:0x30] = struct.pack(">L", self.length)
-
-        # Scan parameters (SANE coolscan-scsidef.h:349-367)
-        # byte 0x30: bit 4 = negative flag, bits 0-1 = dropout color
-        neg_flag = 0x10 if self.negative_dropout else 0x00
-        dropout_color = self.negative_dropout & 0x03 if self.negative_dropout else 0x00
-        data[0x30] = neg_flag | dropout_color
-        # byte 0x31: bits 4-5 = scan mode (0x00=normal, 0x01=prescan)
-        data[0x31] = (self.scan_mode & 0x03) << 4
-        data[0x32] = self.transfer_mode
-        data[0x33] = self.gamma_selection
-
-        # Color adjustments
-        data[0x37] = self.brightness_r
-        data[0x38] = self.brightness_g
-        data[0x39] = self.brightness_b
-        data[0x3A] = self.contrast_r
-        data[0x3B] = self.contrast_g
-        data[0x3C] = self.contrast_b
-
-        # Exposure settings (deprecated per-channel bytes at 0x49-0x4B)
-        data[0x49] = self.exposure_r
-        data[0x4A] = self.exposure_g
-        data[0x4B] = self.exposure_b
-
-        # Color shifts
-        data[0x52] = self.shift_r
-        data[0x53] = self.shift_g
-
-        # Bytes 54–57: 32-bit big-endian exposure (10ns units).
-        # This is the canonical exposure field per the capture-derived WDB format.
-        data[0x54:0x58] = struct.pack(">I", self.exposure)
-
-        return bytes(data)
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "WindowDescriptorBlock":
-        """Create WDB from bytes."""
-        if len(data) < 117:
-            raise ValueError("WDB data too short")
-
-        wdb = cls()
-
-        # Parse basic fields
-        wdb.window_id = data[0x00]
-        wdb.auto_flag = data[0x01]
-
-        # Resolution
-        wdb.x_resolution = struct.unpack(">H", data[0x02:0x04])[0]
-        wdb.y_resolution = struct.unpack(">H", data[0x04:0x06])[0]
-
-        # Position and size
-        wdb.ulx = struct.unpack(">L", data[0x06:0x0A])[0]
-        wdb.uly = struct.unpack(">L", data[0x0A:0x0E])[0]
-        wdb.width = struct.unpack(">L", data[0x0E:0x12])[0]
-        wdb.length = struct.unpack(">L", data[0x12:0x16])[0]
-
-        # Image parameters
-        wdb.brightness = data[0x16]
-        wdb.contrast = data[0x18]
-        wdb.composition = data[0x19]
-        wdb.bits_per_pixel = data[0x1A]
-
-        # Scan parameters (SANE coolscan-scsidef.h:349-367)
-        wdb.negative_dropout = (data[0x30] >> 4) & 0x01
-        wdb.scan_mode = (data[0x31] >> 4) & 0x03
-        wdb.transfer_mode = data[0x32]
-        wdb.gamma_selection = data[0x33]
-
-        # Color adjustments
-        wdb.brightness_r = data[0x37]
-        wdb.brightness_g = data[0x38]
-        wdb.brightness_b = data[0x39]
-        wdb.contrast_r = data[0x3A]
-        wdb.contrast_g = data[0x3B]
-        wdb.contrast_b = data[0x3C]
-
-        # Exposure settings (deprecated per-channel bytes at 0x49-0x4B)
-        wdb.exposure_r = data[0x49]
-        wdb.exposure_g = data[0x4A]
-        wdb.exposure_b = data[0x4B]
-
-        # Color shifts
-        wdb.shift_r = data[0x52]
-        wdb.shift_g = data[0x53]
-
-        # Bytes 54–57: 32-bit big-endian exposure (10ns units)
-        wdb.exposure = struct.unpack(">I", data[0x54:0x58])[0]
-
-        return wdb
 
     def to_bytes_58(self) -> bytes:
         """Build the 58-byte capture-aligned WDB from dataclass fields.
@@ -500,9 +369,6 @@ class ScanParameters:
     x_max: int = 0
     y_max: int = 0
     exposure: float = 1.0
-    exposure_r: float = 1200.0
-    exposure_g: float = 1200.0
-    exposure_b: float = 1000.0
 
 
 @dataclass
@@ -2078,10 +1944,7 @@ class CoolscanProtocol:
         built-in frame detection — it simply scans the region specified by
         SET_WINDOW geometry.
 
-        The SANE coolscan3 backend sends SEND with datatype 0x88
-        (IMAGE_POSITIONS) for set_boundary, but the LS-40 ED rejects
-        0x88 with ILLEGAL REQUEST (ASC=0x26). The capture shows the
-        LS-40 ED uses SEND 0x8f (CONTROL_FRAME) with a 52-byte payload.
+        The LS-40 ED uses WRITE DTC 0x8F (CONTROL_FRAME) with a 52-byte payload.
 
         Args:
             params: Scan parameters (unused; payload is fixed from capture).
@@ -2310,9 +2173,7 @@ class CoolscanProtocol:
     def set_boundary_for_prescan(self) -> bool:
         """Send BORDER_POSITION before prescan (golden fixture line 203).
 
-        The SANE coolscan3 backend sends SEND with datatype 0x88 (IMAGE_POSITIONS)
-        for set_boundary, but the LS-40 ED rejects 0x88 with ILLEGAL REQUEST.
-        The golden fixture shows the LS-40 ED uses SEND 0x92 (BORDER_POSITION)
+        The golden fixture shows the LS-40 ED uses WRITE DTC 0x92 (BORDER_POSITION)
         with a 4-byte payload before prescan.
 
         Golden fixture (line 203-207):
