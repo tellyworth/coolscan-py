@@ -2421,8 +2421,8 @@ def extract_image_frames(
         )
 
         # Build frame name
-        res_short = resolution_str.split(" ")[0]  # e.g. "2900x2900"
-        frame_name = f"{basename}_frame_{frame_idx:03d}_{scan_type}_{res_short.replace('x', 'x')}dpi"
+        res_short = resolution_str.split("x")[0]  # e.g. "2900"
+        frame_name = f"{basename}_frame_{frame_idx:03d}_{scan_type}_{res_short}dpi"
 
         # TIFF output
         tiff_path = None
