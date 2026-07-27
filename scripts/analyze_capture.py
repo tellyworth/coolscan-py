@@ -2240,11 +2240,10 @@ def _build_frame_info(events: List[Event]) -> List[Dict[str, Any]]:
                             break
                 continue
 
-            # READ(10) with datatype=0x00
+            # READ(10) with datatype=0x00 — subsequent chunks accumulate
             if (ev.raw[0] == 0x28 and len(ev.raw) >= 10 and ev.raw[2] == 0x00):
                 in_read = True
                 current_wdb = active_wdb
-                current_data = bytearray()
                 continue
 
             # Any other OUT command (not 0x00 TUR, not 0xd0 PHASE_CHECK)
