@@ -197,3 +197,4 @@ scan*.png
 /logs
 hardware_scan_output*
 *.log.txt
+frametest/
