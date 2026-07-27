@@ -2135,43 +2135,205 @@ def json_output(
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# Frame detection from WDBs
+# ---------------------------------------------------------------------------
+
+
+def _classify_scan_type(x_res: int, channel: int) -> str:
+    """Classify a scan frame by resolution and channel."""
+    if x_res <= 120:
+        return "prescan"
+    if x_res >= 1000:
+        return "full_res_ir" if channel == 9 else "full_res"
+    return "preview_ir" if channel == 9 else "preview"
+
+
+def _build_frame_info(events: List[Event]) -> List[Dict[str, Any]]:
+    """Walk events and build frame info dicts from WDBs and DATA_BLOCKs.
+
+    Returns a list of dicts, one per detected image frame.
+    """
+    # Active WDB state — updated when we see a SCAN command
+    active_wdb: Optional[Dict[str, Any]] = None
+
+    # Current frame being accumulated
+    current_data = bytearray()
+    current_wdb: Optional[Dict[str, Any]] = None
+    in_read = False
+
+    frames: List[Dict[str, Any]] = []
+
+    def _finalize_frame() -> None:
+        nonlocal current_data, current_wdb, in_read
+        if not current_wdb or not current_data:
+            return
+        w = current_wdb
+        width = w["width"]
+        h_declared = w["height"]
+        channel = w["channel"]
+        num_channels = 1 if channel == 9 else 3
+        x_res = w["x_res"]
+        y_res = w["y_res"]
+        transfer_byte = w["transfer_byte"]
+
+        # Determine depth
+        if x_res >= 1000 and channel != 9 and transfer_byte == 0x0C:
+            depth = 12
+        else:
+            depth = 8
+
+        bytes_per_channel = 2 if depth > 8 else 1
+        h_actual = len(current_data) // (width * num_channels * bytes_per_channel)
+        if h_actual == 0:
+            return
+
+        scan_type = _classify_scan_type(x_res, channel)
+        has_ir = channel == 9
+
+        frames.append({
+            "scan_type": scan_type,
+            "resolution_str": f"{x_res}x{y_res} DPI",
+            "width": width,
+            "h_declared": h_declared,
+            "h_actual": h_actual,
+            "has_ir": has_ir,
+            "bytes": len(current_data),
+            "offset": w["offset"],
+            "data": bytes(current_data),
+            "depth": depth,
+            "num_channels": num_channels,
+        })
+
+    for ev in events:
+        if not ev.raw:
+            continue
+
+        if ev.direction == "out":
+            # SCAN (0x24) — look for WDB in next few events
+            if ev.raw[0] == 0x24:
+                # Finalize any previous frame first
+                _finalize_frame()
+                current_data = bytearray()
+                current_wdb = None
+                in_read = False
+
+                # Look ahead up to 10 events for WDB DATA_OUT
+                n = len(events)
+                ev_idx = ev.index
+                for k in range(ev_idx + 1, min(ev_idx + 11, n)):
+                    candidate = events[k]
+                    if candidate.direction == "out" and len(candidate.raw) == 58:
+                        if candidate.decoded and candidate.decoded.cmd_name.startswith("DATA_OUT"):
+                            wdb = WindowDescriptorBlock.from_bytes_58(candidate.raw)
+                            active_wdb = {
+                                "x_res": wdb.x_resolution,
+                                "y_res": wdb.y_resolution,
+                                "width": wdb.width,
+                                "height": wdb.length,
+                                "offset": wdb.frame_offset,
+                                "channel": wdb.channel,
+                                "transfer_byte": wdb.transfer_byte,
+                            }
+                            break
+                continue
+
+            # READ(10) with datatype=0x00
+            if (ev.raw[0] == 0x28 and len(ev.raw) >= 10 and ev.raw[2] == 0x00):
+                in_read = True
+                current_wdb = active_wdb
+                current_data = bytearray()
+                continue
+
+            # Any other OUT command (not 0x00 TUR, not 0xd0 PHASE_CHECK)
+            # ends the current data collection
+            if ev.raw[0] not in (0x00, 0xd0):
+                if in_read and current_data:
+                    _finalize_frame()
+                in_read = False
+                current_data = bytearray()
+                current_wdb = None
+                continue
+
+        elif ev.direction == "in":
+            if in_read and ev.decoded and ev.decoded.cmd_name == "DATA_BLOCK":
+                current_data.extend(ev.raw)
+
+    # Finalize last frame
+    _finalize_frame()
+
+    return frames
+
+
+def _print_frame_list(frames_info: List[Dict[str, Any]]) -> None:
+    """Print frame metadata as a TSV table to stdout."""
+    headers = [
+        "idx", "scan_type", "resolution", "width",
+        "h_declared", "h_actual", "has_ir", "bytes", "offset",
+    ]
+    print("\t".join(headers))
+    for i, fi in enumerate(frames_info):
+        row = [
+            str(i),
+            fi["scan_type"],
+            fi["resolution_str"],
+            str(fi["width"]),
+            str(fi["h_declared"]),
+            str(fi["h_actual"]),
+            "yes" if fi["has_ir"] else "no",
+            str(fi["bytes"]),
+            str(fi["offset"]),
+        ]
+        print("\t".join(row))
+
+
 # ---------------------------------------------------------------------------
 # Image extraction from captures
 # ---------------------------------------------------------------------------
 
 
+def _parse_frame_ids(spec: str) -> Optional[List[int]]:
+    """Parse a frame selector string like '0,2-4,6' into a list of indices.
+
+    Returns None for 'all' (meaning all frames), or a sorted list of indices.
+    """
+    if spec == "all":
+        return None
+    indices: List[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            indices.extend(range(int(lo), int(hi) + 1))
+        else:
+            indices.append(int(part))
+    return sorted(set(indices))
+
+
 def extract_image_frames(
     events: List[Event],
     output_dir: str,
-    depth: int = 12,
-    width: int = 2880,
-    height: int = 4332,
-    num_channels: int = 3,
-    fmt: str = "both",
+    frame_ids: Optional[List[int]] = None,
+    fmt: str = "jpeg",
 ) -> List[Dict[str, Any]]:
     """Extract image frames from capture events and save as TIFF/JPEG.
 
-    Walks through decoded events looking for READ(10) commands (0x28) with
-    datatype=0x00 (IMAGE_DATA).  Groups consecutive DATA_BLOCK responses
-    belonging to the same image read sequence.  A new frame starts when a
-    SCAN (0x24) command is encountered (Stage C setup in batch scans).
-
-    For each frame, concatenates all DATA_BLOCK payloads, decodes the raw
-    image data using ``_parse_scan_data``, and saves TIFF and/or JPEG output.
+    Parameters are auto-detected from WDB payloads within the capture.
 
     Args:
         events: Decoded events (call ``_decode_all()`` first).
         output_dir: Directory to write output files.
-        depth: Bit depth (8 or 12).
-        width: Image width in pixels.
-        height: Image height in pixels.
-        num_channels: Number of colour channels (3 for RGB).
+        frame_ids: Frame indices to extract. None means all frames.
+            Empty list means all full-res frames only (default).
         fmt: Output format: "tiff", "jpeg", or "both".
 
     Returns:
         List of dicts with keys: frame_index, bytes_count, tiff_path, jpeg_path.
     """
     import numpy as np
+    from PIL import Image
 
     from coolscan.scanner import LS40_CHANNEL_OFFSETS, _parse_scan_data
     from coolscan.cli import (
@@ -2183,107 +2345,102 @@ def extract_image_frames(
     os.makedirs(output_dir, exist_ok=True)
     out_path = Path(output_dir).resolve()
 
-    # Collect image data groups keyed by frame index
-    # A new frame starts when we see a SCAN (0x24) command
-    current_frame_data = bytearray()
-    current_frame_active = False
-    frames: List[bytearray] = []
+    # Build frame info from events
+    frames_info = _build_frame_info(events)
 
-    for ev in events:
-        if not ev.raw or not ev.decoded:
-            continue
-
-        # OUT commands
-        if ev.direction == "out":
-            # SCAN command (0x24) marks the start of a new frame setup
-            if ev.raw[0] == 0x24:
-                # Flush any accumulated data from the previous frame
-                if current_frame_active and current_frame_data:
-                    frames.append(bytearray(current_frame_data))
-                current_frame_data = bytearray()
-                current_frame_active = True
-                continue
-
-            # READ(10) with datatype=0x00 (IMAGE_DATA)
-            if (ev.raw[0] == 0x28 and len(ev.raw) >= 10
-                    and ev.raw[2] == 0x00):
-                # This is an image data read — collect subsequent DATA_BLOCKs
-                current_frame_active = True
-                continue
-
-            # Any other OUT command ends the current data collection
-            if not ev.raw[0] in (0x00, 0xd0):  # TUR and PHASE_CHECK are noise
-                if current_frame_active and current_frame_data:
-                    frames.append(bytearray(current_frame_data))
-                current_frame_active = False
-                current_frame_data = bytearray()
-
-        # IN responses
-        elif ev.direction == "in":
-            # DATA_BLOCK responses contain actual image data
-            if (current_frame_active
-                    and ev.decoded.cmd_name == "DATA_BLOCK"):
-                current_frame_data.extend(ev.raw)
-
-    # Flush final frame
-    if current_frame_active and current_frame_data:
-        frames.append(bytearray(current_frame_data))
-
-    if not frames:
+    if not frames_info:
         print("No image frames found in capture.", file=sys.stderr)
         return []
 
     # Determine basename from output directory
     basename = out_path.stem or "scan"
 
+    # Filter frames by frame_ids
+    if frame_ids is None:
+        # "all" — extract every frame
+        selected = list(enumerate(frames_info))
+    elif frame_ids:
+        # Specific frame indices
+        selected = [(i, fi) for i, fi in enumerate(frames_info) if i in frame_ids]
+    else:
+        # Empty list: default — all full-res frames (skip prescan/preview)
+        selected = [
+            (i, fi) for i, fi in enumerate(frames_info)
+            if fi["scan_type"] in ("full_res", "full_res_ir")
+        ]
+
+    if not selected:
+        print("No matching frames found.", file=sys.stderr)
+        return []
+
     results: List[Dict[str, Any]] = []
     total_bytes = 0
 
-    for frame_idx, scan_data in enumerate(frames):
-        print(f"  Frame {frame_idx + 1}/{len(frames)}: {len(scan_data)} bytes")
+    for frame_idx, fi in selected:
+        scan_data = fi["data"]
+        width = fi["width"]
+        h_actual = fi["h_actual"]
+        num_channels = fi["num_channels"]
+        depth = fi["depth"]
+        has_ir = fi["has_ir"]
+        scan_type = fi["scan_type"]
+        resolution_str = fi["resolution_str"]
+        h_declared = fi["h_declared"]
+
+        print(f"  Frame {frame_idx} ({scan_type}): {len(scan_data)} bytes")
         total_bytes += len(scan_data)
 
-        # Calculate actual height from data size
+        # Warn on truncated data
         bytes_per_channel = 2 if depth > 8 else 1
-        expected_bytes = height * width * num_channels * bytes_per_channel
-        actual_height = len(scan_data) // (width * num_channels * bytes_per_channel)
-        if actual_height < 100:
-            # Skip prescan/preview frames that are much smaller than full-res
+        declared_bytes = width * h_declared * num_channels * bytes_per_channel
+        if len(scan_data) < 0.5 * declared_bytes:
             print(
-                f"    Skipping frame {frame_idx + 1}: "
-                f"data too small for full-res ({len(scan_data)} bytes, "
-                f"height={actual_height}, expected ~{height})",
+                f"    Warning: capture truncated — got {len(scan_data)} bytes, "
+                f"expected {declared_bytes} from WDB",
                 file=sys.stderr,
             )
-            continue
 
         # Parse raw scan data
+        if has_ir:
+            channel_offsets = (0,)
+        else:
+            channel_offsets = LS40_CHANNEL_OFFSETS
+
         img_arr, trailing = _parse_scan_data(
-            scan_data,
+            bytearray(scan_data),
             width=width,
-            height=actual_height,
+            height=h_actual,
             num_channels=num_channels,
             depth=depth,
             format="plane",
-            channel_offsets=LS40_CHANNEL_OFFSETS,
+            channel_offsets=channel_offsets,
         )
 
-        # Build RGB array
-        rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
-
-        # Build output paths
-        frame_name = f"{basename}_frame_{frame_idx}"
+        # Build frame name
+        res_short = resolution_str.split(" ")[0]  # e.g. "2900x2900"
+        frame_name = f"{basename}_frame_{frame_idx:03d}_{scan_type}_{res_short.replace('x', 'x')}dpi"
 
         # TIFF output
         tiff_path = None
         if fmt in ("tiff", "both"):
             tiff_p = out_path / f"{frame_name}.tiff"
-            # Scale 12-bit to full 16-bit range for TIFF storage
-            if depth > 8 and rgb_arr.dtype == np.uint16:
-                tiff_rgb = (rgb_arr.astype(np.uint32) * 65535 // 4095).astype(np.uint16)
+            if has_ir:
+                # Single-channel IR: write as grayscale TIFF
+                if depth > 8:
+                    ir_data = img_arr[:, :, 0].astype(np.uint16)
+                    ir_data = (ir_data.astype(np.uint32) * 65535 // 4095).astype(np.uint16)
+                    pil_img = Image.fromarray(ir_data, mode="I;16")
+                else:
+                    ir_data = img_arr[:, :, 0].astype(np.uint8)
+                    pil_img = Image.fromarray(ir_data, mode="L")
+                pil_img.save(str(tiff_p))
             else:
-                tiff_rgb = rgb_arr
-            _save_tiff_dual_ifd(tiff_rgb, None, tiff_p, exif_data=None)
+                rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
+                if depth > 8 and rgb_arr.dtype == np.uint16:
+                    tiff_rgb = (rgb_arr.astype(np.uint32) * 65535 // 4095).astype(np.uint16)
+                else:
+                    tiff_rgb = rgb_arr
+                _save_tiff_dual_ifd(tiff_rgb, None, tiff_p, exif_data=None)
             tiff_path = str(tiff_p)
             print(f"    Saved TIFF: {tiff_p}")
 
@@ -2291,18 +2448,24 @@ def extract_image_frames(
         jpeg_path = None
         if fmt in ("jpeg", "both"):
             jpeg_p = out_path / f"{frame_name}.jpg"
-            # _apply_auto_adjust expects 8-bit uint8 input
-            if rgb_arr.dtype == np.uint16:
-                jpeg_input = (rgb_arr >> 4).astype(np.uint8)
+            if has_ir:
+                # Single-channel IR: convert to 8-bit grayscale JPEG
+                if depth > 8:
+                    ir_8bit = (img_arr[:, :, 0].astype(np.uint32) >> 4).astype(np.uint8)
+                else:
+                    ir_8bit = img_arr[:, :, 0].astype(np.uint8)
+                pil_img = Image.fromarray(ir_8bit, mode="L")
+                pil_img.save(str(jpeg_p), "JPEG")
             else:
-                jpeg_input = rgb_arr
-            jpeg_arr = np.ascontiguousarray(jpeg_input)
-            # Workaround: _apply_auto_adjust assumes 8-bit input; we feed
-            # it the down-converted 8-bit data directly.  The auto-adjust
-            # performs negative inversion + histogram stretch + gamma.
-            jpeg_arr = _apply_auto_adjust(jpeg_arr)
-            jpeg_arr = np.ascontiguousarray(jpeg_arr)
-            _save_jpeg(jpeg_arr, jpeg_p, exif_data=None)
+                rgb_arr = np.ascontiguousarray(img_arr[:, :, 0:3])
+                if rgb_arr.dtype == np.uint16:
+                    jpeg_input = (rgb_arr >> 4).astype(np.uint8)
+                else:
+                    jpeg_input = rgb_arr
+                jpeg_arr = np.ascontiguousarray(jpeg_input)
+                jpeg_arr = _apply_auto_adjust(jpeg_arr)
+                jpeg_arr = np.ascontiguousarray(jpeg_arr)
+                _save_jpeg(jpeg_arr, jpeg_p, exif_data=None)
             jpeg_path = str(jpeg_p)
             print(f"    Saved JPEG: {jpeg_p}")
 
@@ -2402,28 +2565,20 @@ def main() -> int:
         help="Show per-datatype transfer totals (declared vs actual bytes)",
     )
     parser.add_argument(
-        "--extract-images", metavar="DIR",
-        help="Extract image frames from capture and save as TIFF/JPEG to DIR",
+        "--extract-images", metavar="FRAMES",
+        help="Extract image frames (e.g. '0,2-4,6' or 'all')",
     )
     parser.add_argument(
-        "--extract-depth", type=int, choices=[8, 12], default=12,
-        help="Bit depth for image extraction (default: 12)",
+        "--output-dir", default=".",
+        help="Output directory for extracted images (default: current directory)",
     )
     parser.add_argument(
-        "--extract-width", type=int, default=2880,
-        help="Image width in pixels for extraction (default: 2880)",
+        "--extract-format", choices=["tiff", "jpeg", "both"], default="jpeg",
+        help="Output format for extraction (default: jpeg)",
     )
     parser.add_argument(
-        "--extract-height", type=int, default=4332,
-        help="Image height in pixels for extraction (default: 4332)",
-    )
-    parser.add_argument(
-        "--extract-channels", type=int, default=3,
-        help="Number of colour channels for extraction (default: 3)",
-    )
-    parser.add_argument(
-        "--extract-format", choices=["tiff", "jpeg", "both"], default="both",
-        help="Output format for extraction (default: both)",
+        "--list-frames", action="store_true",
+        help="List detected image frames as a TSV table",
     )
 
     args = parser.parse_args()
@@ -2544,6 +2699,12 @@ def main() -> int:
         annotation_issues = annotate_protocol(events)
         issues.extend(annotation_issues)
 
+    # --list-frames: print frame table and exit
+    if args.list_frames:
+        frames_info = _build_frame_info(events)
+        _print_frame_list(frames_info)
+        return 0
+
     # Extraction outputs (TSV to stdout, unless --json)
     if not args.json:
         if args.extract_wdbs:
@@ -2565,13 +2726,11 @@ def main() -> int:
             print_datatype_summary(events)
 
         if args.extract_images:
+            frame_ids = _parse_frame_ids(args.extract_images)
             extract_image_frames(
                 events,
-                output_dir=args.extract_images,
-                depth=args.extract_depth,
-                width=args.extract_width,
-                height=args.extract_height,
-                num_channels=args.extract_channels,
+                output_dir=args.output_dir,
+                frame_ids=frame_ids,
                 fmt=args.extract_format,
             )
 
