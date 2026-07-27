@@ -2196,6 +2196,7 @@ def _build_frame_info(events: List[Event]) -> List[Dict[str, Any]]:
         frames.append({
             "scan_type": scan_type,
             "resolution_str": f"{x_res}x{y_res} DPI",
+            "x_res": x_res,
             "width": width,
             "h_declared": h_declared,
             "h_actual": h_actual,
@@ -2400,10 +2401,14 @@ def extract_image_frames(
             )
 
         # Parse raw scan data
+        # LS40_CHANNEL_OFFSETS are calibrated for 2900 DPI full-res only;
+        # prescan/preview at lower DPI already compensates the CCD offset
         if has_ir:
             channel_offsets = (0,)
-        else:
+        elif fi.get("x_res", 2900) >= 1000:
             channel_offsets = LS40_CHANNEL_OFFSETS
+        else:
+            channel_offsets = (0, 0, 0)
 
         img_arr, trailing = _parse_scan_data(
             bytearray(scan_data),
